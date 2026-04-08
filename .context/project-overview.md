@@ -42,6 +42,15 @@ Parallelization of VS Code workspaces with multiple local git repositories.
 
 ## Installation
 
+### From npm (once published)
+
+```bash
+npm install -g repo-parallelizer
+paralizer
+```
+
+### From source (development)
+
 ```bash
 npm install
 npm run build
@@ -51,7 +60,7 @@ This compiles TypeScript to `dist/` and makes the `paralizer` CLI available.
 
 ## Usage
 
-### Global install (recommended)
+### Global install from source (recommended for development)
 
 ```bash
 npm link
@@ -66,6 +75,32 @@ node dist/index.js
 
 > **Note:** `dist/index.js` does not have the executable bit set after compilation. Use `node dist/index.js` or `npm link` for local execution — not `./dist/index.js` directly.
 
+### Launcher scripts (no npm link required)
+
+Cross-platform convenience scripts are provided in the project root for running the interactive menu without installing globally:
+
+**Unix / macOS:**
+
+```bash
+./menu.sh
+# or pass a subcommand:
+./menu.sh setup
+./menu.sh serve
+```
+
+**Windows:**
+
+```cmd
+menu.cmd
+rem or pass a subcommand:
+menu.cmd setup
+menu.cmd serve
+```
+
+Both scripts `cd` to their own directory before invoking `node dist/index.js menu`, so they work correctly regardless of your current working directory.
+
+> **Note:** `menu.sh` uses `dirname "$0"` — if the script is symlinked, it will `cd` to the symlink's directory rather than the real file's directory.
+
 ### npm scripts
 
 | Script | Description |
@@ -74,11 +109,140 @@ node dist/index.js
 | `npm run dev` | Watch mode — recompile on save (`tsc --watch`) |
 | `npm start` | Run compiled output via `node dist/index.js` |
 
+### Interactive CLI menu
+
+Running `paralizer` (or `node dist/index.js`) with no subcommand drops into the interactive menu — the primary day-to-day interface for the tool.
+
+```
+repo-parallelizer vX.Y.Z
+
+  [S] Setup — Run the setup wizard
+  [G] Launch GUI — Start server and open browser
+  [D] Generate Docs — Run CTX Generator
+  [Q] Quit
+```
+
+Press the highlighted key to select an action:
+
+| Key | Action | Behaviour |
+|-----|--------|-----------|
+| `S` | **Setup** | Runs the interactive setup wizard (`runSetup()`). Returns to the menu when finished. |
+| `G` | **Launch GUI** | Loads `config.json`, starts the HTTP server, prints the server URL, and attempts to open the default browser. The process stays alive (server keeps the event loop running). Press **Ctrl+C** to stop. |
+| `D` | **Generate Docs** | Runs `ctx generate` from the tool root if [CTX Generator](https://github.com/context-hub/generator) is on PATH. Prints installation instructions otherwise. Returns to the menu when finished. |
+| `Q` | **Quit** | Exits the menu cleanly. |
+
+> **Note:** The menu requires a real TTY. Running in a non-interactive environment (piped stdin, CI) will produce a `setRawMode` error because `waitForKey()` depends on `process.stdin.setRawMode`.
+
+### CLI subcommands
+
+Individual actions can also be invoked directly, bypassing the menu:
+
+| Command | Description |
+|---------|-------------|
+| `paralizer menu` | Open the interactive CLI menu (same as running with no arguments). |
+| `paralizer serve` | Start the GUI server directly (requires `config.json`). |
+| `paralizer setup` | Run the setup wizard directly. |
+| `paralizer docs` | Generate documentation directly (requires `ctx` on PATH). |
+
+Any unrecognised command prints the usage summary and exits with code 1:
+
+```
+Usage: paralizer [command]
+
+Commands:
+  menu    Interactive CLI menu (default)
+  serve   Start the GUI server directly
+  setup   Run the setup wizard
+  docs    Generate CTX documentation
+
+Options:
+  --verbose  Show detailed configuration (with 'serve')
+```
+
+### Start Server Directly (`paralizer serve`)
+
+The **serve** command starts the HTTP server without going through the interactive menu. It requires a valid `config.json` at the tool root.
+
+```bash
+paralizer serve
+paralizer serve --verbose
+```
+
+**Behaviour:**
+
+1. Calls `loadConfig()` to read `config.json`. If the file is absent or invalid, prints an error to stderr and suggests running `paralizer setup`, then exits with code 1.
+2. Resolves the static GUI directory (`gui/public/`) relative to the tool root via `getToolRoot()`.
+3. Calls `startServer()` with the loaded config. Prints the server URL on success:
+   ```
+   repo-parallelizer: Server listening on http://localhost:<port>
+   ```
+4. The server keeps the process alive until **Ctrl+C**.
+
+**`--verbose` flag:** When passed (position-independent), prints all five config fields before starting the server:
+
+```
+repo-parallelizer: Configuration loaded successfully.
+  projectsFolder:            /Users/me/projects
+  storageFolder:             data/storage
+  cloneDepth:                50
+  serverPort:                4200
+  gitPollingIntervalSeconds: 30
+```
+
+> **Note:** `paralizer serve` replicates the behaviour of the tool prior to Phase 7 (direct server launch without a menu). Use it in scripts or CI environments where a TTY is not available.
+
+### Generate Docs (`paralizer docs`)
+
+The **Generate Docs** action (available via the menu or `paralizer docs`) runs [CTX Generator](https://github.com/context-hub/generator) (`ctx generate`) from the tool root to produce the `.context/` documentation bundle.
+
+**Prerequisites:** CTX Generator must be installed and available on `PATH`:
+
+```bash
+# Install via npm (example — see the CTX Generator README for the canonical install method)
+npm install -g @context-hub/generator
+```
+
+**Behaviour:**
+
+1. Checks whether `ctx` is on `PATH` using `spawnSync('ctx', ['--version'])`.
+2. If available — runs `ctx generate` from the tool root with real-time terminal output (stdout/stderr piped to the terminal).
+3. If not found — prints an error and the CTX Generator install URL, then returns to the menu.
+
+**Exit codes:** success (`0`) prints a confirmation; any other exit code prints a failure message with the code.
+
 ## Configuration
 
 At runtime the tool reads a `config.json` file located at the tool root (next to `package.json`). This file is **not committed** — create it locally before running the tool.
 
 ### Setup
+
+#### Option A — Interactive setup wizard (recommended)
+
+Run the built-in setup wizard to be guided through creating a valid `config.json` interactively:
+
+```bash
+paralizer setup
+```
+
+The wizard will:
+
+1. Detect whether a `config.json` already exists and offer to overwrite it.
+2. Prompt for `projectsFolder` — the root directory where repositories are cloned. Relative paths are resolved against the tool root. Non-existent directories are offered for automatic creation.
+3. Prompt for `storageFolder` — the directory for internal data files (default: `data/storage`, relative to tool root). Same creation-on-demand behaviour as above.
+4. Prompt for numeric settings with validated defaults:
+
+   | Setting | Default | Constraint |
+   |---------|---------|------------|
+   | `cloneDepth` | `50` | integer ≥ 0 (0 = full clone) |
+   | `serverPort` | `4200` | integer 1–65535 |
+   | `gitPollingIntervalSeconds` | `30` | integer ≥ 1 |
+
+5. Write `config.json` (4-space indented) and call `initializeStorage()` to create the storage directory structure.
+6. Print a confirmation summary with next steps.
+
+> **Tip:** Press **Enter** at any numeric prompt to accept the default value shown in brackets.
+
+#### Option B — Manual setup
 
 1. Copy `config.dist.json` to `config.json`:
    ```bash
@@ -1345,6 +1509,6 @@ Shared helper functions used across all layers.
 ```
 ---
 **File Statistics**
-- **Size**: 387.14 KB
-- **Lines**: 9570
+- **Size**: 67.45 KB
+- **Lines**: 1351
 File: `project-overview.md`

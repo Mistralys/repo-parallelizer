@@ -217,7 +217,7 @@ export function fetchRemote(repoPath: string, remote?: string, timeoutMs?: numbe
 ###  Path: `/src/git/git-cli.ts`
 
 ```ts
-import { spawn } from 'child_process';
+import { spawn } from 'node:child_process';
 import type { GitResult, RunGitOptions } from './git.types.js';
 
 /**

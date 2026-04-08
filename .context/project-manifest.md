@@ -410,7 +410,7 @@ interface FolderConfig {
 }
 
 function getToolRoot(): string
-function getConfigPath(): string
+function getConfigPath(): string  // Honours PARALIZER_CONFIG_PATH env var override
 function getStorageFolder(config: FolderConfig): string
 function getProjectsFolder(config: FolderConfig): string
 ```
@@ -423,6 +423,166 @@ function isValidKebabCase(input: string): boolean
 function inferSlugFromUrl(url: string): string
 function isValidWorkspaceId(id: string): boolean
 ```
+
+---
+
+## CLI Terminal UI (`src/cli/`)
+
+### Terminal UI Utilities (`terminal-ui.ts`)
+
+Output and input helpers for the interactive CLI menu. All output functions use `picocolors` for ANSI color rendering. All interactive functions require a real TTY (`process.stdin.isTTY === true`) — callers must guard accordingly before invoking `waitForKey`, `askQuestion`, or `askYesNo` in non-TTY environments (e.g., CI).
+
+```typescript
+// Output helpers
+function printHeader(text: string): void
+function printOption(key: string, label: string): void
+function printSuccess(text: string): void
+function printError(text: string): void
+function printInfo(text: string): void
+function clearScreen(): void
+
+// Interactive input (TTY required)
+function waitForKey(validKeys: string[]): Promise<string>
+function askQuestion(prompt: string): Promise<string>
+function askYesNo(prompt: string, defaultYes?: boolean): Promise<boolean>
+```
+
+#### Function details
+
+| Function | Output / Behavior |
+|---|---|
+| `printHeader(text)` | Bold cyan text → `stdout` |
+| `printOption(key, label)` | Bold yellow `[key]` + default-color label → `stdout` |
+| `printSuccess(text)` | Green text → `stdout` |
+| `printError(text)` | Red text → `stderr` |
+| `printInfo(text)` | Dim blue text → `stdout` |
+| `clearScreen()` | Writes ANSI reset sequence `\x1Bc` → `stdout` |
+| `waitForKey(validKeys)` | Puts `stdin` in raw mode; resolves with the lowercased key when a key in `validKeys` is pressed. Ctrl+C exits the process (`process.exit(0)`). **TTY required — rejects with `Error` if `process.stdin.isTTY` is falsy.** |
+| `askQuestion(prompt)` | Line-input prompt via `node:readline`; resolves with trimmed user input. |
+| `askYesNo(prompt, defaultYes?)` | Displays `[Y/n]` or `[y/N]` indicator. Empty input resolves to `defaultYes` (default: `true`). Accepts `y`/`yes` → `true`, `n`/`no` → `false`; unrecognised input silently falls back to `defaultYes`. |
+
+---
+
+### Setup Wizard (`setup.ts`)
+
+```typescript
+interface SetupIO {
+    ask: (prompt: string) => Promise<string>;
+    confirm: (prompt: string, defaultYes?: boolean) => Promise<boolean>;
+}
+
+function runSetup(io?: SetupIO): Promise<void>
+
+// Injectable helpers (exported for testing — treat as internal)
+function _promptPath(
+    label: string,
+    defaultValue: string,
+    _ask?: typeof askQuestion,
+    _confirm?: typeof askYesNo,
+): Promise<string>
+
+function _promptNumber(
+    label: string,
+    defaultValue: number,
+    min: number,
+    max: number,
+    _ask?: typeof askQuestion,
+): Promise<number>
+```
+
+Runs the interactive first-time configuration wizard. Guides the user through creating a valid `config.json` step by step.
+
+**Wizard flow:**
+
+1. Prints the header.
+2. Checks for an existing `config.json` — if found, prompts whether to overwrite (returns without changes if the user declines).
+3. Prompts for `projectsFolder` (required absolute or relative path). Offers to create the directory if it does not exist.
+4. Prompts for `storageFolder` (default: `"data/storage"`, relative to tool root). Same creation-on-demand behaviour.
+5. Prompts for `cloneDepth` (integer ≥ 0, default: `50`).
+6. Prompts for `serverPort` (integer 1–65535, default: `4200`).
+7. Prompts for `gitPollingIntervalSeconds` (integer ≥ 1, default: `30`).
+8. Writes `config.json` with 4-space indentation.
+9. Calls `initializeStorage()` to create the storage directory structure.
+10. Prints a success summary with next steps.
+
+**Constants (module-level):**
+
+```typescript
+const DEFAULTS = {
+    cloneDepth: 50,
+    serverPort: 4200,
+    gitPollingIntervalSeconds: 30,
+    storageFolder: 'data/storage',
+}
+```
+
+**Injectable helpers:** `_promptPath` and `_promptNumber` accept optional `_ask`/`_confirm` callback overrides so tests can exercise validation and retry logic without touching stdin. The `_` prefix signals internal-but-exported intent.
+
+---
+
+### Documentation Generator (`docs.ts`)
+
+```typescript
+function generateDocs(): Promise<void>
+```
+
+Runs `ctx generate` from the tool root to produce the `.context/` documentation bundle.
+
+**Behaviour:**
+1. Calls `isCtxAvailable()` (private) — uses `spawnSync('ctx', ['--version'], { stdio: 'ignore' })` to check PATH. Returns `true` when no spawn error occurs **and** the exit status is non-null.
+2. If `ctx` is found — spawns `ctx generate` from `getToolRoot()` with `stdio: ['ignore', 'inherit', 'inherit']` so the user sees real-time output. Resolves with a success or failure message based on the process exit code.
+3. If `ctx` is not found — prints an error and installation instructions (`https://github.com/context-hub/generator`) via `printError` / `printInfo`, then returns.
+
+**Error handling:**
+- Spawn errors (e.g. permission denied after the PATH check) are caught and reported via `printError`.
+- Non-zero exit codes print the code alongside the failure message.
+- `exit code ?? 1` is used as a defensive fallback for SIGKILL terminations.
+
+---
+
+### Interactive CLI Menu (`menu.ts`)
+
+```typescript
+function showMenu(): Promise<void>
+```
+
+Runs the interactive four-option CLI menu in a `while(true)` loop until the user quits or launches the GUI.
+
+**Menu layout:**
+
+```
+repo-parallelizer vX.Y.Z
+
+  [S] Setup — Run the setup wizard
+  [G] Launch GUI — Start server and open browser
+  [D] Generate Docs — Run CTX Generator
+  [Q] Quit
+```
+
+**Key dispatch table:**
+
+| Key | Action | Loop behaviour |
+|-----|--------|----------------|
+| `s` | `await runSetup()` + `await pressAnyKeyToContinue()` | `break` → loops back to menu |
+| `g` | `await launchGui()` | Does **not** return to menu — server keeps process alive |
+| `d` | `await generateDocs()` + `await pressAnyKeyToContinue()` | `break` → loops back to menu |
+| `q` | `return` | Exits `showMenu()` cleanly |
+
+**Private helpers (not exported):**
+
+| Helper | Description |
+|--------|-------------|
+| `getVersion()` | Reads `version` from `package.json` at tool root via `fs.readFileSync`. Cached after first call in a module-level `_version` variable. Returns `'unknown'` on any error. |
+| `launchGui()` | Loads config (`loadConfig()`); on failure prints an error and returns to menu. Resolves `staticDir` as `<toolRoot>/gui/public`, calls `startServer()`, prints the server URL, then calls `openBrowser()`. Blocks forever via `await new Promise<never>(() => {})` — the HTTP server's event loop keeps Node.js alive. |
+| `openBrowser(url)` | Spawns the OS default browser command (`open` on macOS, `cmd /c start` on Windows, `xdg-open` on Linux) with `{ detached: true, stdio: 'ignore' }` and calls `child.unref()` to prevent blocking. Browser spawn failures are silently swallowed — the URL is already visible in the terminal. |
+| `pressAnyKeyToContinue()` | Prints `"Press any key to continue..."` and calls `waitForKey()` with a broad set of printable ASCII keys (a–z, 0–9, space, enter). Ctrl+C during this prompt exits the process (handled by `waitForKey`'s `\x03` guard). |
+
+**Error handling:**
+- Config load failure in `launchGui()` — caught, `printError` + `printInfo`, returns to menu.
+- Server start failure in `launchGui()` — caught, `printError`, returns to menu.
+- Post-start server crash — Node.js process exits; no recovery path (consistent with `src/index.ts`).
+
+**TTY requirement:** `showMenu()` calls `waitForKey()` on every iteration — a real TTY is required. In non-TTY environments `process.stdin.setRawMode` will throw a `TypeError`. Guard with `process.stdin.isTTY` before calling.
 
 ---
 
@@ -761,11 +921,13 @@ Browser → hash change (e.g. #/projects/my-app)
 
 ```
 repo-parallelizer/
-├── package.json                    # Project metadata, scripts, bin declaration
+├── package.json                    # Project metadata, scripts, bin declaration, npm distribution fields
 ├── tsconfig.json                   # TypeScript compiler config (ES2022, Node16)
 ├── config.dist.json                # Template config — copy to config.json
 ├── config.json                     # (gitignored) Runtime config with user paths
 ├── context.yaml                    # CTX Generator root config — imports all modules
+├── menu.sh                         # Unix/macOS launcher script — `./menu.sh [command]`
+├── menu.cmd                        # Windows launcher script — `menu.cmd [command]`
 ├── README.md                       # Project overview and full API docs
 ├── CONTRIBUTING.md                 # Developer guide and conventions
 ├── CHANGELOG.md                    # Release history
@@ -826,6 +988,12 @@ repo-parallelizer/
 │   │   ├── README.md               # Module overview (sourced by CTX)
 │   │   ├── paths.ts                # getToolRoot(), getConfigPath(), folder resolution
 │   │   └── slug.ts                 # toKebabCase(), isValidKebabCase(), inferSlugFromUrl(), isValidWorkspaceId()
+│   │
+│   ├── cli/                        # Interactive CLI — terminal UI, setup wizard, menu, docs
+│   │   ├── terminal-ui.ts          # printHeader, printOption, printSuccess, printError, printInfo, waitForKey, askQuestion, askYesNo, clearScreen
+│   │   ├── setup.ts                # runSetup() — interactive first-time config wizard
+│   │   ├── docs.ts                 # generateDocs() — runs `ctx generate`; falls back to install instructions
+│   │   └── menu.ts                 # showMenu() — interactive main menu (Setup / Launch GUI / Docs / Quit)
 │   │
 │   ├── server/                     # Built-in HTTP server
 │   │   ├── module-context.yaml     # CTX module config
@@ -1186,11 +1354,44 @@ Node.js built-in test runner (`node --test`). No external test framework.
 
 ## CLI Distribution
 
-The `paralizer` binary is declared in `package.json` `"bin"` and can be installed globally via `npm link`.
+### Binary
+
+The `paralizer` binary is declared in `package.json` `"bin"` and can be installed globally via `npm link` or `npm install -g`.
+
+### Launcher Scripts
+
+Two convenience launcher scripts are provided for running the CLI menu without `npm link`:
+
+| File | Platform | Invocation |
+|---|---|---|
+| `menu.sh` | Unix / macOS | `./menu.sh [command] [options]` |
+| `menu.cmd` | Windows | `menu.cmd [command] [options]` |
+
+Both scripts `cd` to their own directory before invoking `node dist/index.js menu "$@"` / `node dist\index.js menu %*`, ensuring the tool resolves paths correctly regardless of the caller's working directory.
+
+> **Note:** `menu.sh` uses `dirname "$0"` (not `realpath`) — if the script is symlinked, the `cd` will target the symlink's location, not the real file's location.
+
+### npm Package Distribution
+
+`package.json` is configured for `npm publish` with the following fields:
+
+| Field | Value | Purpose |
+|---|---|---|
+| `main` | `dist/index.js` | Entry point for `require('repo-parallelizer')` |
+| `files` | `dist/`, `gui/public/`, `config.dist.json`, `menu.sh`, `menu.cmd` | Controls what's included in the published tarball |
+| `keywords` | `git`, `repository`, `workspace`, `vscode`, `parallel`, `clone`, `branch`, `cli` | npm search discoverability |
+| `repository` | `{ type: "git", url: "..." }` | Source repository link on npmjs.com |
+
+`package.json`, `README.md`, and `LICENSE` are always included by npm automatically regardless of the `files` field.
+
+> **Pre-publish checklist:**
+> 1. Replace the placeholder `repository.url` with the actual repository URL.
+> 2. Add a `.npmignore` to exclude `dist/tests/` and `dist/server/__tests__/` (compiled test artefacts add ~700kB to the unpacked tarball).
+> 3. Add `menu.sh text eol=lf` to `.gitattributes` to prevent CRLF conversion on Windows checkouts.
 
 ```
 ---
 **File Statistics**
-- **Size**: 46.27 KB
-- **Lines**: 1193
+- **Size**: 46.32 KB
+- **Lines**: 1197
 File: `project-manifest.md`

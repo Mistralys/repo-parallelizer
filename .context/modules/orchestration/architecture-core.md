@@ -16,7 +16,7 @@ _SOURCE: Orchestrator types and implementation classes_
 ###  Path: `/src/orchestration/branch-orchestrator.ts`
 
 ```ts
-import * as path from 'path';
+import * as path from 'node:path';
 import type { AppConfig } from '../config/config.types.js';
 import type { ProjectManager } from '../models/project/project.manager.js';
 import type { WorkspaceManager } from '../models/workspace/workspace.manager.js';
@@ -309,8 +309,8 @@ export interface BranchSwitchResult {
 ###  Path: `/src/orchestration/project-orchestrator.ts`
 
 ```ts
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { AppConfig } from '../config/config.types.js';
 import type { ProjectManager } from '../models/project/project.manager.js';
 import { STABLE_WORKSPACE_ID } from '../models/workspace/workspace.types.js';
@@ -511,8 +511,8 @@ export class ProjectOrchestrator {
 ###  Path: `/src/orchestration/repository-orchestrator.ts`
 
 ```ts
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { AppConfig } from '../config/config.types.js';
 import type { ProjectManager } from '../models/project/project.manager.js';
 import type { RepositoryManager } from '../models/repository/repository.manager.js';
@@ -743,8 +743,8 @@ export class RepositoryOrchestrator {
 ###  Path: `/src/orchestration/vscode-workspace.ts`
 
 ```ts
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 /**
  * A single folder entry in a VS Code .code-workspace file.
@@ -845,8 +845,8 @@ export function removeWorkspaceFile(filePath: string): void {
 ###  Path: `/src/orchestration/workspace-orchestrator.ts`
 
 ```ts
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { AppConfig } from '../config/config.types.js';
 import type { ProjectManager } from '../models/project/project.manager.js';
 import type { WorkspaceManager } from '../models/workspace/workspace.manager.js';

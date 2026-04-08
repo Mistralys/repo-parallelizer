@@ -50,9 +50,16 @@
     │           └── project-detail.js
     │           └── repositories.js
     │           └── workspace-detail.js
+└── menu.cmd
+└── menu.sh
 └── package-lock.json
 └── package.json
 └── src/
+    ├── cli/
+    │   ├── docs.ts
+    │   ├── menu.ts
+    │   ├── setup.ts
+    │   ├── terminal-ui.ts
     ├── config/
     │   ├── README.md
     │   ├── config.ts
@@ -133,6 +140,7 @@
     │   ├── project.manager.test.ts
     │   ├── repository-orchestrator.test.ts
     │   ├── repository.manager.test.ts
+    │   ├── setup.test.ts
     │   ├── slug.test.ts
     │   ├── storage-init.test.ts
     │   ├── vscode-workspace.test.ts

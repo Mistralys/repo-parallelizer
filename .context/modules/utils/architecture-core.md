@@ -12,8 +12,8 @@ _SOURCE: Path resolution and slug utility functions_
 ###  Path: `/src/utils/paths.ts`
 
 ```ts
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 /**
  * Shape of the folder-path section of config.json.
@@ -66,8 +66,16 @@ export function getToolRoot(): string {
 
 /**
  * Returns the absolute path to the tool's config.json file.
+ *
+ * The path can be overridden via the `PARALIZER_CONFIG_PATH` environment
+ * variable, which is useful in tests and CI to avoid writing to the real
+ * project-root config.json.
  */
 export function getConfigPath(): string {
+    const override = process.env['PARALIZER_CONFIG_PATH'];
+    if (override) {
+        return override;
+    }
     return path.join(getToolRoot(), 'config.json');
 }
 
