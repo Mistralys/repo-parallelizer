@@ -58,7 +58,7 @@
     --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
     --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
 
-    /* Typography */
+    /* Typography — override Pico's default font stack with project choices */
     --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
     --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
     --font-size-xs: 0.75rem;
@@ -68,29 +68,69 @@
     --font-size-xl: 1.25rem;
     --font-size-2xl: 1.5rem;
 
+    /* Button text */
+    --color-btn-text: #fff;
+
     /* Transitions */
     --transition-fast: 150ms ease;
     --transition-base: 200ms ease;
 }
 
 /* --------------------------------------------------------------------------
-   Reset & Base
+   Dark Mode Custom Properties
    -------------------------------------------------------------------------- */
-*,
-*::before,
-*::after {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
+:root[data-theme="dark"] {
+    --color-bg: #1a1a2e;
+    --color-surface: #16213e;
+    --color-border: #374151;
+    --color-border-light: #2d3748;
+    --color-text: #e5e7eb;
+    --color-text-secondary: #9ca3af;
+    --color-text-muted: #6b7280;
+
+    --color-primary: #60a5fa;
+    --color-primary-hover: #93bbfd;
+    --color-primary-light: #1e3a5f;
+
+    --color-danger: #f87171;
+    --color-danger-hover: #fca5a5;
+    --color-danger-light: #450a0a;
+
+    --color-success: #4ade80;
+    --color-success-light: #052e16;
+
+    --color-warning: #fbbf24;
+    --color-warning-light: #451a03;
+
+    --color-info: #22d3ee;
+    --color-info-light: #083344;
+
+    /* Badge dark variants */
+    --badge-clean: #4ade80;
+    --badge-clean-bg: #052e16;
+    --badge-modified: #fbbf24;
+    --badge-modified-bg: #451a03;
+    --badge-ahead: #60a5fa;
+    --badge-ahead-bg: #1e3a5f;
+    --badge-behind: #c084fc;
+    --badge-behind-bg: #3b0764;
+    --badge-conflict: #f87171;
+    --badge-conflict-bg: #450a0a;
+    --badge-error: #f87171;
+    --badge-error-bg: #450a0a;
+
+    /* Button text */
+    --color-btn-text: #fff;
+
+    /* Shadows for dark mode */
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -2px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -4px rgba(0, 0, 0, 0.3);
 }
 
-html {
-    font-size: 16px;
-    line-height: 1.5;
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-}
-
+/* --------------------------------------------------------------------------
+   Base Overrides (coexistence with Pico CSS classless)
+   -------------------------------------------------------------------------- */
 body {
     font-family: var(--font-family);
     color: var(--color-text);
@@ -120,12 +160,14 @@ code, pre {
     align-items: center;
     height: var(--nav-height);
     padding: 0 24px;
+    margin: 0;
     background: var(--color-surface);
     border-bottom: 1px solid var(--color-border);
     box-shadow: var(--shadow-sm);
     position: sticky;
     top: 0;
     z-index: 100;
+    max-width: none;
 }
 
 .nav-brand a {
@@ -144,6 +186,13 @@ code, pre {
 .nav-links {
     display: flex;
     gap: 8px;
+    flex: 1;
+}
+
+#theme-toggle-container {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
 }
 
 .nav-link {
@@ -303,7 +352,7 @@ main {
 }
 
 .btn-primary {
-    color: #fff;
+    color: var(--color-btn-text);
     background: var(--color-primary);
     border-color: var(--color-primary);
 }
@@ -325,7 +374,7 @@ main {
 }
 
 .btn-danger {
-    color: #fff;
+    color: var(--color-btn-text);
     background: var(--color-danger);
     border-color: var(--color-danger);
 }

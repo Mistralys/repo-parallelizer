@@ -1,9 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Repo Parallelizer</title>
+    <link rel="stylesheet" href="css/vendor/pico.classless.min.css">
     <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
@@ -15,8 +16,11 @@
             <a href="#/" class="nav-link">Dashboard</a>
             <a href="#/repositories" class="nav-link">Repositories</a>
         </nav>
+        <div id="theme-toggle-container"></div>
     </header>
 
+    <!-- Pico classless applies max-width/centering to <main>; styles.css
+         overrides this. If styles.css load order changes, layout will shift. -->
     <main>
         <div id="app"></div>
     </main>

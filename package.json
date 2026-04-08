@@ -13,9 +13,12 @@
         "build": "tsc",
         "dev": "tsc --watch",
         "start": "node dist/index.js",
-        "test": "tsc && node --test dist/tests/*.test.js dist/server/__tests__/*.test.js dist/server/__tests__/**/*.test.js"
+        "test": "tsc && node --test dist/tests/*.test.js dist/server/__tests__/*.test.js dist/server/__tests__/**/*.test.js",
+        "copy-vendor": "mkdir -p gui/public/css/vendor && cp node_modules/@picocss/pico/css/pico.classless.min.css gui/public/css/vendor/",
+        "postinstall": "npm run copy-vendor"
     },
     "devDependencies": {
+        "@picocss/pico": "^2.1.1",
         "@types/node": "^25.5.1",
         "jsdom": "^29.0.2",
         "typescript": "^5.4.0"

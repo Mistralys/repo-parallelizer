@@ -18,6 +18,8 @@ import { renderRepositories }                            from './views/repositor
 import { renderProjectDetail, setRouter as setProjectDetailRouter } from './views/project-detail.js';
 import { renderWorkspaceDetail, setRouter as setWorkspaceDetailRouter } from './views/workspace-detail.js';
 import { renderBranchSwitch, setRouter as setBranchSwitchRouter } from './views/branch-switch.js';
+import { createThemeToggle }                             from './components/theme-toggle.js';
+import { initNavHighlight }                              from './utils/nav-highlight.js';
 
 // ---------------------------------------------------------------------------
 // Router instantiation & route registration
@@ -47,6 +49,15 @@ router.register('#/projects/:id/workspaces/:wid', renderWorkspaceDetail);
 router.register('#/projects/:id/workspaces/:wid/branch-switch', renderBranchSwitch);
 
 // ---------------------------------------------------------------------------
+// Theme toggle — apply saved theme before first render to avoid flash
+// ---------------------------------------------------------------------------
+
+const themeToggleContainer = document.getElementById('theme-toggle-container');
+if (themeToggleContainer) {
+    themeToggleContainer.appendChild(createThemeToggle());
+}
+
+// ---------------------------------------------------------------------------
 // Start the router — must be called after all routes are registered
 // ---------------------------------------------------------------------------
 
@@ -56,14 +67,4 @@ router.start();
 // Active nav-link highlighting
 // ---------------------------------------------------------------------------
 
-function updateActiveNavLink() {
-    const hash = location.hash || '#/';
-    document.querySelectorAll('.nav-link').forEach((link) => {
-        const linkHash = link.getAttribute('href');
-        const isActive = hash === linkHash || (linkHash !== '#/' && hash.startsWith(linkHash));
-        link.classList.toggle('active', isActive);
-    });
-}
-
-window.addEventListener('hashchange', updateActiveNavLink);
-updateActiveNavLink();
+initNavHighlight();
