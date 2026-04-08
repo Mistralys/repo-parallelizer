@@ -1,0 +1,8 @@
+{
+    "_instructions": "Copy this file to config.json and fill in the required fields.",
+    "projectsFolder": "",
+    "storageFolder": "",
+    "cloneDepth": 50,
+    "serverPort": 4200,
+    "gitPollingIntervalSeconds": 30
+}
