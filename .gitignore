@@ -80,7 +80,7 @@ out
 
 # Nuxt.js build / generate output
 .nuxt
-dist
+dist/
 
 # Gatsby files
 .cache/
@@ -134,6 +134,16 @@ dist
 !.yarn/sdks
 !.yarn/versions
 
+# repo-parallelizer
+config.json
+
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+
+/docs/agents/**/work.md
+/docs/agents/**/work/
+/docs/agents/**/dependency-analysis.md
+/docs/agents/**/work-packages-draft.md
+/docs/agents/**/pipeline-configuration.md
