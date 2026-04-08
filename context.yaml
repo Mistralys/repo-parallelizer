@@ -1,0 +1,44 @@
+$schema: 'https://raw.githubusercontent.com/context-hub/generator/refs/heads/main/json-schema.json'
+
+mcp:
+  name: "Repo Parallelizer CTX"
+  version: "1.0.0"
+
+project:
+  path: "."
+  alias: "repo-parallelizer"
+
+import:
+  - path: "src/*/module-context.yaml"
+
+documents:
+  - description: 'Project - Folder Structure'
+    outputPath: 'project-folder-structure.md'
+    sources:
+      - type: tree
+        sourcePaths: [ . ]
+        filePattern: '*'
+        renderFormat: ascii
+        maxDepth: 6
+        notPath:
+          - 'node_modules/'
+          - 'dist/'
+          - '.git/'
+          - '.context/'
+          - 'docs/agents/implementation-history/'
+          - 'docs/agents/plans/'
+
+  - description: 'Project - Overview'
+    outputPath: 'project-overview.md'
+    sources:
+      - type: file
+        sourcePaths: [ . ]
+        filePattern: "README.md"
+
+  - description: 'Project - Manifest Documentation'
+    outputPath: 'project-manifest.md'
+    sources:
+      - type: file
+        description: 'Agent project manifest — tech stack, API surface, constraints, data flows, REST API, GUI frontend'
+        sourcePaths: [ docs/agents/project-manifest ]
+        filePattern: "*.md"

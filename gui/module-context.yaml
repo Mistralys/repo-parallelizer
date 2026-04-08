@@ -1,0 +1,59 @@
+moduleMetaData:
+  id: "gui"
+  label: "GUI Frontend"
+  description: "Vanilla JavaScript SPA for managing repositories, projects, and workspaces via the REST API."
+  keywords:
+    - SPA
+    - hash-based routing
+    - REST API client
+    - views
+    - components
+  relatedModules:
+    - server
+
+documents:
+  - description: 'GUI - Overview'
+    outputPath: 'modules/gui/overview.md'
+    sources:
+      - type: file
+        sourcePaths: [ ./ ]
+        filePattern: "README.md"
+
+  - description: 'GUI - Architecture Core'
+    outputPath: 'modules/gui/architecture-core.md'
+    sources:
+      - type: file
+        description: 'Application bootstrap, router, and API client'
+        sourcePaths: [ ./public/js ]
+        filePattern: "*.js"
+        excludePatterns:
+          - 'views/'
+          - 'components/'
+          - 'utils/'
+
+  - description: 'GUI - Architecture Views'
+    outputPath: 'modules/gui/architecture-views.md'
+    sources:
+      - type: file
+        description: 'Page-level view functions'
+        sourcePaths: [ ./public/js/views ]
+        filePattern: "*.js"
+
+  - description: 'GUI - Architecture Components'
+    outputPath: 'modules/gui/architecture-components.md'
+    sources:
+      - type: file
+        description: 'Reusable UI components and utilities'
+        sourcePaths:
+          - ./public/js/components
+          - ./public/js/utils
+        filePattern: "*.js"
+
+  - description: 'GUI - File Structure'
+    outputPath: 'modules/gui/file-structure.md'
+    sources:
+      - type: tree
+        sourcePaths: [ ./public ]
+        filePattern: '*'
+        renderFormat: ascii
+        maxDepth: 4

@@ -6,20 +6,27 @@ repo-parallelizer/
 ├── tsconfig.json                   # TypeScript compiler config (ES2022, Node16)
 ├── config.dist.json                # Template config — copy to config.json
 ├── config.json                     # (gitignored) Runtime config with user paths
+├── context.yaml                    # CTX Generator root config — imports all modules
 ├── README.md                       # Project overview and full API docs
 ├── CONTRIBUTING.md                 # Developer guide and conventions
 ├── CHANGELOG.md                    # Release history
 ├── LICENSE                         # Project license
+│
+├── .context/                       # (generated) CTX output — auto-generated Markdown docs
 │
 ├── src/                            # TypeScript source (rootDir)
 │   ├── index.ts                    # CLI entry point — interactive menu
 │   ├── errors.ts                   # Shared error classes (NotFoundError)
 │   │
 │   ├── config/                     # Configuration loading & types
+│   │   ├── module-context.yaml     # CTX module config
+│   │   ├── README.md               # Module overview (sourced by CTX)
 │   │   ├── config.ts               # loadConfig() — reads and validates config.json
 │   │   └── config.types.ts         # AppConfig interface
 │   │
 │   ├── git/                        # Git CLI wrapper layer (stateless functions)
+│   │   ├── module-context.yaml     # CTX module config
+│   │   ├── README.md               # Module overview (sourced by CTX)
 │   │   ├── git.types.ts            # GitResult, GitStatusInfo, BranchInfo, CloneOptions, RunGitOptions
 │   │   ├── git-cli.ts              # runGit(), runGitOrThrow() — subprocess execution
 │   │   ├── git-clone.ts            # cloneRepository()
@@ -27,6 +34,8 @@ repo-parallelizer/
 │   │   └── git-status.ts           # getGitStatus(), fetchAndGetStatus()
 │   │
 │   ├── models/                     # Stateless data managers (CRUD, disk-backed JSON)
+│   │   ├── module-context.yaml     # CTX module config
+│   │   ├── README.md               # Module overview (sourced by CTX)
 │   │   ├── project/
 │   │   │   ├── project.types.ts    # ProjectData, ProjectWorkspace, ProjectIndexEntry
 │   │   │   └── project.manager.ts  # ProjectManager class
@@ -38,6 +47,8 @@ repo-parallelizer/
 │   │       └── workspace.manager.ts # WorkspaceManager class
 │   │
 │   ├── orchestration/              # High-level composite operations
+│   │   ├── module-context.yaml     # CTX module config
+│   │   ├── README.md               # Module overview (sourced by CTX)
 │   │   ├── orchestration.types.ts  # OrchestrationResult, BranchSwitchResult, etc.
 │   │   ├── project-orchestrator.ts # ProjectOrchestrator — create/delete/rename projects
 │   │   ├── repository-orchestrator.ts # RepositoryOrchestrator — add/remove repos from projects
@@ -46,14 +57,20 @@ repo-parallelizer/
 │   │   └── vscode-workspace.ts     # VS Code .code-workspace file generation
 │   │
 │   ├── storage/                    # JSON persistence primitives
+│   │   ├── module-context.yaml     # CTX module config
+│   │   ├── README.md               # Module overview (sourced by CTX)
 │   │   ├── storage.types.ts        # BaseStore, SchemaVersion
 │   │   └── json-storage.ts         # readJsonFile(), writeJsonFile(), initializeStorage()
 │   │
 │   ├── utils/                      # Shared helpers
+│   │   ├── module-context.yaml     # CTX module config
+│   │   ├── README.md               # Module overview (sourced by CTX)
 │   │   ├── paths.ts                # getToolRoot(), getConfigPath(), folder resolution
 │   │   └── slug.ts                 # toKebabCase(), isValidKebabCase(), inferSlugFromUrl(), isValidWorkspaceId()
 │   │
 │   ├── server/                     # Built-in HTTP server
+│   │   ├── module-context.yaml     # CTX module config
+│   │   ├── README.md               # Module overview (sourced by CTX)
 │   │   ├── index.ts                # startServer(), stopServer()
 │   │   ├── router.ts               # Router class with method-based registration
 │   │   ├── staticServer.ts         # serveStatic() — serves gui/public/
@@ -91,9 +108,13 @@ repo-parallelizer/
 │       └── vscode-workspace.test.ts
 │
 ├── gui/                            # Frontend SPA (served by staticServer)
+│   ├── module-context.yaml         # CTX module config
+│   ├── README.md                   # Module overview (sourced by CTX)
 │   └── public/
 │       ├── index.html              # HTML shell with #app container
 │       ├── css/
+│       │   ├── vendor/             # (gitignored) Generated vendor CSS assets
+│       │   │   └── pico.classless.min.css  # Pico CSS classless — copied by `npm run copy-vendor`
 │       │   └── styles.css          # Full stylesheet with CSS variables
 │       └── js/
 │           ├── app.js              # App bootstrap — route registration
@@ -109,8 +130,10 @@ repo-parallelizer/
 │           │   ├── confirm-dialog.js # Modal confirmation dialog
 │           │   ├── form-helpers.js # Form field generation and validation
 │           │   ├── status-badge.js # Git status badge rendering
+│           │   ├── theme-toggle.js # Light/dark theme toggle button
 │           │   └── toast.js        # Toast notification system
 │           └── utils/
+│               ├── nav-highlight.js # Active nav-link highlighting on hash change
 │               └── normalise.js    # JSON key normalisation (PascalCase ↔ camelCase)
 │
 ├── dist/                           # (gitignored) Compiled JS output

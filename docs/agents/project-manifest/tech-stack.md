@@ -22,6 +22,7 @@ None. The project has **zero runtime dependencies** — all functionality is imp
 |---|---|
 | `typescript` ^5.4.0 | TypeScript compiler |
 | `@types/node` ^25.5.1 | Node.js type definitions |
+| `@picocss/pico` ^2.1.1 | Classless CSS framework — base styling layer for the GUI |
 | `jsdom` ^29.0.2 | DOM simulation for GUI component tests |
 
 ## External Tools
@@ -68,6 +69,8 @@ The frontend is a **vanilla JavaScript SPA** (no framework) using:
 | `dev` | `tsc --watch` | Watch mode — recompile on save |
 | `start` | `node dist/index.js` | Run compiled CLI |
 | `test` | `tsc && node --test dist/tests/*.test.js dist/server/__tests__/*.test.js dist/server/__tests__/**/*.test.js` | Compile then run all tests with Node.js built-in test runner |
+| `copy-vendor` | `mkdir -p gui/public/css/vendor && cp ...pico.classless.min.css gui/public/css/vendor/` | Copy Pico CSS from node_modules to gui vendor directory |
+| `postinstall` | `npm run copy-vendor` | Auto-runs `copy-vendor` after `npm install` |
 
 ## Test Framework
 

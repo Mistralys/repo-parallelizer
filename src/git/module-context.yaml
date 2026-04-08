@@ -1,0 +1,27 @@
+moduleMetaData:
+  id: "git"
+  label: "Git Layer"
+  description: "Stateless functions wrapping Git CLI subprocess calls for clone, branch, and status operations."
+  keywords:
+    - GitResult
+    - GitStatusInfo
+    - BranchInfo
+    - CloneOptions
+  relatedModules:
+    - orchestration
+
+documents:
+  - description: 'Git - Overview'
+    outputPath: 'modules/git/overview.md'
+    sources:
+      - type: file
+        sourcePaths: [ ./ ]
+        filePattern: "README.md"
+
+  - description: 'Git - Architecture'
+    outputPath: 'modules/git/architecture-core.md'
+    sources:
+      - type: file
+        description: 'Git types and CLI wrapper functions'
+        sourcePaths: [ ./ ]
+        filePattern: "*.ts"

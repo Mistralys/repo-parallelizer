@@ -1,0 +1,31 @@
+moduleMetaData:
+  id: "orchestration"
+  label: "Orchestration Layer"
+  description: "High-level composite operations coordinating models and Git commands for multi-step workflows."
+  keywords:
+    - ProjectOrchestrator
+    - RepositoryOrchestrator
+    - WorkspaceOrchestrator
+    - BranchOrchestrator
+    - OrchestrationResult
+  relatedModules:
+    - config
+    - git
+    - models
+    - server
+
+documents:
+  - description: 'Orchestration - Overview'
+    outputPath: 'modules/orchestration/overview.md'
+    sources:
+      - type: file
+        sourcePaths: [ ./ ]
+        filePattern: "README.md"
+
+  - description: 'Orchestration - Architecture'
+    outputPath: 'modules/orchestration/architecture-core.md'
+    sources:
+      - type: file
+        description: 'Orchestrator types and implementation classes'
+        sourcePaths: [ ./ ]
+        filePattern: "*.ts"

@@ -1,0 +1,44 @@
+moduleMetaData:
+  id: "models"
+  label: "Models Layer"
+  description: "Stateless CRUD managers for repositories, projects, and workspaces, backed by JSON files on disk."
+  keywords:
+    - Repository
+    - Project
+    - Workspace
+    - ProjectManager
+    - RepositoryManager
+    - WorkspaceManager
+    - STABLE_WORKSPACE_ID
+  relatedModules:
+    - config
+    - storage
+    - orchestration
+
+documents:
+  - description: 'Models - Overview'
+    outputPath: 'modules/models/overview.md'
+    sources:
+      - type: file
+        sourcePaths: [ ./ ]
+        filePattern: "README.md"
+
+  - description: 'Models - Architecture'
+    outputPath: 'modules/models/architecture-core.md'
+    sources:
+      - type: file
+        description: 'Data types and manager classes for all three model domains'
+        sourcePaths:
+          - ./project
+          - ./repository
+          - ./workspace
+        filePattern: "*.ts"
+
+  - description: 'Models - File Structure'
+    outputPath: 'modules/models/file-structure.md'
+    sources:
+      - type: tree
+        sourcePaths: [ ./ ]
+        filePattern: '*.ts'
+        renderFormat: ascii
+        maxDepth: 3

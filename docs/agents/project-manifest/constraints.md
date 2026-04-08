@@ -65,6 +65,10 @@ Both `storageFolder` and `projectsFolder` in `config.json` accept relative or ab
 - **No framework:** Vanilla JavaScript with ES modules. No build step for the frontend.
 - **JSON key normalisation:** The backend uses PascalCase keys (`Id`, `Name`, `Url`). The `normalise.js` utility maps them to camelCase for frontend use.
 
+## Vendor CSS Assets
+
+The `gui/public/css/vendor/` directory contains CSS files copied from `node_modules` by the `copy-vendor` npm script. These are **generated artifacts** and must not be committed to version control (gitignored). After cloning the repo, run `npm install` — the `postinstall` hook will automatically populate the vendor directory. Currently contains `pico.classless.min.css` from `@picocss/pico`.
+
 ## Build Output
 
 - Compiled output goes to `dist/`. Source maps are generated alongside each `.js` file.

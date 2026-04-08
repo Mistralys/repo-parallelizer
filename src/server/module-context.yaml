@@ -1,0 +1,53 @@
+moduleMetaData:
+  id: "server"
+  label: "HTTP Server"
+  description: "Built-in HTTP server with REST API, static file serving, and periodic git status polling."
+  keywords:
+    - Router
+    - PollingManager
+    - startServer
+    - stopServer
+    - REST API
+  relatedModules:
+    - config
+    - models
+    - orchestration
+    - gui
+
+documents:
+  - description: 'Server - Overview'
+    outputPath: 'modules/server/overview.md'
+    sources:
+      - type: file
+        sourcePaths: [ ./ ]
+        filePattern: "README.md"
+
+  - description: 'Server - Architecture Core'
+    outputPath: 'modules/server/architecture-core.md'
+    sources:
+      - type: file
+        description: 'Server infrastructure: router, static serving, polling, request utilities'
+        sourcePaths: [ ./ ]
+        filePattern: "*.ts"
+        excludePatterns:
+          - 'routes/'
+          - '__tests__/'
+
+  - description: 'Server - Architecture Routes'
+    outputPath: 'modules/server/architecture-routes.md'
+    sources:
+      - type: file
+        description: 'REST API route handlers'
+        sourcePaths: [ ./routes ]
+        filePattern: "*.ts"
+
+  - description: 'Server - File Structure'
+    outputPath: 'modules/server/file-structure.md'
+    sources:
+      - type: tree
+        sourcePaths: [ ./ ]
+        filePattern: '*.ts'
+        notPath:
+          - '__tests__/'
+        renderFormat: ascii
+        maxDepth: 3

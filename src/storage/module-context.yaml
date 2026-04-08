@@ -1,0 +1,28 @@
+moduleMetaData:
+  id: "storage"
+  label: "Storage Layer"
+  description: "Low-level JSON file persistence primitives with typed read/write and storage initialization."
+  keywords:
+    - BaseStore
+    - SchemaVersion
+    - readJsonFile
+    - writeJsonFile
+    - initializeStorage
+  relatedModules:
+    - models
+
+documents:
+  - description: 'Storage - Overview'
+    outputPath: 'modules/storage/overview.md'
+    sources:
+      - type: file
+        sourcePaths: [ ./ ]
+        filePattern: "README.md"
+
+  - description: 'Storage - Architecture'
+    outputPath: 'modules/storage/architecture-core.md'
+    sources:
+      - type: file
+        description: 'Storage types and JSON file operations'
+        sourcePaths: [ ./ ]
+        filePattern: "*.ts"

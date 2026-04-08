@@ -1,0 +1,25 @@
+moduleMetaData:
+  id: "config"
+  label: "Configuration"
+  description: "Loads and validates the application configuration from a JSON file on disk."
+  keywords:
+    - AppConfig
+    - config.json
+  relatedModules:
+    - storage
+
+documents:
+  - description: 'Configuration - Overview'
+    outputPath: 'modules/config/overview.md'
+    sources:
+      - type: file
+        sourcePaths: [ ./ ]
+        filePattern: "README.md"
+
+  - description: 'Configuration - Architecture'
+    outputPath: 'modules/config/architecture-core.md'
+    sources:
+      - type: file
+        description: 'Configuration types and loader'
+        sourcePaths: [ ./ ]
+        filePattern: "*.ts"

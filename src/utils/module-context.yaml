@@ -1,0 +1,28 @@
+moduleMetaData:
+  id: "utils"
+  label: "Utilities"
+  description: "Shared helper functions for path resolution and slug generation/validation."
+  keywords:
+    - toKebabCase
+    - inferSlugFromUrl
+    - getToolRoot
+    - getConfigPath
+  relatedModules:
+    - models
+    - orchestration
+
+documents:
+  - description: 'Utilities - Overview'
+    outputPath: 'modules/utils/overview.md'
+    sources:
+      - type: file
+        sourcePaths: [ ./ ]
+        filePattern: "README.md"
+
+  - description: 'Utilities - Architecture'
+    outputPath: 'modules/utils/architecture-core.md'
+    sources:
+      - type: file
+        description: 'Path resolution and slug utility functions'
+        sourcePaths: [ ./ ]
+        filePattern: "*.ts"

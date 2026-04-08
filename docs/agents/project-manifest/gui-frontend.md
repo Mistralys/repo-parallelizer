@@ -7,7 +7,7 @@ The frontend is a vanilla JavaScript SPA with no build step, served as static fi
 - **Routing:** Hash-based client-side router (`#/path`) with named parameter extraction (`:id`, `:wid`).
 - **Module system:** Native ES modules loaded by the browser. No bundler.
 - **State management:** None — every view fetches fresh data from the REST API on render. Mutations trigger a full view re-render.
-- **Styling:** Single CSS file with CSS custom properties for theming.
+- **Styling:** Pico CSS (classless variant) as base layer, with a custom `styles.css` override layer using CSS custom properties. Light/dark theme switching via `data-theme` attribute on `<html>`.
 
 ## Router
 
@@ -47,6 +47,7 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 | Confirm Dialog | `components/confirm-dialog.js` | `showConfirm(title, message): Promise<void>` | Modal with Cancel/Confirm. Resolves on confirm, rejects on cancel. |
 | Form Helpers | `components/form-helpers.js` | `createFormField()`, `validateRequired()`, `WORKSPACE_ID_PATTERN` | Form field generation and validation. |
 | Status Badge | `components/status-badge.js` | `createStatusBadge(gitStatusInfo): HTMLElement` | Git status badge with branch pill and detail chips. |
+| Theme Toggle | `components/theme-toggle.js` | `createThemeToggle(): HTMLButtonElement` | Light/dark mode toggle button. Reads/persists theme in `localStorage`. |
 | Toast | `components/toast.js` | `showToast(message, type, duration): HTMLElement\|null` | Auto-dismissing notification in `#toast-container`. |
 
 ## Utilities
@@ -54,6 +55,15 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 | Utility | File | Export | Purpose |
 |---|---|---|---|
 | Normalise | `utils/normalise.js` | `normaliseRepo()`, `normaliseProject()`, `normaliseWorkspace()` | Maps PascalCase backend keys to camelCase frontend keys. |
+
+## Theme Switching
+
+The GUI supports manual light/dark mode switching:
+
+- **Mechanism:** The `data-theme` attribute on `<html>` controls the active theme (`"light"` or `"dark"`). Pico CSS v2 reads this attribute for its base styling. The custom `styles.css` remaps all `--color-*` custom properties in a `:root[data-theme="dark"]` block.
+- **Toggle:** A `createThemeToggle()` button in the top nav bar (`#theme-toggle-container`) switches between modes on click.
+- **Persistence:** The selected theme is stored in `localStorage` under the key `"theme"` and restored on page load.
+- **Default:** `"light"` when no stored preference exists.
 
 ## Key Patterns
 
