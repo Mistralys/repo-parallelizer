@@ -79,6 +79,9 @@ function dismissToast(toastEl) {
  *   the container is unavailable.
  */
 export function showToast(message, type, duration = TOAST_DISPLAY_MS) {
+    const VALID_TYPES = new Set(['success', 'error', 'info', 'warning']);
+    const safeType = VALID_TYPES.has(type) ? type : 'info';
+
     const container = getContainer();
     if (!container) return null;
 
@@ -86,7 +89,7 @@ export function showToast(message, type, duration = TOAST_DISPLAY_MS) {
     // Build element
     // ------------------------------------------------------------------
     const toast = document.createElement('div');
-    toast.className = `toast toast-${type}`;
+    toast.className = `toast toast-${safeType}`;
     toast.setAttribute('role', 'status');
     toast.setAttribute('aria-live', 'polite');
 
@@ -100,10 +103,6 @@ export function showToast(message, type, duration = TOAST_DISPLAY_MS) {
     closeBtn.className = 'btn-icon toast-close';
     closeBtn.setAttribute('aria-label', 'Dismiss notification');
     closeBtn.textContent = '×';
-    closeBtn.style.marginLeft = 'auto';
-    closeBtn.style.fontSize = '1.1rem';
-    closeBtn.style.lineHeight = '1';
-    closeBtn.style.pointerEvents = 'auto';
 
     toast.appendChild(text);
     toast.appendChild(closeBtn);

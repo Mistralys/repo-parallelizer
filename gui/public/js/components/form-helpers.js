@@ -47,6 +47,15 @@
 export const WORKSPACE_ID_PATTERN = /^[A-Z]{2,6}$/;
 
 // ---------------------------------------------------------------------------
+// CSS.escape fallback — avoids reliance on the browser-only CSS.escape API
+// (absent in jsdom and older environments).
+// ---------------------------------------------------------------------------
+
+const cssEscape = typeof CSS !== 'undefined' && CSS.escape
+    ? CSS.escape
+    : (s) => s.replace(/([^\w-])/g, '\\$1');
+
+// ---------------------------------------------------------------------------
 // createFormField
 // ---------------------------------------------------------------------------
 
@@ -235,7 +244,7 @@ function clearFieldError(group) {
 export function validateRequired(form, fields) {
     // First pass: clear all existing errors for the listed fields.
     fields.forEach((fieldName) => {
-        const control = form.querySelector(`[name="${CSS.escape(fieldName)}"]`);
+        const control = form.querySelector(`[name="${cssEscape(fieldName)}"]`);
         if (control) {
             const group = control.closest('.form-group');
             if (group) clearFieldError(group);
@@ -247,7 +256,7 @@ export function validateRequired(form, fields) {
     let firstInvalidControl = null;
 
     fields.forEach((fieldName) => {
-        const control = form.querySelector(`[name="${CSS.escape(fieldName)}"]`);
+        const control = form.querySelector(`[name="${cssEscape(fieldName)}"]`);
         if (!control) return; // skip unknown field names
 
         const isEmpty = control.value.trim() === '';

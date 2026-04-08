@@ -89,10 +89,18 @@ export async function serveStatic(
     const ext = path.extname(resolved).toLowerCase();
     const contentType = MIME_TYPES[ext] ?? DEFAULT_MIME;
 
-    res.writeHead(200, {
+    const headers: Record<string, string | number> = {
         'Content-Type': contentType,
         'Content-Length': fileStat.size,
-    });
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'DENY',
+    };
+
+    if (contentType.startsWith('text/html')) {
+        headers['Content-Security-Policy'] = "default-src 'self'";
+    }
+
+    res.writeHead(200, headers);
 
     await new Promise<void>((resolve, reject) => {
         const stream = createReadStream(resolved);

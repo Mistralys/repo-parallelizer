@@ -148,7 +148,7 @@ test('startServer rejects with EADDRINUSE when the port is already bound', async
     const { storageDir, projectsDir, staticDir, cleanup } = makeTempDirs();
     // Grab a real port so we can bind something else to it first.
     const blocker = http.createServer();
-    await new Promise<void>((res) => blocker.listen(0, res));
+    await new Promise<void>((res) => blocker.listen(0, '127.0.0.1', res));
     const boundPort = (blocker.address() as AddressInfo).port;
 
     try {

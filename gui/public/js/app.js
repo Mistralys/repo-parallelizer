@@ -51,3 +51,19 @@ router.register('#/projects/:id/workspaces/:wid/branch-switch', renderBranchSwit
 // ---------------------------------------------------------------------------
 
 router.start();
+
+// ---------------------------------------------------------------------------
+// Active nav-link highlighting
+// ---------------------------------------------------------------------------
+
+function updateActiveNavLink() {
+    const hash = location.hash || '#/';
+    document.querySelectorAll('.nav-link').forEach((link) => {
+        const linkHash = link.getAttribute('href');
+        const isActive = hash === linkHash || (linkHash !== '#/' && hash.startsWith(linkHash));
+        link.classList.toggle('active', isActive);
+    });
+}
+
+window.addEventListener('hashchange', updateActiveNavLink);
+updateActiveNavLink();

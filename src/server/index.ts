@@ -138,7 +138,7 @@ export function startServer(config: ServerConfig): Promise<void> {
             reject(err);
         });
 
-        server.listen(port, () => {
+        server.listen(port, '127.0.0.1', () => {
             // Store module-level references so stopServer() can reach them.
             _server = server;
             _pollingManager = pollingManager;

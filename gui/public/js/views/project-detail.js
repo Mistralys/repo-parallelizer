@@ -44,6 +44,7 @@ import { api } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { showConfirm } from '../components/confirm-dialog.js';
 import { createFormField, validateRequired, WORKSPACE_ID_PATTERN } from '../components/form-helpers.js';
+import { normaliseProject, normaliseRepo, normaliseWorkspace } from '../utils/normalise.js';
 
 // ---------------------------------------------------------------------------
 // Router reference — injected from app.js via setRouter()
@@ -64,54 +65,8 @@ export function setRouter(router) {
 }
 
 // ---------------------------------------------------------------------------
-// Normalisation helpers
+// Normalisation helpers — imported from utils/normalise.js
 // ---------------------------------------------------------------------------
-
-/**
- * Normalise a project object from the backend (Go-style capitalised keys or
- * lowercase — both are supported).
- *
- * @param {Object} project
- * @returns {{ id: string, name: string, description: string, repositories: string[] }}
- */
-function normaliseProject(project) {
-    return {
-        id:           project.Id          || project.id          || '',
-        name:         project.Name        || project.name        || '',
-        description:  project.Description || project.description || '',
-        repositories: Array.isArray(project.Repositories)
-            ? project.Repositories
-            : (Array.isArray(project.repositories) ? project.repositories : []),
-    };
-}
-
-/**
- * Normalise a repository object from the backend.
- *
- * @param {Object} repo
- * @returns {{ id: string, name: string, url: string }}
- */
-function normaliseRepo(repo) {
-    return {
-        id:   repo.Id   || repo.id   || '',
-        name: repo.Name || repo.name || '',
-        url:  repo.Url  || repo.url  || repo.URL || '',
-    };
-}
-
-/**
- * Normalise a workspace object from the backend.
- *
- * @param {Object} ws
- * @returns {{ id: string, description: string, createdAt: string }}
- */
-function normaliseWorkspace(ws) {
-    return {
-        id:          ws.Id          || ws.id          || '',
-        description: ws.Description || ws.description || '',
-        createdAt:   ws.CreatedAt   || ws.createdAt   || ws.created_at || '',
-    };
-}
 
 // ---------------------------------------------------------------------------
 // Loading helper

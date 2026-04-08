@@ -667,6 +667,13 @@ td.mono {
     border: 1px solid var(--color-warning);
 }
 
+.toast-close {
+    margin-left: auto;
+    font-size: 1.1rem;
+    line-height: 1;
+    pointer-events: auto;
+}
+
 .toast.removing {
     animation: toastSlideOut var(--transition-base) ease forwards;
 }

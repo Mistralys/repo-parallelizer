@@ -15,25 +15,7 @@ import { api } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { showConfirm } from '../components/confirm-dialog.js';
 import { createFormField, validateRequired } from '../components/form-helpers.js';
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Normalise a repository object coming from the backend.
- * The backend may use either capitalised or lowercase keys.
- *
- * @param {Object} repo - Raw repository object from the API.
- * @returns {{ id: string, name: string, url: string }}
- */
-function normaliseRepo(repo) {
-    return {
-        id:   repo.Id   || repo.id   || '',
-        name: repo.Name || repo.name || '',
-        url:  repo.Url  || repo.url  || repo.URL || '',
-    };
-}
+import { normaliseRepo } from '../utils/normalise.js';
 
 // ---------------------------------------------------------------------------
 // Table rendering

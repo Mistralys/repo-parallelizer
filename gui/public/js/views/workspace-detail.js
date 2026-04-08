@@ -34,6 +34,7 @@ import { showToast }         from '../components/toast.js';
 import { showConfirm }       from '../components/confirm-dialog.js';
 import { createStatusBadge } from '../components/status-badge.js';
 import { createFormField, validateRequired, WORKSPACE_ID_PATTERN } from '../components/form-helpers.js';
+import { normaliseProject, normaliseWorkspace } from '../utils/normalise.js';
 
 // ---------------------------------------------------------------------------
 // Router reference — injected from app.js via setRouter()
@@ -63,38 +64,9 @@ const POLL_INTERVAL_MS = 10_000;
 const STABLE_WS_ID = 'STABLE';
 
 // ---------------------------------------------------------------------------
-// Normalisation helpers
+// Normalisation helpers — imported from utils/normalise.js
+// extractRepoId and extractRepoName remain local (workspace-detail only).
 // ---------------------------------------------------------------------------
-
-/**
- * Normalise a project object from the backend (Go-style keys or lowercase).
- *
- * @param {Object} project
- * @returns {{ id: string, name: string, description: string, repositories: Array }}
- */
-function normaliseProject(project) {
-    return {
-        id:           project.Id          || project.id          || '',
-        name:         project.Name        || project.name        || '',
-        description:  project.Description || project.description || '',
-        repositories: Array.isArray(project.Repositories)
-            ? project.Repositories
-            : (Array.isArray(project.repositories) ? project.repositories : []),
-    };
-}
-
-/**
- * Normalise a workspace object from the backend.
- *
- * @param {Object} ws
- * @returns {{ id: string, description: string }}
- */
-function normaliseWorkspace(ws) {
-    return {
-        id:          ws.Id          || ws.id          || '',
-        description: ws.Description || ws.description || '',
-    };
-}
 
 /**
  * Extract a repository's ID from either a plain string or an object.
