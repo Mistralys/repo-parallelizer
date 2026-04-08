@@ -16,7 +16,6 @@
     │   │   └── api-surface.md
     │   │   └── constraints.md
     │   │   └── data-flows.md
-    │   │   └── file-tree.md
     │   │   └── gui-frontend.md
     │   │   └── rest-api.md
     │   │   └── tech-stack.md
@@ -156,6 +155,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 5.11 KB
-- **Lines**: 154
+- **Size**: 5.32 KB
+- **Lines**: 162
 File: `project-folder-structure.md`

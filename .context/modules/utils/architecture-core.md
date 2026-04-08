@@ -197,6 +197,6 @@ export function isValidWorkspaceId(id: string): boolean {
 ```
 ---
 **File Statistics**
-- **Size**: 5.99 KB
-- **Lines**: 195
+- **Size**: 6.28 KB
+- **Lines**: 203
 File: `modules/utils/architecture-core.md`

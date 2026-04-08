@@ -12,7 +12,7 @@
 |---|---|
 | [README.md](docs/agents/project-manifest/README.md) | Manifest index — lists all documents. |
 | [tech-stack.md](docs/agents/project-manifest/tech-stack.md) | Runtime, language, frameworks, build tools, architectural patterns. |
-| [file-tree.md](docs/agents/project-manifest/file-tree.md) | Annotated directory structure. |
+| [project-folder-structure.md](.context/project-folder-structure.md) | Directory structure (CTX-generated). |
 | [api-surface.md](docs/agents/project-manifest/api-surface.md) | All exported types, classes, and function signatures. |
 | [data-flows.md](docs/agents/project-manifest/data-flows.md) | Key interaction paths through the system. |
 | [constraints.md](docs/agents/project-manifest/constraints.md) | Conventions, validation rules, security, test patterns. |
@@ -22,7 +22,7 @@
 ### Quick Start Workflow
 
 1. **Read** `tech-stack.md` — understand the runtime, language, and architecture.
-2. **Scan** `file-tree.md` — know where everything lives.
+2. **Scan** `project-folder-structure.md` — know where everything lives.
 3. **Internalize** `constraints.md` — learn the rules before writing code.
 4. **Reference** `api-surface.md` and `rest-api.md` — understand what already exists.
 5. **Only then** read source files for implementation details.
@@ -35,8 +35,8 @@ When you change the codebase, update the corresponding manifest documents.
 
 | Change Made | Documents to Update |
 |---|---|
-| New source file or directory added | `file-tree.md` |
-| Directory restructured or files moved | `file-tree.md` |
+| New source file or directory added | Re-run `ctx generate` |
+| Directory restructured or files moved | Re-run `ctx generate` |
 | Exported type, interface, class, or function added/modified | `api-surface.md` |
 | Dependency added or removed | `tech-stack.md` |
 | Build script or tooling changed | `tech-stack.md` |
@@ -50,7 +50,7 @@ When you change the codebase, update the corresponding manifest documents.
 
 ## 3. Efficiency Rules — Search Smart
 
-- **Finding a file?** Check `file-tree.md` FIRST.
+- **Finding a file?** Check `project-folder-structure.md` (in `.context/`) FIRST.
 - **Understanding a method or type?** Check `api-surface.md` FIRST.
 - **Implementation patterns or tech decisions?** Check `tech-stack.md` FIRST.
 - **Looking for an endpoint?** Check `rest-api.md` FIRST.

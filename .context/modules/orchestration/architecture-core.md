@@ -1119,6 +1119,6 @@ export class WorkspaceOrchestrator {
 ```
 ---
 **File Statistics**
-- **Size**: 43.34 KB
+- **Size**: 43.38 KB
 - **Lines**: 1125
 File: `modules/orchestration/architecture-core.md`

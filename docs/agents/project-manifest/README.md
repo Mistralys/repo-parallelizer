@@ -5,7 +5,7 @@
 | Section | File | Description |
 |---|---|---|
 | Tech Stack & Patterns | [tech-stack.md](tech-stack.md) | Runtime, language, frameworks, architectural patterns, build tools. |
-| File Tree | [file-tree.md](file-tree.md) | Annotated directory structure of the project. |
+| File Tree | [project-folder-structure.md](../../.context/project-folder-structure.md) | Directory structure (CTX-generated via `ctx generate`). |
 | Public API Surface | [api-surface.md](api-surface.md) | Exported types, classes, and function signatures — no implementations. |
 | Key Data Flows | [data-flows.md](data-flows.md) | Main interaction paths through the system. |
 | Constraints & Conventions | [constraints.md](constraints.md) | Established rules, conventions, and non-obvious gotchas. |

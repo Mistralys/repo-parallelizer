@@ -138,6 +138,6 @@ export interface BaseStore {
 ```
 ---
 **File Statistics**
-- **Size**: 4.77 KB
+- **Size**: 4.78 KB
 - **Lines**: 144
 File: `modules/storage/architecture-core.md`
