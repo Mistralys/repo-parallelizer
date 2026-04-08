@@ -674,7 +674,7 @@ The injected `_router` reference is null-guarded in three places — the back-li
 
 #### Key casing
 
-The Go backend returns project and workspace fields with capitalised keys (`Id`, `Name`, `Repositories`, etc.). `project-detail.js` normalises both forms via three internal helpers: `normaliseProject()`, `normaliseRepo()`, and `normaliseWorkspace()`. See the [Normalisation helpers note](#normalisation-helpers-note) below.
+The Go backend returns project and workspace fields with capitalised keys (`Id`, `Name`, `Repositories`, etc.). `project-detail.js` normalises both forms via three shared helpers imported from `utils/normalise.js`: `normaliseProject()`, `normaliseRepo()`, and `normaliseWorkspace()`. See the [Normalisation helpers note](#normalisation-helpers-note) below.
 
 ---
 
@@ -695,7 +695,7 @@ All API errors (list load failures, create/update/delete failures) are displayed
 
 #### Key casing
 
-`repositories.js` normalises backend response keys via `normaliseRepo()` — see the [Normalisation helpers note](#normalisation-helpers-note) below.
+`repositories.js` normalises backend response keys via `normaliseRepo()` imported from `utils/normalise.js` — see the [Normalisation helpers note](#normalisation-helpers-note) below.
 
 ---
 
@@ -745,7 +745,7 @@ Clicking **Rename Workspace** reveals an inline form. The new workspace ID is va
 
 #### Key casing
 
-`workspace-detail.js` normalises backend responses via `normaliseProject()`, `normaliseWorkspace()`, `extractRepoId()`, and `extractRepoName()` — all internal to the module. See the [Normalisation helpers note](#normalisation-helpers-note) below.
+`workspace-detail.js` normalises backend responses via `normaliseProject()` and `normaliseWorkspace()` (imported from `utils/normalise.js`), plus `extractRepoId()` and `extractRepoName()` (local helpers). See the [Normalisation helpers note](#normalisation-helpers-note) below.
 
 ---
 
@@ -1059,10 +1059,10 @@ The Go backend serialises object fields with **capitalised keys** (`Id`, `Name`,
 
 | Helper | Module | Fields normalised |
 |--------|--------|-------------------|
-| `normaliseProject(project)` | `project-detail.js`, `workspace-detail.js` | `id`, `name`, `description`, `repositories` |
-| `normaliseRepo(repo)` | `repositories.js`, `project-detail.js` | `id`, `name`, `url` |
-| `normaliseWorkspace(ws)` | `project-detail.js`, `workspace-detail.js` | `id`, `description`, `createdAt` |
+| `normaliseProject(project)` | `utils/normalise.js` | `id`, `name`, `description`, `repositories` |
+| `normaliseRepo(repo)` | `utils/normalise.js` | `id`, `name`, `url` |
+| `normaliseWorkspace(ws)` | `utils/normalise.js` | `id`, `description`, `createdAt` |
 | `extractRepoId(repo)` | `workspace-detail.js` | Extracts repo ID from string or object (`Id`, `id`, `RepositoryId`, `repositoryId`) |
 | `extractRepoName(repo)` | `workspace-detail.js` | Extracts repo display name, falls back to `extractRepoId()` |
 
-> **Known duplication:** `normaliseRepo()` is defined verbatim in both `repositories.js` and `project-detail.js`. Both handle Go-capitalised and lowercase keys identically. If a future view requires the same helper, it should be extracted to a shared module — the suggested location is `gui/public/js/utils/normalise.js`. Similarly, `normaliseProject()` and `normaliseWorkspace()` are independently defined in both `project-detail.js` and `workspace-detail.js`. No consolidation has been done yet; copies are kept in-place to avoid premature abstraction.
+> **Consolidated:** `normaliseRepo()`, `normaliseProject()`, and `normaliseWorkspace()` are exported from the shared module at `gui/public/js/utils/normalise.js`. All views import from this single source. `extractRepoId()` and `extractRepoName()` remain local to `workspace-detail.js` as they are only used there.
