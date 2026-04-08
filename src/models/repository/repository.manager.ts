@@ -1,4 +1,4 @@
-import * as path from 'path';
+import * as path from 'node:path';
 import type { AppConfig } from '../../config/config.types.js';
 import { readJsonFile, writeJsonFile, FileNotFoundError } from '../../storage/json-storage.js';
 import { inferSlugFromUrl, isValidKebabCase } from '../../utils/slug.js';

@@ -1,0 +1,3 @@
+# Exclude compiled test files from the npm tarball
+dist/tests/
+dist/server/__tests__/

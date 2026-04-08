@@ -1,5 +1,5 @@
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { AppConfig } from '../../config/config.types.js';
 import { readJsonFile, writeJsonFile, FileNotFoundError } from '../../storage/json-storage.js';
 import { toKebabCase, isValidKebabCase } from '../../utils/slug.js';

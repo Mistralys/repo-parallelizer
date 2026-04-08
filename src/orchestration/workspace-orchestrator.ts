@@ -1,5 +1,5 @@
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { AppConfig } from '../config/config.types.js';
 import type { ProjectManager } from '../models/project/project.manager.js';
 import type { WorkspaceManager } from '../models/workspace/workspace.manager.js';

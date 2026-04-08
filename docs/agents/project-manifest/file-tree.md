@@ -2,11 +2,13 @@
 
 ```
 repo-parallelizer/
-├── package.json                    # Project metadata, scripts, bin declaration
+├── package.json                    # Project metadata, scripts, bin declaration, npm distribution fields
 ├── tsconfig.json                   # TypeScript compiler config (ES2022, Node16)
 ├── config.dist.json                # Template config — copy to config.json
 ├── config.json                     # (gitignored) Runtime config with user paths
 ├── context.yaml                    # CTX Generator root config — imports all modules
+├── menu.sh                         # Unix/macOS launcher script — `./menu.sh [command]`
+├── menu.cmd                        # Windows launcher script — `menu.cmd [command]`
 ├── README.md                       # Project overview and full API docs
 ├── CONTRIBUTING.md                 # Developer guide and conventions
 ├── CHANGELOG.md                    # Release history
@@ -67,6 +69,12 @@ repo-parallelizer/
 │   │   ├── README.md               # Module overview (sourced by CTX)
 │   │   ├── paths.ts                # getToolRoot(), getConfigPath(), folder resolution
 │   │   └── slug.ts                 # toKebabCase(), isValidKebabCase(), inferSlugFromUrl(), isValidWorkspaceId()
+│   │
+│   ├── cli/                        # Interactive CLI — terminal UI, setup wizard, menu, docs
+│   │   ├── terminal-ui.ts          # printHeader, printOption, printSuccess, printError, printInfo, waitForKey, askQuestion, askYesNo, clearScreen
+│   │   ├── setup.ts                # runSetup() — interactive first-time config wizard
+│   │   ├── docs.ts                 # generateDocs() — runs `ctx generate`; falls back to install instructions
+│   │   └── menu.ts                 # showMenu() — interactive main menu (Setup / Launch GUI / Docs / Quit)
 │   │
 │   ├── server/                     # Built-in HTTP server
 │   │   ├── module-context.yaml     # CTX module config

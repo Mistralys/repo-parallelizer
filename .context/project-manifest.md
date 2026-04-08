@@ -1118,7 +1118,11 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 
 ### Production
 
-None. The project has **zero runtime dependencies** — all functionality is implemented with Node.js built-in modules (`node:child_process`, `node:fs`, `node:http`, `node:path`, `node:os`, `node:url`, `node:crypto`).
+| Package | Version | Purpose |
+|---|---|---|
+| `picocolors` | ^1.x | Terminal color output for the CLI menu and setup wizard. Zero transitive dependencies. |
+
+> Runtime dependencies are permitted when vetted for size, security, and zero transitive dependencies.
 
 ### Dev Dependencies
 

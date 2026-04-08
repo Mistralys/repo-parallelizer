@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 import * as os from 'os';
-import * as path from 'path';
-import { execSync } from 'child_process';
+import * as path from 'node:path';
+import { execSync } from 'node:child_process';
 import type { AppConfig } from '../config/config.types.js';
 import { initializeStorage } from '../storage/json-storage.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';

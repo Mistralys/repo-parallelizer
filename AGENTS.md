@@ -89,6 +89,6 @@ Do not scan the `src/` tree looking for a function when the manifest already lis
 | **Package manager** | npm >= 9 |
 | **Test framework** | Node.js built-in test runner (`node --test`) |
 | **Build tool** | `tsc` (TypeScript compiler) |
-| **Runtime dependencies** | Zero — Node.js built-ins only |
+| **Runtime dependencies** | `picocolors` (terminal colors) — vetted for zero transitive deps |
 | **Frontend** | Vanilla JS SPA, hash-based routing, no build step |
 | **CLI binary** | `paralizer` (via `npm link`) |

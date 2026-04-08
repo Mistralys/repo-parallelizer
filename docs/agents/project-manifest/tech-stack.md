@@ -14,7 +14,11 @@
 
 ### Production
 
-None. The project has **zero runtime dependencies** — all functionality is implemented with Node.js built-in modules (`node:child_process`, `node:fs`, `node:http`, `node:path`, `node:os`, `node:url`, `node:crypto`).
+| Package | Version | Purpose |
+|---|---|---|
+| `picocolors` | ^1.x | Terminal color output for the CLI menu and setup wizard. Zero transitive dependencies. |
+
+> Runtime dependencies are permitted when vetted for size, security, and zero transitive dependencies.
 
 ### Dev Dependencies
 
@@ -78,4 +82,37 @@ Node.js built-in test runner (`node --test`). No external test framework.
 
 ## CLI Distribution
 
-The `paralizer` binary is declared in `package.json` `"bin"` and can be installed globally via `npm link`.
+### Binary
+
+The `paralizer` binary is declared in `package.json` `"bin"` and can be installed globally via `npm link` or `npm install -g`.
+
+### Launcher Scripts
+
+Two convenience launcher scripts are provided for running the CLI menu without `npm link`:
+
+| File | Platform | Invocation |
+|---|---|---|
+| `menu.sh` | Unix / macOS | `./menu.sh [command] [options]` |
+| `menu.cmd` | Windows | `menu.cmd [command] [options]` |
+
+Both scripts `cd` to their own directory before invoking `node dist/index.js menu "$@"` / `node dist\index.js menu %*`, ensuring the tool resolves paths correctly regardless of the caller's working directory.
+
+> **Note:** `menu.sh` uses `dirname "$0"` (not `realpath`) — if the script is symlinked, the `cd` will target the symlink's location, not the real file's location.
+
+### npm Package Distribution
+
+`package.json` is configured for `npm publish` with the following fields:
+
+| Field | Value | Purpose |
+|---|---|---|
+| `main` | `dist/index.js` | Entry point for `require('repo-parallelizer')` |
+| `files` | `dist/`, `gui/public/`, `config.dist.json`, `menu.sh`, `menu.cmd` | Controls what's included in the published tarball |
+| `keywords` | `git`, `repository`, `workspace`, `vscode`, `parallel`, `clone`, `branch`, `cli` | npm search discoverability |
+| `repository` | `{ type: "git", url: "..." }` | Source repository link on npmjs.com |
+
+`package.json`, `README.md`, and `LICENSE` are always included by npm automatically regardless of the `files` field.
+
+> **Pre-publish checklist:**
+> 1. Replace the placeholder `repository.url` with the actual repository URL.
+> 2. Add a `.npmignore` to exclude `dist/tests/` and `dist/server/__tests__/` (compiled test artefacts add ~700kB to the unpacked tarball).
+> 3. Add `menu.sh text eol=lf` to `.gitattributes` to prevent CRLF conversion on Windows checkouts.

@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 import * as net from 'net';
 import * as os from 'os';
-import * as path from 'path';
+import * as path from 'node:path';
 import { runGit, runGitOrThrow } from '../git/git-cli.js';
 
 // ─── Fixture setup ────────────────────────────────────────────────────────────

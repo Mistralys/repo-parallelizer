@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `menu.sh` — Unix/macOS launcher script. `cd`s to its own directory then invokes `node dist/index.js menu "$@"`. Executable bit set (`chmod +x`). Allows running the interactive CLI without `npm link`.
+- `menu.cmd` — Windows launcher script. Uses `cd /d "%~dp0"` (drive-letter-safe) then invokes `node dist\index.js menu %*`. Allows running the interactive CLI on Windows without `npm link`.
+- `src/cli/setup.ts` — Interactive first-time setup wizard (`runSetup(): Promise<void>`). Guides the user through creating a valid `config.json` from scratch: prompts for `projectsFolder` and `storageFolder` (with optional directory creation), collects `cloneDepth` (≥ 0), `serverPort` (1–65535), and `gitPollingIntervalSeconds` (≥ 1) with sensible defaults (50 / 4200 / 30), writes the config with 4-space JSON indentation, and then calls `initializeStorage()`. Run via `paralizer setup`.
+- `src/tests/setup.test.ts` — 22 unit and integration tests for `_promptPath`, `_promptNumber`, and the `loadConfig()` round-trip. All tests use injectable mock callbacks to exercise validation and retry logic without touching stdin.
+- `src/cli/docs.ts` — Documentation generation command (`generateDocs(): Promise<void>`). Checks for [CTX Generator](https://github.com/context-hub/generator) on PATH via `spawnSync`; if available, spawns `ctx generate` from the tool root with inherited stdio for real-time output. Falls back to actionable install instructions when `ctx` is not found.
+- `src/cli/menu.ts` — Interactive CLI menu (`showMenu(): Promise<void>`). Displays the four main actions (Setup, Launch GUI, Generate Docs, Quit) in a `while(true)` loop using `waitForKey`. Dispatches to `runSetup()`, `launchGui()` (loads config, starts the HTTP server, opens the default browser, blocks until Ctrl+C), `generateDocs()`, or a clean exit. Reads and caches the tool version from `package.json` for display in the header.
+
+### Changed
+
+- `package.json` — Added npm distribution fields: `main` (`dist/index.js`), `files` (`dist/`, `gui/public/`, `config.dist.json`, `menu.sh`, `menu.cmd`), `keywords` (8 terms: git, repository, workspace, vscode, parallel, clone, branch, cli), and `repository` (type + url). These fields complete the package for `npm publish`.
+- `src/index.ts` — Rewritten from a single-purpose server launcher into a full CLI command dispatcher. Parses `process.argv[2]` (defaults to `'menu'` via nullish coalescing) and routes to: `showMenu()` (`menu`), `startServerCommand()` (`serve`), `runSetup()` (`setup`), `generateDocs()` (`docs`), or `printUsage()` + `process.exit(1)` for any unrecognised command. The `serve` path wraps `loadConfig()` in a try/catch that emits a helpful "Run `paralizer setup`" hint and exits with code 1 on failure; it also supports a `--verbose` flag that prints all five config fields before starting the server. Static-directory resolution migrated from `path.resolve(__dirname, '..', 'gui', 'public')` to `path.resolve(getToolRoot(), 'gui', 'public')` for consistency with `src/cli/menu.ts`. Top-level async dispatch uses a CJS-compatible async IIFE.
+
 ## [0.3.0] - 2026-04-03
 
 ### Added

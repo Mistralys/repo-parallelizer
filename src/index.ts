@@ -3,29 +3,83 @@
 /**
  * CLI entry point for repo-parallelizer.
  *
- * On success: loads config.json from the tool root, starts the HTTP server,
- * and logs a success message including the port number.
+ * Dispatches to the appropriate action based on the first CLI argument:
  *
- * On failure: writes a human-readable error message to stderr and exits
- * with code 1. Common failure reasons:
- *  - config.json is missing — copy config.dist.json to config.json and fill
- *    in the required fields (see config.dist.json for defaults).
- *  - config.json is missing one or more required fields:
- *      - `projectsFolder`            — path to the directory where repositories are cloned
- *      - `storageFolder`             — path to the directory where JSON data files are stored
- *      - `serverPort`                — TCP port the HTTP server will listen on (e.g. 4200)
- *      - `gitPollingIntervalSeconds` — how often (in seconds) git remotes are polled
- *      - `cloneDepth`                — depth passed to `git clone --depth` (0 = full clone)
- *  - config.json contains malformed JSON
- *  - The configured port is already in use
+ *   paralizer           → Interactive CLI menu (default)
+ *   paralizer menu      → Interactive CLI menu
+ *   paralizer serve     → Start the HTTP server directly (requires config.json)
+ *   paralizer setup     → Run the setup wizard (no config.json required)
+ *   paralizer docs      → Generate CTX documentation (no config.json required)
+ *   paralizer <other>   → Print usage help and exit with code 1
+ *
+ * Options:
+ *   --verbose   (with 'serve') Print detailed configuration before starting.
  */
 import * as path from 'node:path';
 import { loadConfig } from './config/config.js';
 import { startServer } from './server/index.js';
+import { showMenu } from './cli/menu.js';
+import { runSetup } from './cli/setup.js';
+import { generateDocs } from './cli/docs.js';
+import { getToolRoot } from './utils/paths.js';
 
-try {
-    const config = loadConfig();
+// ---------------------------------------------------------------------------
+// Command dispatch
+// ---------------------------------------------------------------------------
+
+const command = process.argv[2] ?? 'menu';
+
+(async () => {
+    switch (command) {
+        case 'menu':
+            await showMenu();
+            break;
+
+        case 'serve':
+            await startServerCommand();
+            break;
+
+        case 'setup':
+            await runSetup();
+            break;
+
+        case 'docs':
+            await generateDocs();
+            break;
+
+        default:
+            printUsage();
+            process.exit(1);
+    }
+})().catch((err) => {
+    process.stderr.write(`repo-parallelizer: unexpected error: ${(err as Error).message}\n`);
+    process.exit(1);
+});
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Loads config and starts the HTTP server directly (the 'serve' command).
+ *
+ * Exits with code 1 if config cannot be loaded, printing a helpful suggestion
+ * to run 'paralizer setup'.
+ *
+ * Supports --verbose to print a detailed config summary before starting.
+ */
+async function startServerCommand(): Promise<void> {
+    let config;
+    try {
+        config = loadConfig();
+    } catch (err) {
+        process.stderr.write(`repo-parallelizer error: ${(err as Error).message}\n`);
+        process.stderr.write(`Run 'paralizer setup' to create a config file.\n`);
+        process.exit(1);
+    }
+
     console.log('repo-parallelizer: Configuration loaded successfully.');
+
     if (process.argv.includes('--verbose')) {
         console.log(`  projectsFolder:            ${config.projectsFolder}`);
         console.log(`  storageFolder:             ${config.storageFolder}`);
@@ -38,20 +92,34 @@ try {
     // (no "type": "module" in package.json + tsconfig module:Node16 → CJS output).
     // Do NOT replace with fileURLToPath(import.meta.url) — that is ESM-only and
     // would fail to compile in CJS mode.
-    const staticDir = path.resolve(__dirname, '..', 'gui', 'public');
+    const staticDir = path.resolve(getToolRoot(), 'gui', 'public');
 
-    startServer({
-        appConfig: config,
-        staticDir,
-        serverPort: config.serverPort,
-        pollIntervalSeconds: config.gitPollingIntervalSeconds,
-    }).then(() => {
+    try {
+        await startServer({
+            appConfig: config,
+            staticDir,
+            serverPort: config.serverPort,
+            pollIntervalSeconds: config.gitPollingIntervalSeconds,
+        });
         console.log(`repo-parallelizer: Server listening on http://localhost:${config.serverPort}`);
-    }).catch((err) => {
+    } catch (err) {
         process.stderr.write(`repo-parallelizer error: ${(err as Error).message}\n`);
         process.exit(1);
-    });
-} catch (err) {
-    process.stderr.write(`repo-parallelizer error: ${(err as Error).message}\n`);
-    process.exit(1);
+    }
+}
+
+/**
+ * Prints a concise usage / help message to stdout.
+ */
+function printUsage(): void {
+    console.log(`Usage: paralizer [command]
+
+Commands:
+  menu    Interactive CLI menu (default)
+  serve   Start the GUI server directly
+  setup   Run the setup wizard
+  docs    Generate CTX documentation
+
+Options:
+  --verbose  Show detailed configuration (with 'serve')`);
 }
