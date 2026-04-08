@@ -34,6 +34,10 @@ documents:
       - type: file
         sourcePaths: [ . ]
         filePattern: "README.md"
+        excludePatterns:
+          - 'node_modules/'
+          - 'dist/'
+          - '.context/'
 
   - description: 'Project - Manifest Documentation'
     outputPath: 'project-manifest.md'

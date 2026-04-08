@@ -1,0 +1,1008 @@
+# Server - Architecture Routes
+_SOURCE: REST API route handlers_
+# REST API route handlers
+```
+// Structure of documents
+└── src/
+    └── server/
+        └── routes/
+            └── branches.ts
+            └── projects.ts
+            └── repositories.ts
+            └── status.ts
+            └── workspaces.ts
+
+```
+###  Path: `/src/server/routes/branches.ts`
+
+```ts
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Router } from '../router.js';
+import type { BranchOrchestrator } from '../../orchestration/branch-orchestrator.js';
+import type { WorkspaceManager } from '../../models/workspace/workspace.manager.js';
+import { NotFoundError } from '../../errors.js';
+import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
+import type { BranchInfo } from '../../git/git.types.js';
+
+// ---------------------------------------------------------------------------
+// Response shape for the GET branches endpoint
+// ---------------------------------------------------------------------------
+
+export interface BranchesResponse {
+    /** Branches grouped by repository ID. */
+    branches: Record<string, BranchInfo[]>;
+    /** Compiled, sorted, deduplicated branch name suggestions for UI. */
+    suggestions: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Route registration
+// ---------------------------------------------------------------------------
+
+/**
+ * Registers the two branch-related routes nested under a workspace on the
+ * provided `Router` instance.
+ *
+ * | Method | Path                                                      | Success | Failure |
+ * |--------|-----------------------------------------------------------|---------|---------|
+ * | GET    | /api/projects/:id/workspaces/:wid/branches               | 200     | 404     |
+ * | POST   | /api/projects/:id/workspaces/:wid/branches/switch        | 200     | 400/404 |
+ *
+ * @param router           - The Router to register routes on.
+ * @param orchestrator     - Provides `getAvailableBranches()`, `compileBranchSuggestions()`,
+ *                           and `switchBranches()`.
+ * @param workspaceManager - Used to verify that the requested workspace exists before
+ *                           delegating to the orchestrator.
+ */
+export function registerBranchRoutes(
+    router: Router,
+    orchestrator: BranchOrchestrator,
+    workspaceManager: WorkspaceManager,
+): void {
+    // ------------------------------------------------------------------
+    // GET /api/projects/:id/workspaces/:wid/branches
+    //   Returns available branches per repository + compiled suggestions.
+    // ------------------------------------------------------------------
+    router.get('/api/projects/:id/workspaces/:wid/branches', async (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const { id: projectId, wid: workspaceId } = params;
+
+        // Validate workspace existence before issuing git operations.
+        try {
+            const ws = workspaceManager.getById(projectId, workspaceId);
+            if (ws === undefined) {
+                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
+                return;
+            }
+        } catch (err) {
+            // getById throws when the project does not exist.
+            sendError(res, 404, err instanceof Error ? err.message : 'Project not found.');
+            return;
+        }
+
+        try {
+            const branchMap = await orchestrator.getAvailableBranches(projectId, workspaceId);
+            const suggestions = orchestrator.compileBranchSuggestions(branchMap);
+
+            // Convert the Map to a plain object for JSON serialisation.
+            const branches: Record<string, BranchInfo[]> = {};
+            for (const [repoId, infos] of branchMap) {
+                branches[repoId] = infos;
+            }
+
+            const payload: BranchesResponse = { branches, suggestions };
+            sendJson(res, 200, payload);
+        } catch (err) {
+            if (err instanceof NotFoundError) {
+                sendError(res, 404, err.message);
+            } else {
+                sendError(res, 500, 'Internal server error.');
+            }
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // POST /api/projects/:id/workspaces/:wid/branches/switch
+    //   Executes branch-switch assignments, returns per-repo results.
+    // ------------------------------------------------------------------
+    router.post('/api/projects/:id/workspaces/:wid/branches/switch', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const { id: projectId, wid: workspaceId } = params;
+
+        // Validate workspace existence before touching the filesystem.
+        try {
+            const ws = workspaceManager.getById(projectId, workspaceId);
+            if (ws === undefined) {
+                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
+                return;
+            }
+        } catch (err) {
+            sendError(res, 404, err instanceof Error ? err.message : 'Project not found.');
+            return;
+        }
+
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { assignments } = body as { assignments?: unknown };
+
+        if (!isPlainObject(assignments)) {
+            sendError(res, 400, 'Missing or invalid field: assignments must be a non-empty object.');
+            return;
+        }
+
+        if (Object.keys(assignments).length === 0) {
+            sendError(res, 400, 'Field assignments must not be empty.');
+            return;
+        }
+
+        // Ensure all values are strings.
+        for (const [key, value] of Object.entries(assignments)) {
+            if (typeof value !== 'string') {
+                sendError(res, 400, `Assignment value for repository "${key}" must be a string branch name.`);
+                return;
+            }
+        }
+
+        const branchAssignments = assignments as Record<string, string>;
+
+        try {
+            const result = await orchestrator.switchBranches(projectId, workspaceId, branchAssignments);
+            sendJson(res, 200, result);
+        } catch (err) {
+            sendError(res, 500, err instanceof Error ? err.message : 'Branch switch failed.');
+        }
+    });
+}
+
+```
+###  Path: `/src/server/routes/projects.ts`
+
+```ts
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Router } from '../router.js';
+import type { ProjectManager } from '../../models/project/project.manager.js';
+import { NotFoundError } from '../../errors.js';
+import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
+
+// ---------------------------------------------------------------------------
+// Route registration
+// ---------------------------------------------------------------------------
+
+/**
+ * Registers the eight standard routes for the `/api/projects` resource group
+ * and its nested `/repositories` sub-resource on the provided `Router` instance.
+ *
+ * All handlers delegate to the supplied `ProjectManager` (and optionally
+ * `RepositoryManager`) and map results or errors to the appropriate HTTP
+ * status codes:
+ *
+ * | Method | Path                                      | Success | Failure |
+ * |--------|-------------------------------------------|---------|---------|
+ * | GET    | /api/projects                             | 200     | —       |
+ * | GET    | /api/projects/:id                         | 200     | 404     |
+ * | POST   | /api/projects                             | 201     | 400     |
+ * | PUT    | /api/projects/:id                         | 200     | 404     |
+ * | PUT    | /api/projects/:id/rename                  | 200     | 404/400 |
+ * | DELETE | /api/projects/:id                         | 204     | 404     |
+ * | POST   | /api/projects/:id/repositories            | 200     | 404/400 |
+ * | DELETE | /api/projects/:id/repositories/:repoId   | 204     | 404     |
+ */
+export function registerProjectRoutes(
+    router: Router,
+    projectManager: ProjectManager,
+): void {
+    // ------------------------------------------------------------------
+    // GET /api/projects — list all
+    // ------------------------------------------------------------------
+    router.get('/api/projects', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): void => {
+        const projects = projectManager.list();
+        sendJson(res, 200, projects);
+    });
+
+    // ------------------------------------------------------------------
+    // GET /api/projects/:id — get one by ID
+    // ------------------------------------------------------------------
+    router.get('/api/projects/:id', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        const project = projectManager.getById(params['id']);
+        if (project === undefined) {
+            sendError(res, 404, `Project with ID "${params['id']}" not found.`);
+            return;
+        }
+        sendJson(res, 200, project);
+    });
+
+    // ------------------------------------------------------------------
+    // POST /api/projects — create
+    // ------------------------------------------------------------------
+    router.post('/api/projects', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): Promise<void> => {
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { name, repositoryIds, description, id } = body as {
+            name?: unknown;
+            repositoryIds?: unknown;
+            description?: unknown;
+            id?: unknown;
+        };
+
+        if (typeof name !== 'string' || name.trim() === '') {
+            sendError(res, 400, 'Missing required field: name (non-empty string).');
+            return;
+        }
+
+        const repoIds: string[] = [];
+        if (repositoryIds !== undefined) {
+            if (!Array.isArray(repositoryIds)) {
+                sendError(res, 400, 'Field repositoryIds must be an array of strings.');
+                return;
+            }
+            for (const rid of repositoryIds as unknown[]) {
+                if (typeof rid !== 'string') {
+                    sendError(res, 400, 'Field repositoryIds must contain only strings.');
+                    return;
+                }
+                repoIds.push(rid);
+            }
+        }
+
+        const explicitId = typeof id === 'string' ? id : undefined;
+        const desc = typeof description === 'string' ? description : undefined;
+
+        try {
+            const project = projectManager.create(name.trim(), repoIds, desc, explicitId);
+            sendJson(res, 201, project);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Could not create project.');
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // PUT /api/projects/:id — update name / description
+    // ------------------------------------------------------------------
+    router.put('/api/projects/:id', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const id = params['id'];
+
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { name, description } = body as { name?: unknown; description?: unknown };
+
+        const changes: { Name?: string; Description?: string } = {};
+        if (typeof name === 'string') changes.Name = name;
+        if (typeof description === 'string') changes.Description = description;
+
+        if (Object.keys(changes).length === 0) {
+            sendError(res, 400, 'At least one of name or description must be provided.');
+            return;
+        }
+
+        try {
+            const updated = projectManager.update(id, changes);
+            sendJson(res, 200, updated);
+        } catch (err) {
+            sendError(res, 404, err instanceof Error ? err.message : 'Project not found.');
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // PUT /api/projects/:id/rename — rename (change project ID)
+    // ------------------------------------------------------------------
+    router.put('/api/projects/:id/rename', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const oldId = params['id'];
+
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { newId } = body as { newId?: unknown };
+
+        if (typeof newId !== 'string' || newId.trim() === '') {
+            sendError(res, 400, 'Missing required field: newId (non-empty string).');
+            return;
+        }
+
+        try {
+            const renamed = projectManager.rename(oldId, newId.trim());
+            sendJson(res, 200, renamed);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Could not rename project.';
+            const is404 = err instanceof NotFoundError;
+            sendError(res, is404 ? 404 : 400, msg);
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // DELETE /api/projects/:id — delete a project
+    // ------------------------------------------------------------------
+    router.delete('/api/projects/:id', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        try {
+            projectManager.remove(params['id']);
+        } catch {
+            sendError(res, 404, `Project with ID "${params['id']}" not found.`);
+            return;
+        }
+        res.writeHead(204, {});
+        res.end('');
+    });
+
+    // ------------------------------------------------------------------
+    // POST /api/projects/:id/repositories — link a repo to a project
+    // ------------------------------------------------------------------
+    router.post('/api/projects/:id/repositories', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const projectId = params['id'];
+
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { repositoryId } = body as { repositoryId?: unknown };
+
+        if (typeof repositoryId !== 'string' || repositoryId.trim() === '') {
+            sendError(res, 400, 'Missing required field: repositoryId (non-empty string).');
+            return;
+        }
+
+        try {
+            const updated = projectManager.addRepository(projectId, repositoryId.trim());
+            sendJson(res, 200, updated);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Could not link repository.';
+            const is404 = err instanceof NotFoundError;
+            sendError(res, is404 ? 404 : 400, msg);
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // DELETE /api/projects/:id/repositories/:repoId — unlink a repo
+    // ------------------------------------------------------------------
+    router.delete('/api/projects/:id/repositories/:repoId', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        try {
+            projectManager.removeRepository(params['id'], params['repoId']);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Not found.';
+            sendError(res, 404, msg);
+            return;
+        }
+        res.writeHead(204, {});
+        res.end('');
+    });
+}
+
+```
+###  Path: `/src/server/routes/repositories.ts`
+
+```ts
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Router } from '../router.js';
+import type { RepositoryManager } from '../../models/repository/repository.manager.js';
+import { NotFoundError } from '../../errors.js';
+import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
+
+// ---------------------------------------------------------------------------
+// Route registration
+// ---------------------------------------------------------------------------
+
+/**
+ * Registers the five standard CRUD routes for the `/api/repositories` resource
+ * group on the provided `Router` instance.
+ *
+ * All handlers delegate to the supplied `RepositoryManager` and map results
+ * or errors to the appropriate HTTP status codes:
+ *
+ * | Method | Path                    | Success | Failure       |
+ * |--------|-------------------------|---------|---------------|
+ * | GET    | /api/repositories       | 200     | —             |
+ * | GET    | /api/repositories/:id   | 200     | 404           |
+ * | POST   | /api/repositories       | 201     | 400           |
+ * | PUT    | /api/repositories/:id   | 200     | 404           |
+ * | DELETE | /api/repositories/:id   | 204     | 404           |
+ */
+export function registerRepositoryRoutes(
+    router: Router,
+    repoManager: RepositoryManager,
+): void {
+    // ------------------------------------------------------------------
+    // GET /api/repositories — list all
+    // ------------------------------------------------------------------
+    router.get('/api/repositories', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): void => {
+        const repos = repoManager.list();
+        sendJson(res, 200, repos);
+    });
+
+    // ------------------------------------------------------------------
+    // GET /api/repositories/:id — get one
+    // ------------------------------------------------------------------
+    router.get('/api/repositories/:id', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        const repo = repoManager.getById(params['id']);
+        if (repo === undefined) {
+            sendError(res, 404, `Repository with ID "${params['id']}" not found.`);
+            return;
+        }
+        sendJson(res, 200, repo);
+    });
+
+    // ------------------------------------------------------------------
+    // POST /api/repositories — create
+    // ------------------------------------------------------------------
+    router.post('/api/repositories', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): Promise<void> => {
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { url, name, id } = body as {
+            url?: unknown;
+            name?: unknown;
+            id?: unknown;
+        };
+
+        if (typeof url !== 'string' || url.trim() === '') {
+            sendError(res, 400, 'Missing required field: url (non-empty string).');
+            return;
+        }
+
+        const params: { url: string; name?: string; id?: string } = { url: url.trim() };
+        if (typeof name === 'string') params.name = name;
+        if (typeof id === 'string') params.id = id;
+
+        try {
+            const repo = repoManager.add(params);
+            sendJson(res, 201, repo);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Could not create repository.');
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // PUT /api/repositories/:id — update
+    // ------------------------------------------------------------------
+    router.put('/api/repositories/:id', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const id = params['id'];
+
+        if (!repoManager.exists(id)) {
+            sendError(res, 404, `Repository with ID "${id}" not found.`);
+            return;
+        }
+
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { name } = body as { name?: unknown };
+
+        if (typeof name !== 'string' || name.trim() === '') {
+            sendError(res, 400, 'Missing required field: name (non-empty string).');
+            return;
+        }
+
+        try {
+            const updated = repoManager.update(id, { name: name.trim() });
+            sendJson(res, 200, updated);
+        } catch (err) {
+            // update() throws NotFoundError if the ID was removed
+            // between the exists() check and the update() call (race condition).
+            if (err instanceof NotFoundError) {
+                sendError(res, 404, err.message);
+            } else {
+                sendError(res, 500, 'Internal server error.');
+            }
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // DELETE /api/repositories/:id — delete
+    // ------------------------------------------------------------------
+    router.delete('/api/repositories/:id', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        const id = params['id'];
+
+        try {
+            repoManager.remove(id);
+        } catch (err) {
+            if (err instanceof NotFoundError) {
+                sendError(res, 404, `Repository with ID "${id}" not found.`);
+            } else {
+                sendError(res, 500, 'Internal server error.');
+            }
+            return;
+        }
+
+        // 204 No Content — no body
+        res.writeHead(204, {});
+        res.end('');
+    });
+}
+
+```
+###  Path: `/src/server/routes/status.ts`
+
+```ts
+import * as path from 'node:path';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Router } from '../router.js';
+import type { PollingManager } from '../pollingManager.js';
+import type { ProjectManager } from '../../models/project/project.manager.js';
+import type { WorkspaceManager } from '../../models/workspace/workspace.manager.js';
+import type { AppConfig } from '../../config/config.types.js';
+import type { GitStatusInfo } from '../../git/git.types.js';
+import { NotFoundError } from '../../errors.js';
+import { sendJson, sendError } from '../requestUtils.js';
+
+// ---------------------------------------------------------------------------
+// Response shape
+// ---------------------------------------------------------------------------
+
+/**
+ * Keyed by repository ID; values are the cached status snapshot (or null if
+ * the repository has not been polled yet).
+ */
+export type WorkspaceStatusResponse = Record<string, GitStatusInfo | null>;
+
+// ---------------------------------------------------------------------------
+// Route registration
+// ---------------------------------------------------------------------------
+
+/**
+ * Registers the two git-status routes nested under a workspace on the
+ * provided `Router` instance.
+ *
+ * | Method | Path                                                 | Success | Failure |
+ * |--------|------------------------------------------------------|---------|---------|
+ * | GET    | /api/projects/:id/workspaces/:wid/status            | 200     | 404     |
+ * | POST   | /api/projects/:id/workspaces/:wid/status/refresh    | 200     | 404     |
+ *
+ * @param router           - The Router to register routes on.
+ * @param pollingManager   - Provides `getStatus(repoPath)` and `refreshWorkspace()`.
+ * @param projectManager   - Used to resolve repository IDs for a project so that
+ *                           repo paths can be computed for cache lookups.
+ * @param workspaceManager - Used to verify that the requested workspace exists.
+ * @param config           - Application configuration (provides `projectsFolder`).
+ */
+export function registerStatusRoutes(
+    router: Router,
+    pollingManager: PollingManager,
+    projectManager: ProjectManager,
+    workspaceManager: WorkspaceManager,
+    config: AppConfig,
+): void {
+    // ------------------------------------------------------------------
+    // GET /api/projects/:id/workspaces/:wid/status
+    //   Returns the cached GitStatusInfo for all repos in the workspace.
+    //   No git subprocess is spawned — reads in-memory cache only.
+    // ------------------------------------------------------------------
+    router.get('/api/projects/:id/workspaces/:wid/status', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        const { id: projectId, wid: workspaceId } = params;
+
+        // Validate project exists
+        const project = projectManager.getById(projectId);
+        if (!project) {
+            sendError(res, 404, `Project with ID "${projectId}" not found.`);
+            return;
+        }
+
+        // Validate workspace exists
+        try {
+            const ws = workspaceManager.getById(projectId, workspaceId);
+            if (ws === undefined) {
+                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
+                return;
+            }
+        } catch (err) {
+            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
+            return;
+        }
+
+        // Build per-repo status map from cache — no git I/O.
+        const statusMap: WorkspaceStatusResponse = {};
+        for (const repoId of project.Repositories) {
+            const repoPath = path.join(config.projectsFolder, projectId, workspaceId, repoId);
+            statusMap[repoId] = pollingManager.getStatus(repoPath);
+        }
+
+        sendJson(res, 200, statusMap);
+    });
+
+    // ------------------------------------------------------------------
+    // POST /api/projects/:id/workspaces/:wid/status/refresh
+    //   Triggers an on-demand PollingManager.refreshWorkspace() call and
+    //   returns 200 with the freshly updated cache snapshot.
+    // ------------------------------------------------------------------
+    router.post('/api/projects/:id/workspaces/:wid/status/refresh', async (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const { id: projectId, wid: workspaceId } = params;
+
+        // Validate project exists before doing any I/O.
+        const project = projectManager.getById(projectId);
+        if (!project) {
+            sendError(res, 404, `Project with ID "${projectId}" not found.`);
+            return;
+        }
+
+        // Validate workspace exists.
+        try {
+            const ws = workspaceManager.getById(projectId, workspaceId);
+            if (ws === undefined) {
+                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
+                return;
+            }
+        } catch (err) {
+            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
+            return;
+        }
+
+        // Refresh: pollingManager updates its cache with fresh git status.
+        try {
+            await pollingManager.refreshWorkspace(projectId, workspaceId);
+        } catch (err) {
+            if (err instanceof NotFoundError) {
+                sendError(res, 404, err.message);
+            } else {
+                sendError(res, 500, 'Internal server error.');
+            }
+            return;
+        }
+
+        // Return the freshly cached status for all repos in the workspace.
+        const statusMap: WorkspaceStatusResponse = {};
+        for (const repoId of project.Repositories) {
+            const repoPath = path.join(config.projectsFolder, projectId, workspaceId, repoId);
+            statusMap[repoId] = pollingManager.getStatus(repoPath);
+        }
+
+        sendJson(res, 200, statusMap);
+    });
+}
+
+```
+###  Path: `/src/server/routes/workspaces.ts`
+
+```ts
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Router } from '../router.js';
+import type { WorkspaceManager } from '../../models/workspace/workspace.manager.js';
+import { NotFoundError } from '../../errors.js';
+import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
+
+// ---------------------------------------------------------------------------
+// Route registration
+// ---------------------------------------------------------------------------
+
+/**
+ * Registers the six CRUD routes for the `/api/projects/:id/workspaces` resource
+ * group on the provided `Router` instance.
+ *
+ * All handlers delegate to the supplied `WorkspaceManager` and map results
+ * or errors to the appropriate HTTP status codes:
+ *
+ * | Method | Path                                             | Success | Failure |
+ * |--------|--------------------------------------------------|---------|---------|
+ * | GET    | /api/projects/:id/workspaces                    | 200     | 404     |
+ * | POST   | /api/projects/:id/workspaces                    | 201     | 400/404 |
+ * | GET    | /api/projects/:id/workspaces/:wid               | 200     | 404     |
+ * | PUT    | /api/projects/:id/workspaces/:wid/rename        | 200     | 404/400 |
+ * | DELETE | /api/projects/:id/workspaces/:wid               | 204     | 404     |
+ *
+ * Note: the spec lists 6 handlers; the 6th is the implicit update (description)
+ * for a workspace via PUT /api/projects/:id/workspaces/:wid.
+ */
+export function registerWorkspaceRoutes(
+    router: Router,
+    workspaceManager: WorkspaceManager,
+): void {
+    // ------------------------------------------------------------------
+    // GET /api/projects/:id/workspaces — list all workspaces
+    // ------------------------------------------------------------------
+    router.get('/api/projects/:id/workspaces', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        try {
+            const workspaces = workspaceManager.list(params['id']);
+            sendJson(res, 200, workspaces);
+        } catch (err) {
+            if (err instanceof NotFoundError) {
+                sendError(res, 404, err.message);
+            } else {
+                sendError(res, 500, 'Internal server error.');
+            }
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // POST /api/projects/:id/workspaces — create a workspace
+    // ------------------------------------------------------------------
+    router.post('/api/projects/:id/workspaces', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { workspaceId, description } = body as {
+            workspaceId?: unknown;
+            description?: unknown;
+        };
+
+        if (typeof workspaceId !== 'string' || workspaceId.trim() === '') {
+            sendError(res, 400, 'Missing required field: workspaceId (non-empty string).');
+            return;
+        }
+
+        const desc = typeof description === 'string' ? description : undefined;
+
+        try {
+            const created = workspaceManager.create(params['id'], workspaceId.trim(), desc);
+            sendJson(res, 201, created);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Could not create workspace.';
+            const is404 = err instanceof NotFoundError;
+            sendError(res, is404 ? 404 : 400, msg);
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // GET /api/projects/:id/workspaces/:wid — get one workspace
+    // ------------------------------------------------------------------
+    router.get('/api/projects/:id/workspaces/:wid', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        try {
+            const workspace = workspaceManager.getById(params['id'], params['wid']);
+            if (workspace === undefined) {
+                sendError(res, 404, `Workspace "${params['wid']}" not found in project "${params['id']}".`);
+                return;
+            }
+            sendJson(res, 200, workspace);
+        } catch (err) {
+            // getById throws when the project does not exist
+            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // PUT /api/projects/:id/workspaces/:wid — update workspace description
+    // ------------------------------------------------------------------
+    router.put('/api/projects/:id/workspaces/:wid', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { description } = body as { description?: unknown };
+
+        if (typeof description !== 'string') {
+            sendError(res, 400, 'Missing required field: description (string).');
+            return;
+        }
+
+        try {
+            const updated = workspaceManager.update(params['id'], params['wid'], { Description: description });
+            sendJson(res, 200, updated);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Not found.';
+            const is404 = err instanceof NotFoundError;
+            sendError(res, is404 ? 404 : 400, msg);
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // PUT /api/projects/:id/workspaces/:wid/rename — rename a workspace
+    // ------------------------------------------------------------------
+    router.put('/api/projects/:id/workspaces/:wid/rename', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { newId } = body as { newId?: unknown };
+
+        if (typeof newId !== 'string' || newId.trim() === '') {
+            sendError(res, 400, 'Missing required field: newId (non-empty string).');
+            return;
+        }
+
+        try {
+            const renamed = workspaceManager.rename(params['id'], params['wid'], newId.trim());
+            sendJson(res, 200, renamed);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Could not rename workspace.';
+            const is404 = err instanceof NotFoundError;
+            sendError(res, is404 ? 404 : 400, msg);
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // DELETE /api/projects/:id/workspaces/:wid — delete a workspace
+    // ------------------------------------------------------------------
+    router.delete('/api/projects/:id/workspaces/:wid', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        try {
+            workspaceManager.remove(params['id'], params['wid']);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Not found.';
+            const is404 = err instanceof NotFoundError;
+            sendError(res, is404 ? 404 : 400, msg);
+            return;
+        }
+        res.writeHead(204, {});
+        res.end('');
+    });
+}
+
+```
+---
+**File Statistics**
+- **Size**: 37.81 KB
+- **Lines**: 1009
+File: `modules/server/architecture-routes.md`
