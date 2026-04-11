@@ -3,6 +3,7 @@ import type { AppConfig } from '../../config/config.types.js';
 import { readJsonFile, writeJsonFile, FileNotFoundError } from '../../storage/json-storage.js';
 import { inferSlugFromUrl, isValidKebabCase } from '../../utils/slug.js';
 import { NotFoundError } from '../../errors.js';
+import { hasEmbeddedCredentials, stripEmbeddedCredentials } from '../../git/git-credentials.js';
 import type { Repository, RepositoryStore } from './repository.types.js';
 
 const REPOSITORIES_FILE = 'repositories.json';
@@ -12,6 +13,12 @@ const DEFAULT_STORE: RepositoryStore = { Repositories: [], SchemaVersion: 1 };
 /**
  * Strips embedded credentials from a URL before interpolation into error
  * messages. Replaces `//user:pass@` or `//token@` with `//***@`.
+ *
+ * **Used only for error message interpolation** — not for producing clean URLs
+ * to store or compare. For sanitising URLs before storage, use
+ * `stripEmbeddedCredentials()` from `git-credentials.ts`, which applies the
+ * WHATWG URL object path for pure HTTPS URLs and a regex fallback for prose
+ * strings (e.g. git error messages).
  */
 function redactUrl(url: string): string {
     return url.replace(/\/\/[^@]+@/, '//***@');
@@ -118,6 +125,14 @@ export class RepositoryManager {
 
         const name = params.name ?? id;
 
+        // Strip embedded credentials from the URL before storing.
+        let cleanUrl = params.url;
+        let credentialsWereStripped = false;
+        if (hasEmbeddedCredentials(params.url)) {
+            cleanUrl = stripEmbeddedCredentials(params.url);
+            credentialsWereStripped = true;
+        }
+
         const duplicate = store.Repositories.find((r) => r.Id === id);
         if (duplicate) {
             throw new Error(
@@ -125,16 +140,20 @@ export class RepositoryManager {
             );
         }
 
-        const duplicateUrl = store.Repositories.find((r) => r.Url === params.url);
+        const duplicateUrl = store.Repositories.find((r) => r.Url === cleanUrl);
         if (duplicateUrl) {
             throw new Error(
-                `A repository with URL "${redactUrl(params.url)}" already exists (ID: "${duplicateUrl.Id}").`
+                `A repository with URL "${redactUrl(cleanUrl)}" already exists (ID: "${duplicateUrl.Id}").`
             );
         }
 
-        const repo: Repository = { Id: id, Name: name, Url: params.url };
+        const repo: Repository = { Id: id, Name: name, Url: cleanUrl };
         store.Repositories.push(repo);
         this.save(store);
+
+        if (credentialsWereStripped) {
+            return { ...repo, credentialsStripped: true };
+        }
         return repo;
     }
 

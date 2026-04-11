@@ -9,10 +9,9 @@ import {
     ensureDirectory,
     FileNotFoundError,
 } from '../storage/json-storage.js';
+import { createTempDirTracker } from './test-helpers.js';
 
-function makeTempDir(): string {
-    return fs.mkdtempSync(path.join(os.tmpdir(), 'paralizer-test-'));
-}
+const makeTempDir = createTempDirTracker('paralizer-test-');
 
 // --- writeJsonFile + readJsonFile ---
 

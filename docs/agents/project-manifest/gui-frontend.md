@@ -26,9 +26,10 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 |---|---|---|
 | `#/` | `dashboard.js` | Project listing with creation form. |
 | `#/repositories` | `repositories.js` | Repository CRUD table. |
-| `#/projects/:id` | `project-detail.js` | Project metadata, repo/workspace management. |
+| `#/projects/:id` | `project-detail.js` | Project metadata, tabbed repo/workspace/danger-zone management. |
 | `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with 10s polling. |
 | `#/projects/:id/workspaces/:wid/branch-switch` | `branch-switch.js` | 3-step branch switch wizard. |
+| `#/settings` | `settings.js` | Git credentials management (add/delete per-host tokens). |
 
 ## API Client
 
@@ -36,9 +37,10 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 
 - `api.repositories` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `delete(id)`
 - `api.projects` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `rename(id, newId)`, `delete(id)`, `addRepository(pid, rid)`, `removeRepository(pid, rid)`
-- `api.workspaces` — `list(pid)`, `get(pid, wid)`, `create(pid, data)`, `update(pid, wid, data)`, `rename(pid, wid, newId)`, `delete(pid, wid)`
+- `api.workspaces` — `list(pid)`, `get(pid, wid)`, `create(pid, data)`, `update(pid, wid, data)`, `rename(pid, wid, newId)`, `delete(pid, wid)`, `setup(pid, wid)`
 - `api.branches` — `list(pid, wid)`, `switch(pid, wid, assignments)`
 - `api.status` — `get(pid, wid)`, `refresh(pid, wid)`
+- `api.config.credentials` — `list()`, `set(data)`, `delete(host)`
 
 ## Reusable Components
 
@@ -48,7 +50,7 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 | Form Helpers | `components/form-helpers.js` | `createFormField()`, `validateRequired()`, `WORKSPACE_ID_PATTERN` | Form field generation and validation. |
 | Status Badge | `components/status-badge.js` | `createStatusBadge(gitStatusInfo): HTMLElement` | Git status badge with branch pill and detail chips. |
 | Theme Toggle | `components/theme-toggle.js` | `createThemeToggle(): HTMLButtonElement` | Light/dark mode toggle button. Reads/persists theme in `localStorage`. |
-| Toast | `components/toast.js` | `showToast(message, type, duration): HTMLElement\|null` | Auto-dismissing notification in `#toast-container`. |
+| Toast | `components/toast.js` | `showToast(message, type, duration): HTMLElement\|null` | Auto-dismissing notification in `#toast-container`. Message is rendered via `textContent` (not `innerHTML`) — server-controlled strings including git error output are XSS-safe to pass directly. |
 
 ## Utilities
 
@@ -78,3 +80,7 @@ Views using router injection: `dashboard.js`, `project-detail.js`, `workspace-de
 Views with side-effects (e.g. `setInterval` polling) return a synchronous cleanup function from their entry point. The router calls it before rendering the next view. The cleanup must be returned **before** any async operations, so the router can register it immediately.
 
 Views returning cleanup: `workspace-detail.js` (clears 10-second polling interval).
+
+### Tabbed Navigation (Project Detail)
+
+The project detail view organises content into three tabs: **Repositories**, **Workspaces**, and **Danger Zone**. Tabs are implemented with `.tab-nav` / `.tab-btn` / `.tab-panel` CSS classes and ARIA `role="tablist"` / `role="tab"` / `role="tabpanel"` attributes. Switching is handled by a single delegated click listener on the tab nav container. Only one panel is visible at a time (`.tab-panel.active`).

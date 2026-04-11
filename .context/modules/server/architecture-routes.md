@@ -7,6 +7,7 @@ _SOURCE: REST API route handlers_
     └── server/
         └── routes/
             └── branches.ts
+            └── config.ts
             └── projects.ts
             └── repositories.ts
             └── status.ts
@@ -168,6 +169,168 @@ export function registerBranchRoutes(
         } catch (err) {
             sendError(res, 500, err instanceof Error ? err.message : 'Branch switch failed.');
         }
+    });
+}
+
+```
+###  Path: `/src/server/routes/config.ts`
+
+```ts
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Router } from '../router.js';
+import type { AppConfig } from '../../config/config.types.js';
+import { saveConfigField } from '../../config/config.js';
+import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Masks a credential token for display in API responses.
+ * Shows the last 4 characters of the token prefixed with `****`.
+ * Tokens shorter than 4 characters are fully masked as `****`.
+ */
+function maskToken(token: string): string {
+    return token.length < 4 ? '****' : '****' + token.slice(-4);
+}
+
+/**
+ * Returns a copy of the credentials map with all tokens masked.
+ */
+function buildMaskedCredentials(
+    credentials: Record<string, string> | undefined,
+): Record<string, string> {
+    if (!credentials) return {};
+    const masked: Record<string, string> = {};
+    for (const [host, token] of Object.entries(credentials)) {
+        masked[host] = maskToken(token);
+    }
+    return masked;
+}
+
+// ---------------------------------------------------------------------------
+// Route registration
+// ---------------------------------------------------------------------------
+
+/**
+ * Registers REST endpoints for managing `gitCredentials` in `config.json`.
+ *
+ * | Method | Path                              | Description               |
+ * |--------|-----------------------------------|---------------------------|
+ * | GET    | /api/config/credentials           | List credentials (masked) |
+ * | PUT    | /api/config/credentials           | Add / update an entry     |
+ * | DELETE | /api/config/credentials/:host     | Remove an entry           |
+ *
+ * Changes take effect immediately (the in-memory `appConfig` is mutated) and
+ * are persisted to `config.json` via `saveConfigField()`.
+ *
+ * **Security:** tokens are never returned in full — only the last 4 characters
+ * are exposed. The `host` field is validated against an injection-safe pattern.
+ *
+ * @param configPath - Optional absolute path to `config.json`. Defaults to the
+ *   tool-root `config.json`. Pass a custom path in tests to avoid touching the
+ *   real config file.
+ */
+export function registerConfigRoutes(
+    router: Router,
+    appConfig: AppConfig,
+    configPath?: string,
+): void {
+    // ------------------------------------------------------------------
+    // GET /api/config/credentials — list all (tokens masked)
+    // ------------------------------------------------------------------
+    router.get('/api/config/credentials', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): void => {
+        sendJson(res, 200, buildMaskedCredentials(appConfig.gitCredentials));
+    });
+
+    // ------------------------------------------------------------------
+    // PUT /api/config/credentials — add or update a single entry
+    // ------------------------------------------------------------------
+    router.put('/api/config/credentials', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): Promise<void> => {
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { host, token } = body as { host?: unknown; token?: unknown };
+
+        if (typeof host !== 'string' || host.trim() === '') {
+            sendError(res, 400, 'Missing or invalid field "host": must be a non-empty string.');
+            return;
+        }
+
+        if (typeof token !== 'string' || token.trim() === '') {
+            sendError(res, 400, 'Missing or invalid field "token": must be a non-empty string.');
+            return;
+        }
+
+        const cleanHost = host.trim();
+
+        // Security: reject hosts with path separators or whitespace to prevent
+        // key injection that could interfere with URL credential injection.
+        if (/[\s/\\]/.test(cleanHost)) {
+            sendError(res, 400, 'Field "host" must not contain path separators or whitespace.');
+            return;
+        }
+
+        const cleanToken = token.trim();
+
+        // Update in-memory config.
+        if (!appConfig.gitCredentials) {
+            appConfig.gitCredentials = {};
+        }
+        appConfig.gitCredentials[cleanHost] = cleanToken;
+
+        // Persist to disk.
+        saveConfigField('gitCredentials', appConfig.gitCredentials, configPath);
+
+        sendJson(res, 200, buildMaskedCredentials(appConfig.gitCredentials));
+    });
+
+    // ------------------------------------------------------------------
+    // DELETE /api/config/credentials/:host — remove a single entry
+    // ------------------------------------------------------------------
+    router.delete('/api/config/credentials/:host', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        const host = params['host'];
+
+        if (!appConfig.gitCredentials || !(host in appConfig.gitCredentials)) {
+            sendError(res, 404, `No credential entry found for host "${host}".`);
+            return;
+        }
+
+        delete appConfig.gitCredentials[host];
+
+        // When the map is empty, remove the field entirely (undefined removes
+        // it from config.json via saveConfigField).
+        const isEmpty = Object.keys(appConfig.gitCredentials).length === 0;
+        if (isEmpty) {
+            appConfig.gitCredentials = undefined;
+        }
+
+        saveConfigField('gitCredentials', appConfig.gitCredentials, configPath);
+
+        sendJson(res, 200, buildMaskedCredentials(appConfig.gitCredentials));
     });
 }
 
@@ -788,8 +951,12 @@ export function registerStatusRoutes(
 
 ```ts
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { Router } from '../router.js';
 import type { WorkspaceManager } from '../../models/workspace/workspace.manager.js';
+import type { WorkspaceOrchestrator } from '../../orchestration/workspace-orchestrator.js';
+import type { AppConfig } from '../../config/config.types.js';
 import { NotFoundError } from '../../errors.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
 
@@ -818,7 +985,21 @@ import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUti
 export function registerWorkspaceRoutes(
     router: Router,
     workspaceManager: WorkspaceManager,
+    workspaceOrchestrator: WorkspaceOrchestrator,
+    appConfig: AppConfig,
 ): void {
+
+    // Helper: compute absolute workspace folder path.
+    function workspaceFolder(projectId: string, workspaceId: string): string {
+        return path.join(appConfig.projectsFolder, projectId, workspaceId);
+    }
+
+    // Helper: augment a WorkspaceInfo with an `Initialized` boolean.
+    function withInitialized<T extends { ProjectID: string; WorkspaceID: string }>(ws: T): T & { Initialized: boolean } {
+        const wsFolder = workspaceFolder(ws.ProjectID, ws.WorkspaceID);
+        return { ...ws, Initialized: fs.existsSync(wsFolder) };
+    }
+
     // ------------------------------------------------------------------
     // GET /api/projects/:id/workspaces — list all workspaces
     // ------------------------------------------------------------------
@@ -829,7 +1010,7 @@ export function registerWorkspaceRoutes(
     ): void => {
         try {
             const workspaces = workspaceManager.list(params['id']);
-            sendJson(res, 200, workspaces);
+            sendJson(res, 200, workspaces.map(withInitialized));
         } catch (err) {
             if (err instanceof NotFoundError) {
                 sendError(res, 404, err.message);
@@ -896,7 +1077,7 @@ export function registerWorkspaceRoutes(
                 sendError(res, 404, `Workspace "${params['wid']}" not found in project "${params['id']}".`);
                 return;
             }
-            sendJson(res, 200, workspace);
+            sendJson(res, 200, withInitialized(workspace));
         } catch (err) {
             // getById throws when the project does not exist
             sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
@@ -998,11 +1179,44 @@ export function registerWorkspaceRoutes(
         res.writeHead(204, {});
         res.end('');
     });
+
+    // ------------------------------------------------------------------
+    // POST /api/projects/:id/workspaces/:wid/setup — initialize workspace
+    // filesystem (create folder, clone repos, generate .code-workspace file).
+    // Idempotent: skips repositories whose folder already exists on disk.
+    // ------------------------------------------------------------------
+    router.post('/api/projects/:id/workspaces/:wid/setup', async (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const projectId = params['id'];
+        const workspaceId = params['wid'];
+
+        // Verify workspace data entry exists
+        try {
+            const ws = workspaceManager.getById(projectId, workspaceId);
+            if (ws === undefined) {
+                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
+                return;
+            }
+        } catch (err) {
+            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
+            return;
+        }
+
+        try {
+            const result = await workspaceOrchestrator.createWorkspace(projectId, workspaceId);
+            sendJson(res, 200, result);
+        } catch (err) {
+            sendError(res, 500, err instanceof Error ? err.message : 'Failed to set up workspace.');
+        }
+    });
 }
 
 ```
 ---
 **File Statistics**
-- **Size**: 37.81 KB
-- **Lines**: 1009
+- **Size**: 46.06 KB
+- **Lines**: 1223
 File: `modules/server/architecture-routes.md`

@@ -4,5 +4,6 @@
     "storageFolder": "",
     "cloneDepth": 50,
     "serverPort": 4200,
-    "gitPollingIntervalSeconds": 30
+    "gitPollingIntervalSeconds": 30,
+    "gitCredentials": {}
 }

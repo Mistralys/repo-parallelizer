@@ -10,6 +10,7 @@ import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import { WorkspaceOrchestrator } from '../orchestration/workspace-orchestrator.js';
+import { setupFakeGit } from './test-helpers.js';
 
 // ─── Global fixtures ──────────────────────────────────────────────────────────
 
@@ -152,6 +153,37 @@ test('createWorkspace throws when project does not exist', async () => {
         () => orchestrator.createWorkspace('nonexistent-project', 'DEV'),
         /does not exist/,
     );
+});
+
+test('createWorkspace retries clone when repo directory exists but has no .git', async () => {
+    const { config, orchestrator, projectId, repoId } = makeFixture(makeTempDir());
+    const wsFolder = path.join(config.projectsFolder, projectId, 'DEV');
+    const repoDir  = path.join(wsFolder, repoId);
+
+    // Simulate a leftover directory from a failed clone.
+    fs.mkdirSync(repoDir, { recursive: true });
+    assert.ok(fs.existsSync(repoDir), 'leftover dir should exist before retry');
+    assert.ok(!fs.existsSync(path.join(repoDir, '.git')), 'leftover dir should NOT have .git');
+
+    const result = await orchestrator.createWorkspace(projectId, 'DEV');
+
+    assert.strictEqual(result.results.length, 1);
+    assert.strictEqual(result.results[0].success, true, 'retry should succeed');
+    assert.ok(fs.existsSync(path.join(repoDir, '.git')), 'cloned repo should have .git after retry');
+});
+
+test('createWorkspace skips clone when repo directory already has .git', async () => {
+    const { config, orchestrator, projectId, repoId } = makeFixture(makeTempDir());
+
+    // First run — clone normally.
+    await orchestrator.createWorkspace(projectId, 'DEV');
+    const repoDir = path.join(config.projectsFolder, projectId, 'DEV', repoId);
+    assert.ok(fs.existsSync(path.join(repoDir, '.git')), 'repo should be cloned');
+
+    // Second run — should skip (idempotent).
+    const result = await orchestrator.createWorkspace(projectId, 'DEV');
+    assert.strictEqual(result.results.length, 1);
+    assert.strictEqual(result.results[0].success, true, 'already-cloned repo should succeed');
 });
 
 // ─── deleteWorkspace ──────────────────────────────────────────────────────────
@@ -324,5 +356,84 @@ test('renameWorkspace throws when newId is not a valid workspace ID', async () =
     assert.throws(
         () => orchestrator.renameWorkspace(projectId, 'DEV', 'bad-id'),
         /Invalid workspace ID/,
+    );
+});
+
+// ─── Credential injection (createWorkspace) ───────────────────────────────────
+
+test('createWorkspace passes token-injected URL to cloneRepository when credentials match', async () => {
+    const dir = makeTempDir();
+    const fakeGitDir = fs.mkdtempSync(path.join(tmpRoot, 'fake-git-ws-inj-'));
+    const capturedArgsFile = setupFakeGit(fakeGitDir);
+
+    const config = makeConfig(dir);
+    // Only HTTPS URLs are processed by injectCredentials.
+    config.gitCredentials = { 'private.example': 'ghp_testtoken' };
+    initializeStorage(config);
+
+    const repoManager     = new RepositoryManager(config);
+    const projectManager  = new ProjectManager(config, repoManager);
+    const workspaceManager = new WorkspaceManager(projectManager);
+    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
+
+    repoManager.add({ url: 'https://private.example/org/priv-repo.git', id: 'priv-repo' });
+    projectManager.create('Priv Project', ['priv-repo'], undefined, 'priv-project-ws-inject');
+
+    // Temporarily prepend the fake-git directory to PATH so the orchestrator's
+    // git spawn picks up our stub binary instead of the real git.
+    const origPath = process.env.PATH ?? '';
+    process.env.PATH = `${fakeGitDir}:${origPath}`;
+    try {
+        await orchestrator.createWorkspace('priv-project-ws-inject', 'DEV');
+    } finally {
+        process.env.PATH = origPath;
+    }
+
+    // The fake git writes all CLI arguments to capturedArgsFile — the injected
+    // URL (https://ghp_testtoken@private.example/...) must appear among them.
+    const captured = fs.existsSync(capturedArgsFile)
+        ? fs.readFileSync(capturedArgsFile, 'utf8')
+        : '';
+    assert.ok(
+        captured.includes('ghp_testtoken@private.example'),
+        `expected injected URL with token in git arguments; got: "${captured}"`,
+    );
+});
+
+test('createWorkspace passes original URL to cloneRepository when no credentials match', async () => {
+    const dir = makeTempDir();
+    const fakeGitDir = fs.mkdtempSync(path.join(tmpRoot, 'fake-git-ws-nocr-'));
+    const capturedArgsFile = setupFakeGit(fakeGitDir);
+
+    const config = makeConfig(dir); // gitCredentials deliberately absent
+    initializeStorage(config);
+
+    const repoManager     = new RepositoryManager(config);
+    const projectManager  = new ProjectManager(config, repoManager);
+    const workspaceManager = new WorkspaceManager(projectManager);
+    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
+
+    repoManager.add({ url: 'https://private.example/org/priv-repo.git', id: 'priv-repo' });
+    projectManager.create('Priv Project', ['priv-repo'], undefined, 'priv-project-ws-no-creds');
+
+    const origPath = process.env.PATH ?? '';
+    process.env.PATH = `${fakeGitDir}:${origPath}`;
+    try {
+        await orchestrator.createWorkspace('priv-project-ws-no-creds', 'DEV');
+    } finally {
+        process.env.PATH = origPath;
+    }
+
+    // Without credentials the URL must pass through unchanged — no token injected.
+    const captured = fs.existsSync(capturedArgsFile)
+        ? fs.readFileSync(capturedArgsFile, 'utf8')
+        : '';
+    assert.ok(
+        captured.includes('https://private.example/org/priv-repo.git'),
+        `expected original URL (no token) in git arguments; got: "${captured}"`,
+    );
+    assert.ok(
+        !captured.includes('@private.example'),
+        `expected no injected credentials in clone URL; got: "${captured}"`,
     );
 });

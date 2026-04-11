@@ -323,6 +323,19 @@ const workspaces = {
             `/api/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wid)}`,
         );
     },
+
+    /**
+     * Set up a workspace on disk (create folder, clone repos, generate .code-workspace file).
+     * @param {string} projectId
+     * @param {string} wid
+     * @returns {Promise<Object>}
+     */
+    setup(projectId, wid) {
+        return request(
+            'POST',
+            `/api/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wid)}/setup`,
+        );
+    },
 };
 
 /**
@@ -408,6 +421,44 @@ const status = {
     },
 };
 
+/**
+ * Config / credentials endpoints.
+ *
+ * @namespace api.config
+ */
+const config = {
+    credentials: {
+        /**
+         * List all configured git credentials with masked tokens.
+         *
+         * @returns {Promise<Record<string, string>>} Map of host → masked token.
+         */
+        list() {
+            return request('GET', '/api/config/credentials');
+        },
+
+        /**
+         * Add or update a host credential.
+         *
+         * @param {{ host: string, token: string }} data
+         * @returns {Promise<Record<string, string>>} Updated masked credentials map.
+         */
+        set(data) {
+            return request('PUT', '/api/config/credentials', data);
+        },
+
+        /**
+         * Remove a host credential.
+         *
+         * @param {string} host
+         * @returns {Promise<Record<string, string>>} Updated masked credentials map after deletion.
+         */
+        delete(host) {
+            return request('DELETE', `/api/config/credentials/${encodeURIComponent(host)}`);
+        },
+    },
+};
+
 // ---------------------------------------------------------------------------
 // Public export
 // ---------------------------------------------------------------------------
@@ -420,7 +471,8 @@ const status = {
  *   projects:     typeof projects,
  *   workspaces:   typeof workspaces,
  *   branches:     typeof branches,
- *   status:       typeof status
+ *   status:       typeof status,
+ *   config:       typeof config
  * }}
  */
 export const api = {
@@ -429,4 +481,5 @@ export const api = {
     workspaces,
     branches,
     status,
+    config,
 };

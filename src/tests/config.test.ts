@@ -3,11 +3,10 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'os';
 import * as path from 'node:path';
-import { loadConfig } from '../config/config.js';
+import { loadConfig, saveConfigField } from '../config/config.js';
+import { createTempDirTracker } from './test-helpers.js';
 
-function makeTempDir(): string {
-    return fs.mkdtempSync(path.join(os.tmpdir(), 'paralizer-config-test-'));
-}
+const makeTempDir = createTempDirTracker('paralizer-config-test-');
 
 function writeConfig(dir: string, data: Record<string, unknown>): string {
     const configPath = path.join(dir, 'config.json');
@@ -104,4 +103,176 @@ test('loadConfig() throws when projectsFolder is null', () => {
         storageFolder: '/tmp/storage',
     });
     assert.throws(() => loadConfig(configPath), /projectsFolder/);
+});
+
+// --- gitCredentials ---
+
+test('loadConfig() returns gitCredentials: undefined when field is absent', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.gitCredentials, undefined);
+});
+
+test('loadConfig() returns gitCredentials: undefined when field is null', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: null,
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.gitCredentials, undefined);
+});
+
+test('loadConfig() returns parsed gitCredentials when valid entries are present', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: { 'github.com': 'ghp_token123', 'gitlab.com': 'glpat_abc' },
+    });
+    const config = loadConfig(configPath);
+    assert.deepStrictEqual(config.gitCredentials, {
+        'github.com': 'ghp_token123',
+        'gitlab.com': 'glpat_abc',
+    });
+});
+
+test('loadConfig() returns gitCredentials as empty object when field is {}', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: {},
+    });
+    const config = loadConfig(configPath);
+    assert.deepStrictEqual(config.gitCredentials, {});
+});
+
+test('loadConfig() throws when gitCredentials is an array', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: ['token'],
+    });
+    assert.throws(() => loadConfig(configPath), /gitCredentials.*plain object/);
+});
+
+test('loadConfig() throws when gitCredentials is a string', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: 'token',
+    });
+    assert.throws(() => loadConfig(configPath), /gitCredentials.*plain object/);
+});
+
+test('loadConfig() throws when a gitCredentials value is a number', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: { 'github.com': 12345 },
+    });
+    assert.throws(() => loadConfig(configPath), /gitCredentials\["github\.com"\].*string/);
+});
+
+test('loadConfig() throws when a gitCredentials value is an empty string', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: { 'github.com': '' },
+    });
+    assert.throws(() => loadConfig(configPath), /gitCredentials\["github\.com"\].*empty/);
+});
+
+// --- saveConfigField() ---
+
+test('saveConfigField() sets a new field while keeping all other fields intact', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        _instructions: 'Copy this file.',
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        cloneDepth: 10,
+    });
+    saveConfigField('gitCredentials', { 'github.com': 'token' }, configPath);
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    assert.deepStrictEqual(raw['gitCredentials'], { 'github.com': 'token' });
+    assert.strictEqual(raw['projectsFolder'], '/tmp/projects');
+    assert.strictEqual(raw['storageFolder'], '/tmp/storage');
+    assert.strictEqual(raw['cloneDepth'], 10);
+    assert.strictEqual(raw['_instructions'], 'Copy this file.');
+});
+
+test('saveConfigField() removes the field when value is undefined', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: { 'github.com': 'token' },
+    });
+    saveConfigField('gitCredentials', undefined, configPath);
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    assert.ok(!Object.hasOwn(raw, 'gitCredentials'), 'gitCredentials should be absent after deletion');
+    assert.strictEqual(raw['projectsFolder'], '/tmp/projects');
+    assert.strictEqual(raw['storageFolder'], '/tmp/storage');
+});
+
+test('saveConfigField() preserves the _instructions field through a write round-trip', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        _instructions: 'Copy this file to config.json.',
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+    });
+    saveConfigField('gitCredentials', { 'github.com': 'tok' }, configPath);
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    assert.strictEqual(raw['_instructions'], 'Copy this file to config.json.');
+});
+
+test('saveConfigField() overwrites an existing field', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: { 'github.com': 'old-token' },
+    });
+    saveConfigField('gitCredentials', { 'github.com': 'new-token' }, configPath);
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    assert.deepStrictEqual(raw['gitCredentials'], { 'github.com': 'new-token' });
+});
+
+test('saveConfigField() is a no-op when deleting a non-existent field', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+    });
+    saveConfigField('gitCredentials', undefined, configPath);
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    assert.ok(!Object.hasOwn(raw, 'gitCredentials'));
+    assert.strictEqual(raw['projectsFolder'], '/tmp/projects');
+});
+
+// --- File permissions ---
+
+test('saveConfigField() sets file permissions to 0o600 on non-Windows platforms', () => {
+    if (process.platform === 'win32') return; // skip on Windows
+
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+    });
+    saveConfigField('gitCredentials', { 'github.com': 'token' }, configPath);
+    const mode = fs.statSync(configPath).mode & 0o777;
+    assert.strictEqual(mode, 0o600, `expected 0o600, got 0o${mode.toString(8)}`);
 });

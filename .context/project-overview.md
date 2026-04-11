@@ -269,6 +269,26 @@ A minimal `config.json` looks like this:
 | `cloneDepth` | `number` | | `50` | Depth passed to `git clone --depth`. Use `0` for a full clone. |
 | `serverPort` | `number` | | `4200` | TCP port the built-in HTTP server listens on. |
 | `gitPollingIntervalSeconds` | `number` | | `30` | How often (in seconds) the tool polls git remotes for new commits. |
+| `gitCredentials` | `object` | | `{}` | Map of hostname → Personal Access Token (or password) for private repository access, e.g. `{ "github.com": "ghp_..." }`. Absent or empty means public repos only. |
+
+### Private repository authentication
+
+`gitCredentials` stores credentials **in plaintext** inside `config.json`. This is an accepted trade-off for a single-user local tool, but take these steps to limit exposure:
+
+1. **Restrict file permissions** — run `chmod 600 config.json` after creating the file so only your user account can read it.
+2. **Never commit `config.json`** — it is already listed in `.gitignore`, but verify this if you fork or copy the project to a new location.
+3. **Use scoped PATs** — create tokens with the minimum required scope (typically read-only repository access) so that a leaked token has limited blast radius.
+
+Example `gitCredentials` block:
+
+```json
+"gitCredentials": {
+  "github.com": "ghp_your_token_here",
+  "gitlab.company.com": "glpat-your_token_here"
+}
+```
+
+Credentials are matched by hostname and injected into the clone/fetch URL at runtime. They are never written to log files or error messages.
 
 ### Storage structure
 
@@ -1337,9 +1357,11 @@ Loads and validates the application configuration from a `config.json` file on d
 
 ## Key Concepts
 
-- **AppConfig**: The central configuration interface that all other modules depend on. Contains paths for project storage, clone depth, server port, and polling interval.
-- **Config file**: A `config.json` file at the tool root, created from `config.dist.json`. Not committed to version control.
+- **AppConfig**: The central configuration interface that all other modules depend on. Contains paths for project storage, clone depth, server port, polling interval, and optional git credentials.
+- **Config file**: A `config.json` file at the tool root, created from `config.dist.json`. Not committed to version control. Restrict permissions with `chmod 600 config.json` — see the README security advisory.
 - **Defaults**: Missing optional fields are filled with sensible defaults (clone depth: 50, server port: 4200, polling interval: 30s).
+- **gitCredentials**: Optional `Record<string, string>` mapping hostname → Personal Access Token or password. Absent or empty means public-repo-only mode. Validated on load: non-object types, non-string values, and empty-string tokens all throw a descriptive error.
+- **saveConfigField caller guard**: `saveConfigField(field, value)` does not validate the `field` parameter. Any HTTP route handler or external caller that passes user-supplied input for `field` **must** guard it against an explicit allowlist before calling the function.
 
 ## Integration Points
 
@@ -1360,6 +1382,7 @@ Stateless functions wrapping Git CLI subprocess calls. All operations spawn `git
 - **GitResult**: Unified return type with exit code, stdout, and stderr.
 - **Timeout support**: Clone and fetch operations accept timeout values to prevent hanging on unreachable remotes.
 - **Branch operations**: Listing, creating, switching, checking existence — all work with both local and remote branches.
+- **Non-interactive auth suppression**: `runGit()` always sets `GIT_TERMINAL_PROMPT=0` and `GIT_ASKPASS=echo` in the subprocess environment. This is intentional — `GIT_TERMINAL_PROMPT=0` suppresses TTY prompts, and `GIT_ASKPASS=echo` bypasses all credential helpers (including macOS osxkeychain and Linux libsecret) by substituting a no-op askpass binary that returns empty credentials immediately, causing git to fail fast on unauthenticated requests. Do **not** remove `GIT_ASKPASS=echo` — `GIT_TERMINAL_PROMPT=0` alone does not prevent osxkeychain from blocking indefinitely on macOS.
 
 ## Files
 
@@ -1367,6 +1390,7 @@ Stateless functions wrapping Git CLI subprocess calls. All operations spawn `git
 |---|---|
 | `git.types.ts` | Type definitions: GitResult, GitStatusInfo, BranchInfo, CloneOptions |
 | `git-cli.ts` | Low-level `runGit()` and `runGitOrThrow()` subprocess execution |
+| `git-credentials.ts` | URL credential utilities: `extractHost()`, `injectCredentials()`, `hasEmbeddedCredentials()`, `stripEmbeddedCredentials()` |
 | `git-clone.ts` | `cloneRepository()` with depth and timeout options |
 | `git-branch.ts` | Branch listing, creation, switching, existence checks |
 | `git-status.ts` | Repository status: current branch, uncommitted changes, conflicts |
@@ -1509,6 +1533,6 @@ Shared helper functions used across all layers.
 ```
 ---
 **File Statistics**
-- **Size**: 73.63 KB
-- **Lines**: 1515
+- **Size**: 76.17 KB
+- **Lines**: 1539
 File: `project-overview.md`

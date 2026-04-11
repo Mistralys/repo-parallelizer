@@ -1,0 +1,13 @@
+{
+    "Projects": [
+        {
+            "Id": "repo-parallelizer",
+            "Name": "Repo Parallelizer"
+        },
+        {
+            "Id": "ai-insights",
+            "Name": "AI Insights"
+        }
+    ],
+    "SchemaVersion": 1
+}

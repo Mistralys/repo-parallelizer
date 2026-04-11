@@ -115,7 +115,60 @@ Browser → hash change (e.g. #/projects/my-app)
             └→ Store returned cleanup function (if any)
 ```
 
-## 9. Storage File Layout
+## 9. Credential-Bearing Git Operation (Private Repository)
+
+```
+Orchestrator (future WP) receives a repo URL (e.g. https://github.com/org/private.git)
+  └→ hasEmbeddedCredentials(url)?
+       ├→ true:  URL already has credentials — decide: strip-and-reinject or reject
+       └→ false: proceed to injection
+  └→ extractHost(url)                          # → 'github.com'
+  └→ config.gitCredentials['github.com']?
+       ├→ found: injectCredentials(url, config.gitCredentials)
+       │         # Returns https://ghp_token@github.com/org/private.git
+       │         # Token injected via WHATWG URL API (percent-encoded, not string concat)
+       └→ absent: pass original URL (auth will fail fast — GIT_ASKPASS=echo)
+  └→ cloneRepository(injectedUrl, destination, options)
+       └→ runGit(['clone', injectedUrl, ...])
+            └→ spawn() env: { GIT_TERMINAL_PROMPT:'0', GIT_ASKPASS:'echo' }
+  └→ On error (result.stderr contains 'auth'):
+       └→ stripEmbeddedCredentials(result.stderr)  ← REQUIRED before surfacing
+            # Removes ghp_token from error string before logging / API response
+```
+
+**Credential injection rules (standing constraints):**
+- `injectCredentials()` must only be called immediately before a git subprocess call — never stored or passed through API boundaries.
+- `stripEmbeddedCredentials()` must be applied to any `GitResult.stderr` and `Error.message` before the string is logged or returned in an API response.
+- `hasEmbeddedCredentials()` must be checked before calling `injectCredentials()` when the URL originates from user input.
+
+---
+
+## 10. Workspace Setup — Clone Failure Error Propagation
+
+```
+WorkspaceOrchestrator.createWorkspace() on clone failure:
+  └→ cloneRepository() → GitResult.stderr  (e.g. "fatal: Authentication failed for https://...")
+       └→ [FUTURE WP — MANDATORY] stripEmbeddedCredentials(gitResult.stderr)
+            # Must be applied before assigning to OrchestrationRepoResult.error
+            # Prevents PAT exposure when injectCredentials() is active
+       └→ OrchestrationRepoResult.error = (sanitised) stderr string
+  └→ API response: { failures: [{ repositoryId, error }] }
+  └→ Browser (project-detail.js):
+       for (const failure of failures):
+         showToast(`Failed to clone "${failure.repositoryId}": ${failure.error}`, 'error', 8000)
+         # message set via textContent — NOT innerHTML — so server-controlled strings are XSS-safe
+```
+
+**Standing security rule:** Once credential injection is active, `stripEmbeddedCredentials()` (from
+`src/git/git-credentials.ts`) **must** be applied to `gitResult.stderr` in
+`workspace-orchestrator.ts` and `repository-orchestrator.ts` before the string is assigned to
+`OrchestrationRepoResult.error` / `WorkspaceCloneResult.error`. This is a blocking prerequisite for
+the credential injection WP — without it, PATs will appear in API JSON responses and the browser
+toast UI.
+
+---
+
+## 11. Storage File Layout
 
 ```
 {storageFolder}/

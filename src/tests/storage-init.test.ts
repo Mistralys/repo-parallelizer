@@ -5,10 +5,9 @@ import * as os from 'os';
 import * as path from 'node:path';
 import type { AppConfig } from '../config/config.types.js';
 import { initializeStorage } from '../storage/json-storage.js';
+import { createTempDirTracker } from './test-helpers.js';
 
-function makeTempDir(): string {
-    return fs.mkdtempSync(path.join(os.tmpdir(), 'paralizer-init-test-'));
-}
+const makeTempDir = createTempDirTracker('paralizer-init-test-');
 
 function makeConfig(base: string): AppConfig {
     return {

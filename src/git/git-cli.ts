@@ -36,10 +36,21 @@ export function runGit(args: string[], cwd?: string, options?: RunGitOptions): P
         // Set up AbortController for optional timeout.
         const controller = options?.timeoutMs !== undefined ? new AbortController() : undefined;
 
+        // Disable all credential helpers and interactive auth prompts so that git
+        // fails fast (exit 128) on unauthenticated remotes instead of hanging.
+        //   GIT_TERMINAL_PROMPT=0  — suppresses TTY-based git prompts.
+        //   GIT_ASKPASS=echo       — replaces any credential helper (e.g. osxkeychain
+        //                            on macOS, libsecret on Linux, DPAPI on Windows)
+        //                            with a no-op binary that immediately returns empty
+        //                            credentials.  Together these two vars provide
+        //                            defence-in-depth.  Do NOT remove GIT_ASKPASS or
+        //                            replace 'echo' — it is the primary guard against
+        //                            osxkeychain hanging on 401 HTTP responses.
         const proc = spawn('git', args, {
             shell: false,
             cwd,
             stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo' },
             ...(controller ? { signal: controller.signal } : {}),
         });
 

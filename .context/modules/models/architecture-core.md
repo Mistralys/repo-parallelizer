@@ -549,6 +549,7 @@ import type { AppConfig } from '../../config/config.types.js';
 import { readJsonFile, writeJsonFile, FileNotFoundError } from '../../storage/json-storage.js';
 import { inferSlugFromUrl, isValidKebabCase } from '../../utils/slug.js';
 import { NotFoundError } from '../../errors.js';
+import { hasEmbeddedCredentials, stripEmbeddedCredentials } from '../../git/git-credentials.js';
 import type { Repository, RepositoryStore } from './repository.types.js';
 
 const REPOSITORIES_FILE = 'repositories.json';
@@ -558,6 +559,12 @@ const DEFAULT_STORE: RepositoryStore = { Repositories: [], SchemaVersion: 1 };
 /**
  * Strips embedded credentials from a URL before interpolation into error
  * messages. Replaces `//user:pass@` or `//token@` with `//***@`.
+ *
+ * **Used only for error message interpolation** — not for producing clean URLs
+ * to store or compare. For sanitising URLs before storage, use
+ * `stripEmbeddedCredentials()` from `git-credentials.ts`, which applies the
+ * WHATWG URL object path for pure HTTPS URLs and a regex fallback for prose
+ * strings (e.g. git error messages).
  */
 function redactUrl(url: string): string {
     return url.replace(/\/\/[^@]+@/, '//***@');
@@ -664,6 +671,17 @@ export class RepositoryManager {
 
         const name = params.name ?? id;
 
+        // Strip embedded credentials from the URL before storing.
+        let cleanUrl = params.url;
+        if (hasEmbeddedCredentials(params.url)) {
+            cleanUrl = stripEmbeddedCredentials(params.url);
+            console.warn(
+                `[repo-parallelizer] Warning: repository URL contains embedded credentials. ` +
+                `The credentials have been stripped from the stored URL. ` +
+                `Configure private repository access via "gitCredentials" in config.json instead.`
+            );
+        }
+
         const duplicate = store.Repositories.find((r) => r.Id === id);
         if (duplicate) {
             throw new Error(
@@ -671,14 +689,14 @@ export class RepositoryManager {
             );
         }
 
-        const duplicateUrl = store.Repositories.find((r) => r.Url === params.url);
+        const duplicateUrl = store.Repositories.find((r) => r.Url === cleanUrl);
         if (duplicateUrl) {
             throw new Error(
-                `A repository with URL "${redactUrl(params.url)}" already exists (ID: "${duplicateUrl.Id}").`
+                `A repository with URL "${redactUrl(cleanUrl)}" already exists (ID: "${duplicateUrl.Id}").`
             );
         }
 
-        const repo: Repository = { Id: id, Name: name, Url: params.url };
+        const repo: Repository = { Id: id, Name: name, Url: cleanUrl };
         store.Repositories.push(repo);
         this.save(store);
         return repo;
@@ -1066,6 +1084,6 @@ export interface WorkspaceInfo {
 ```
 ---
 **File Statistics**
-- **Size**: 36.52 KB
-- **Lines**: 1072
+- **Size**: 37.47 KB
+- **Lines**: 1090
 File: `modules/models/architecture-core.md`

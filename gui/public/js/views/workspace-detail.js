@@ -204,24 +204,26 @@ function updateStatusTable(tableBody, statusMap) {
 // ---------------------------------------------------------------------------
 
 /**
- * Build the workspace header section.
+ * Build the workspace header section — compact layout with breadcrumb,
+ * workspace name, and a meta card for description + management actions.
  *
  * @param {string} projectId
- * @param {{ id: string, description: string }} workspace
+ * @param {{ id: string, description: string, initialized: boolean }} workspace
+ * @param {boolean} isStable
  * @returns {HTMLElement}
  */
-function buildHeaderSection(projectId, workspace) {
-    const header = document.createElement('div');
-    header.className = 'page-header workspace-detail-header';
+function buildHeaderSection(projectId, workspace, isStable) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'workspace-detail-header';
 
     // Breadcrumb
     const breadcrumb = document.createElement('nav');
-    breadcrumb.className = 'breadcrumb';
+    breadcrumb.className = 'breadcrumb back-link text-muted';
     breadcrumb.setAttribute('aria-label', 'Breadcrumb');
 
     const projectLink = document.createElement('a');
     projectLink.href      = `#/projects/${encodeURIComponent(projectId)}`;
-    projectLink.textContent = projectId;
+    projectLink.textContent = `← ${projectId}`;
     projectLink.className = 'breadcrumb-link';
     if (_router) {
         projectLink.addEventListener('click', (e) => {
@@ -229,37 +231,231 @@ function buildHeaderSection(projectId, workspace) {
             _router.navigate(`#/projects/${encodeURIComponent(projectId)}`);
         });
     }
-
-    const separator = document.createElement('span');
-    separator.className   = 'breadcrumb-sep';
-    separator.textContent = ' / ';
-    separator.setAttribute('aria-hidden', 'true');
-
-    const currentPage = document.createElement('span');
-    currentPage.className   = 'breadcrumb-current';
-    currentPage.textContent = workspace.id;
-    currentPage.setAttribute('aria-current', 'page');
-
     breadcrumb.appendChild(projectLink);
-    breadcrumb.appendChild(separator);
-    breadcrumb.appendChild(currentPage);
-    header.appendChild(breadcrumb);
+    wrapper.appendChild(breadcrumb);
 
-    // Title
+    // Title row: workspace ID
+    const titleRow = document.createElement('div');
+    titleRow.className = 'workspace-meta-top-row';
+
     const titleEl = document.createElement('h1');
-    titleEl.className   = 'workspace-detail-title';
-    titleEl.textContent = `Workspace: ${workspace.id}`;
-    header.appendChild(titleEl);
+    titleEl.className   = 'project-meta-name';
+    titleEl.textContent = workspace.id;
+    titleRow.appendChild(titleEl);
 
-    // Description
+    // Description (inline, muted)
     if (workspace.description) {
-        const descEl = document.createElement('p');
-        descEl.className   = 'workspace-detail-description text-secondary';
+        const descEl = document.createElement('span');
+        descEl.className   = 'project-meta-id text-muted';
         descEl.textContent = workspace.description;
-        header.appendChild(descEl);
+        titleRow.appendChild(descEl);
     }
 
-    return header;
+    wrapper.appendChild(titleRow);
+
+    // Management row: rename, delete, setup
+    const mgmtRow = document.createElement('div');
+    mgmtRow.className = 'workspace-mgmt-row';
+
+    // Setup button (if not initialized)
+    if (!workspace.initialized) {
+        const setupBtn = document.createElement('button');
+        setupBtn.type      = 'button';
+        setupBtn.className = 'btn btn-primary btn-sm';
+        setupBtn.textContent = 'Setup Workspace';
+        setupBtn.title = 'Initialize workspace on disk (create folder, clone repos).';
+
+        setupBtn.addEventListener('click', async () => {
+            setupBtn.disabled = true;
+            setupBtn.textContent = 'Setting up…';
+
+            try {
+                const result = await api.workspaces.setup(projectId, workspace.id);
+
+                // Report per-repo clone results
+                const failures = (result && result.results || []).filter((r) => !r.success);
+                if (failures.length > 0) {
+                    const names = failures.map((f) => f.repositoryId).join(', ');
+                    showToast(`Setup complete with errors. Failed to clone: ${names}`, 'warning', 8000);
+                } else {
+                    showToast(`Workspace "${workspace.id}" set up successfully.`, 'success');
+                }
+
+                // Re-render by navigating to the same page
+                const target = `#/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspace.id)}`;
+                if (_router) {
+                    _router.navigate(target);
+                } else {
+                    location.hash = target;
+                }
+            } catch (err) {
+                showToast(err.message || 'Failed to set up workspace.', 'error');
+                setupBtn.disabled = false;
+                setupBtn.textContent = 'Setup Workspace';
+            }
+        });
+        mgmtRow.appendChild(setupBtn);
+    }
+
+    // Rename button (disabled for STABLE)
+    const renameBtn = document.createElement('button');
+    renameBtn.type      = 'button';
+    renameBtn.className = 'btn btn-secondary btn-sm';
+    renameBtn.textContent = 'Rename';
+
+    if (isStable) {
+        renameBtn.disabled = true;
+        renameBtn.title    = 'The STABLE workspace cannot be renamed.';
+    }
+    mgmtRow.appendChild(renameBtn);
+
+    // Delete button (disabled for STABLE)
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type      = 'button';
+    deleteBtn.className = 'btn btn-danger btn-sm';
+    deleteBtn.textContent = 'Delete';
+
+    if (isStable) {
+        deleteBtn.disabled = true;
+        deleteBtn.title    = 'The STABLE workspace cannot be deleted.';
+    }
+    mgmtRow.appendChild(deleteBtn);
+
+    wrapper.appendChild(mgmtRow);
+
+    // Rename inline form (hidden initially)
+    const renameFormWrapper = document.createElement('div');
+    renameFormWrapper.className = 'rename-workspace-form-wrapper card';
+    renameFormWrapper.hidden = true;
+    wrapper.appendChild(renameFormWrapper);
+
+    if (!isStable) {
+        const formTitle = document.createElement('h4');
+        formTitle.className   = 'form-section-title';
+        formTitle.textContent = 'Rename Workspace';
+        renameFormWrapper.appendChild(formTitle);
+
+        const newIdField = createFormField('New Workspace ID', 'text', 'newWorkspaceId', {
+            required:    true,
+            placeholder: 'e.g. DEV or FEATURE',
+            hint:        'Must be 2–6 uppercase letters (A-Z only).',
+        });
+        renameFormWrapper.appendChild(newIdField);
+
+        const newIdInput   = newIdField.querySelector('[name="newWorkspaceId"]');
+        const newIdErrorEl = newIdField.querySelector('.field-error');
+
+        const formActions = document.createElement('div');
+        formActions.className = 'form-actions';
+
+        const saveBtn = document.createElement('button');
+        saveBtn.type      = 'button';
+        saveBtn.className = 'btn btn-primary btn-sm';
+        saveBtn.textContent = 'Save';
+
+        const cancelFormBtn = document.createElement('button');
+        cancelFormBtn.type      = 'button';
+        cancelFormBtn.className = 'btn btn-secondary btn-sm';
+        cancelFormBtn.textContent = 'Cancel';
+
+        formActions.appendChild(saveBtn);
+        formActions.appendChild(cancelFormBtn);
+        renameFormWrapper.appendChild(formActions);
+
+        // Behaviour
+        renameBtn.addEventListener('click', () => {
+            renameFormWrapper.hidden = false;
+            if (newIdInput) newIdInput.focus();
+        });
+
+        cancelFormBtn.addEventListener('click', () => {
+            renameFormWrapper.hidden = true;
+            if (newIdInput) newIdInput.value = '';
+            if (newIdErrorEl) newIdErrorEl.hidden = true;
+        });
+
+        saveBtn.addEventListener('click', async () => {
+            if (newIdErrorEl) newIdErrorEl.hidden = true;
+            if (newIdInput) {
+                newIdInput.classList.remove('error');
+                newIdInput.removeAttribute('aria-invalid');
+            }
+
+            if (!validateRequired(renameFormWrapper, ['newWorkspaceId'])) return;
+
+            const newId = newIdInput ? newIdInput.value.trim() : '';
+
+            if (!WORKSPACE_ID_PATTERN.test(newId)) {
+                if (newIdErrorEl) {
+                    newIdErrorEl.textContent = 'Must be 2–6 uppercase letters (A-Z only).';
+                    newIdErrorEl.hidden      = false;
+                }
+                if (newIdInput) {
+                    newIdInput.classList.add('error');
+                    newIdInput.setAttribute('aria-invalid', 'true');
+                    newIdInput.focus();
+                }
+                return;
+            }
+
+            try {
+                await showConfirm(
+                    'Rename Workspace',
+                    `Rename workspace "${workspace.id}" to "${newId}"? The page will navigate to the new workspace URL.`,
+                );
+            } catch {
+                return;
+            }
+
+            saveBtn.disabled    = true;
+            saveBtn.textContent = 'Saving…';
+
+            try {
+                await api.workspaces.rename(projectId, workspace.id, newId);
+                showToast(`Workspace renamed to "${newId}".`, 'success');
+                const target = `#/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(newId)}`;
+                if (_router) {
+                    _router.navigate(target);
+                } else {
+                    location.hash = target;
+                }
+            } catch (err) {
+                showToast(err.message || 'Failed to rename workspace.', 'error');
+                saveBtn.disabled    = false;
+                saveBtn.textContent = 'Save';
+            }
+        });
+
+        deleteBtn.addEventListener('click', async () => {
+            try {
+                await showConfirm(
+                    'Delete Workspace',
+                    `Delete workspace "${workspace.id}"? All cloned repositories in this workspace will be permanently removed. This action cannot be undone.`,
+                );
+            } catch {
+                return;
+            }
+
+            deleteBtn.disabled    = true;
+            deleteBtn.textContent = 'Deleting…';
+
+            try {
+                await api.workspaces.delete(projectId, workspace.id);
+                showToast(`Workspace "${workspace.id}" deleted.`, 'success');
+                if (_router) {
+                    _router.navigate(`#/projects/${encodeURIComponent(projectId)}`);
+                } else {
+                    location.hash = `#/projects/${encodeURIComponent(projectId)}`;
+                }
+            } catch (err) {
+                showToast(err.message || 'Failed to delete workspace.', 'error');
+                deleteBtn.disabled    = false;
+                deleteBtn.textContent = 'Delete';
+            }
+        });
+    }
+
+    return wrapper;
 }
 
 /**
@@ -272,11 +468,6 @@ function buildHeaderSection(projectId, workspace) {
 function buildStatusTableSection(repos, statusMap) {
     const section = document.createElement('section');
     section.className = 'workspace-status-section';
-
-    const heading = document.createElement('h2');
-    heading.className   = 'section-title';
-    heading.textContent = 'Repository Status';
-    section.appendChild(heading);
 
     if (repos.length === 0) {
         const empty = document.createElement('p');
@@ -313,26 +504,13 @@ function buildStatusTableSection(repos, statusMap) {
 }
 
 /**
- * Build the actions section.
+ * Build the Switch Branches button.
  *
  * @param {string} projectId
  * @param {string} wid        - Workspace ID.
- * @param {boolean} isStable  - Whether this is the STABLE workspace.
  * @returns {HTMLElement}
  */
-function buildActionsSection(projectId, wid, isStable) {
-    const section = document.createElement('section');
-    section.className = 'workspace-actions-section';
-
-    const heading = document.createElement('h2');
-    heading.className   = 'section-title';
-    heading.textContent = 'Actions';
-    section.appendChild(heading);
-
-    const actionsRow = document.createElement('div');
-    actionsRow.className = 'workspace-actions-row';
-
-    // ---- Switch Branches button ----
+function buildSwitchBranchesButton(projectId, wid) {
     const switchBtn = document.createElement('button');
     switchBtn.type      = 'button';
     switchBtn.className = 'btn btn-primary';
@@ -345,197 +523,7 @@ function buildActionsSection(projectId, wid, isStable) {
             location.hash = target;
         }
     });
-    actionsRow.appendChild(switchBtn);
-
-    // ---- Rename Workspace ----
-    const renameWrapper = buildRenameWorkspaceAction(projectId, wid, isStable);
-    actionsRow.appendChild(renameWrapper);
-
-    // ---- Delete Workspace button ----
-    const deleteBtn = document.createElement('button');
-    deleteBtn.type      = 'button';
-    deleteBtn.className = 'btn btn-danger';
-    deleteBtn.textContent = 'Delete Workspace';
-
-    if (isStable) {
-        deleteBtn.disabled = true;
-        deleteBtn.title    = 'The STABLE workspace cannot be deleted.';
-        deleteBtn.classList.add('btn-disabled');
-    } else {
-        deleteBtn.addEventListener('click', async () => {
-            try {
-                await showConfirm(
-                    'Delete Workspace',
-                    `Delete workspace "${wid}"? All cloned repositories in this workspace will be permanently removed. This action cannot be undone.`,
-                );
-            } catch {
-                return; // User cancelled.
-            }
-
-            deleteBtn.disabled    = true;
-            deleteBtn.textContent = 'Deleting…';
-
-            try {
-                await api.workspaces.delete(projectId, wid);
-                showToast(`Workspace "${wid}" deleted.`, 'success');
-                if (_router) {
-                    _router.navigate(`#/projects/${encodeURIComponent(projectId)}`);
-                } else {
-                    location.hash = `#/projects/${encodeURIComponent(projectId)}`;
-                }
-            } catch (err) {
-                showToast(err.message || 'Failed to delete workspace.', 'error');
-                deleteBtn.disabled    = false;
-                deleteBtn.textContent = 'Delete Workspace';
-            }
-        });
-    }
-
-    actionsRow.appendChild(deleteBtn);
-    section.appendChild(actionsRow);
-
-    return section;
-}
-
-/**
- * Build the Rename Workspace inline action.
- *
- * Returns a wrapper `<div>` containing the "Rename Workspace" button and a
- * hidden inline form. When shown, the form accepts a new workspace ID and
- * calls `api.workspaces.rename()` on submit.
- *
- * @param {string}  projectId
- * @param {string}  wid       - Current workspace ID.
- * @param {boolean} isStable
- * @returns {HTMLElement}
- */
-function buildRenameWorkspaceAction(projectId, wid, isStable) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'rename-workspace-wrapper';
-
-    // ---- Toggle button ----
-    const renameBtn = document.createElement('button');
-    renameBtn.type      = 'button';
-    renameBtn.className = 'btn btn-secondary';
-    renameBtn.textContent = 'Rename Workspace';
-
-    if (isStable) {
-        renameBtn.disabled = true;
-        renameBtn.title    = 'The STABLE workspace cannot be renamed.';
-        renameBtn.classList.add('btn-disabled');
-        wrapper.appendChild(renameBtn);
-        return wrapper;
-    }
-
-    wrapper.appendChild(renameBtn);
-
-    // ---- Inline form (hidden initially) ----
-    const formWrapper = document.createElement('div');
-    formWrapper.className = 'rename-workspace-form-wrapper card';
-    formWrapper.hidden = true;
-    wrapper.appendChild(formWrapper);
-
-    const formTitle = document.createElement('h4');
-    formTitle.className   = 'form-section-title';
-    formTitle.textContent = 'Rename Workspace';
-    formWrapper.appendChild(formTitle);
-
-    const newIdField = createFormField('New Workspace ID', 'text', 'newWorkspaceId', {
-        required:    true,
-        placeholder: 'e.g. DEV or FEATURE',
-        hint:        'Must be 2–6 uppercase letters (A-Z only).',
-    });
-    formWrapper.appendChild(newIdField);
-
-    const newIdInput   = newIdField.querySelector('[name="newWorkspaceId"]');
-    const newIdErrorEl = newIdField.querySelector('.field-error');
-
-    const formActions = document.createElement('div');
-    formActions.className = 'form-actions';
-
-    const saveBtn = document.createElement('button');
-    saveBtn.type      = 'button';
-    saveBtn.className = 'btn btn-primary btn-sm';
-    saveBtn.textContent = 'Save';
-
-    const cancelBtn = document.createElement('button');
-    cancelBtn.type      = 'button';
-    cancelBtn.className = 'btn btn-secondary btn-sm';
-    cancelBtn.textContent = 'Cancel';
-
-    formActions.appendChild(saveBtn);
-    formActions.appendChild(cancelBtn);
-    formWrapper.appendChild(formActions);
-
-    // ---- Behaviour ----
-
-    renameBtn.addEventListener('click', () => {
-        formWrapper.hidden = false;
-        renameBtn.hidden   = true;
-        if (newIdInput) newIdInput.focus();
-    });
-
-    cancelBtn.addEventListener('click', () => {
-        formWrapper.hidden = true;
-        renameBtn.hidden   = false;
-        if (newIdInput) newIdInput.value = '';
-        if (newIdErrorEl) newIdErrorEl.hidden = true;
-    });
-
-    saveBtn.addEventListener('click', async () => {
-        // Clear previous validation errors.
-        if (newIdErrorEl) newIdErrorEl.hidden = true;
-        if (newIdInput) {
-            newIdInput.classList.remove('error');
-            newIdInput.removeAttribute('aria-invalid');
-        }
-
-        if (!validateRequired(formWrapper, ['newWorkspaceId'])) return;
-
-        const newId = newIdInput ? newIdInput.value.trim() : '';
-
-        if (!WORKSPACE_ID_PATTERN.test(newId)) {
-            if (newIdErrorEl) {
-                newIdErrorEl.textContent = 'Must be 2–6 uppercase letters (A-Z only).';
-                newIdErrorEl.hidden      = false;
-            }
-            if (newIdInput) {
-                newIdInput.classList.add('error');
-                newIdInput.setAttribute('aria-invalid', 'true');
-                newIdInput.focus();
-            }
-            return;
-        }
-
-        try {
-            await showConfirm(
-                'Rename Workspace',
-                `Rename workspace "${wid}" to "${newId}"? The page will navigate to the new workspace URL.`,
-            );
-        } catch {
-            return; // User cancelled.
-        }
-
-        saveBtn.disabled    = true;
-        saveBtn.textContent = 'Saving…';
-
-        try {
-            await api.workspaces.rename(projectId, wid, newId);
-            showToast(`Workspace renamed to "${newId}".`, 'success');
-            const target = `#/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(newId)}`;
-            if (_router) {
-                _router.navigate(target);
-            } else {
-                location.hash = target;
-            }
-        } catch (err) {
-            showToast(err.message || 'Failed to rename workspace.', 'error');
-            saveBtn.disabled    = false;
-            saveBtn.textContent = 'Save';
-        }
-    });
-
-    return wrapper;
+    return switchBtn;
 }
 
 // ---------------------------------------------------------------------------
@@ -596,10 +584,63 @@ export function renderWorkspaceDetail(container, params) {
 
         const isStable = wid === STABLE_WS_ID;
 
-        container.appendChild(buildHeaderSection(projectId, workspace));
+        container.appendChild(buildHeaderSection(projectId, workspace, isStable));
         const { section: statusSection, tbody } = buildStatusTableSection(repos, statusMap || {});
         container.appendChild(statusSection);
-        container.appendChild(buildActionsSection(projectId, wid, isStable));
+
+        // Show "Retry Setup" when workspace is initialized but some repos
+        // have no status data (likely failed to clone).
+        const safeStatusMap = statusMap || {};
+        const missingRepos = repos.filter((r) => !safeStatusMap[r.repoId]);
+        if (workspace.initialized && missingRepos.length > 0) {
+            const retryRow = document.createElement('div');
+            retryRow.className = 'workspace-mgmt-row';
+
+            const retryHint = document.createElement('span');
+            retryHint.className = 'text-secondary text-sm';
+            retryHint.textContent = `${missingRepos.length} ${missingRepos.length === 1 ? 'repository has' : 'repositories have'} no data — clone may have failed.`;
+            retryRow.appendChild(retryHint);
+
+            const retryBtn = document.createElement('button');
+            retryBtn.type      = 'button';
+            retryBtn.className = 'btn btn-secondary btn-sm';
+            retryBtn.textContent = 'Retry Setup';
+            retryBtn.title = 'Re-run workspace setup to clone missing repositories.';
+
+            retryBtn.addEventListener('click', async () => {
+                retryBtn.disabled = true;
+                retryBtn.textContent = 'Setting up…';
+
+                try {
+                    const result = await api.workspaces.setup(projectId, workspace.id);
+
+                    const failures = (result && result.results || []).filter((r) => !r.success);
+                    if (failures.length > 0) {
+                        const names = failures.map((f) => f.repositoryId).join(', ');
+                        showToast(`Setup complete with errors. Failed to clone: ${names}`, 'warning', 8000);
+                    } else {
+                        showToast('All repositories cloned successfully.', 'success');
+                    }
+
+                    // Re-render
+                    const target = `#/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspace.id)}`;
+                    if (_router) {
+                        _router.navigate(target);
+                    } else {
+                        location.hash = target;
+                    }
+                } catch (err) {
+                    showToast(err.message || 'Failed to set up workspace.', 'error');
+                    retryBtn.disabled = false;
+                    retryBtn.textContent = 'Retry Setup';
+                }
+            });
+
+            retryRow.appendChild(retryBtn);
+            container.appendChild(retryRow);
+        }
+
+        container.appendChild(buildSwitchBranchesButton(projectId, wid));
 
         // Start polling only when there are repos to update.
         if (tbody && repos.length > 0) {

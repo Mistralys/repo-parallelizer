@@ -163,7 +163,11 @@ class MockWorkspaceManager {
 function buildSut(): { router: Router; wm: MockWorkspaceManager } {
     const router = new Router();
     const wm = new MockWorkspaceManager();
-    registerWorkspaceRoutes(router, wm as never);
+    // The orchestrator and appConfig are only used by the /setup endpoint;
+    // existing tests don't exercise that route, so stub values suffice.
+    const stubOrchestrator = {} as never;
+    const stubConfig = { projectsFolder: '/tmp/nonexistent-test-projects' } as never;
+    registerWorkspaceRoutes(router, wm as never, stubOrchestrator, stubConfig);
     return { router, wm };
 }
 

@@ -25,6 +25,7 @@ interface AppConfig {
     cloneDepth: number;       // default: 50
     serverPort: number;       // default: 4200
     gitPollingIntervalSeconds: number; // default: 30
+    gitCredentials?: Record<string, string>; // hostname → PAT/password; absent = public repos only
 }
 ```
 
@@ -32,7 +33,10 @@ interface AppConfig {
 
 ```typescript
 function loadConfig(configPath?: string): AppConfig
+function saveConfigField(field: string, value: unknown, configPath?: string): void
 ```
+
+> **Security note — `saveConfigField` caller guard:** The `field` parameter is **not validated** inside `saveConfigField`. Any caller that passes user-supplied input for `field` (e.g. from an HTTP request body) **must** validate it against an explicit allowlist before calling this function. Example: `if (!['gitCredentials'].includes(field)) throw new Error('Invalid field')`. This guard belongs in the route handler, not in `saveConfigField` itself.
 
 ---
 
@@ -83,6 +87,17 @@ function runGit(args: string[], cwd?: string, options?: RunGitOptions): Promise<
 function runGitOrThrow(args: string[], cwd?: string): Promise<string>
 ```
 
+### Credentials (`git-credentials.ts`)
+
+```typescript
+function extractHost(url: string): string | null
+function injectCredentials(url: string, credentials: Record<string, string>): string
+function hasEmbeddedCredentials(url: string): boolean
+function stripEmbeddedCredentials(input: string): string
+```
+
+> **`stripEmbeddedCredentials` contract:** Accepts an arbitrary string — not just a URL. Pure HTTPS URLs are sanitised via the WHATWG URL object (clean userinfo removal). All other inputs (non-HTTPS URLs, git prose error messages such as `"fatal: repository 'https://token@host/...' not found"`, and unparseable values) fall through to a regex scrub that replaces any `https?://…@` pattern with `https://***@`. Use this function on `gitResult.stderr` before surfaces it in API responses or logs.
+
 ### Clone (`git-clone.ts`)
 
 ```typescript
@@ -121,6 +136,7 @@ interface Repository {
     Id: string;
     Name: string;
     Url: string;
+    credentialsStripped?: boolean; // transient — set by add(), not persisted
 }
 
 interface RepositoryStore extends BaseStore {
@@ -616,11 +632,46 @@ function registerRepositoryRoutes(router: Router, repoManager: RepositoryManager
 function registerProjectRoutes(router: Router, projectManager: ProjectManager): void
 
 // workspaces.ts
-function registerWorkspaceRoutes(router: Router, workspaceManager: WorkspaceManager): void
+function registerWorkspaceRoutes(router: Router, workspaceManager: WorkspaceManager, workspaceOrchestrator: WorkspaceOrchestrator, appConfig: AppConfig): void
 
 // branches.ts
 function registerBranchRoutes(router: Router, orchestrator: BranchOrchestrator, workspaceManager: WorkspaceManager): void
 
 // status.ts
 function registerStatusRoutes(router: Router, pollingManager: PollingManager, projectManager: ProjectManager, workspaceManager: WorkspaceManager, config: AppConfig): void
+
+// config.ts
+function registerConfigRoutes(router: Router, appConfig: AppConfig): void
 ```
+
+---
+
+## GUI Client (`gui/public/js/api.js`)
+
+Vanilla JS HTTP client for the SPA frontend. All methods return Promises and throw an `Error` (with `message` taken from the `error` field in the JSON body) on non-2xx responses.
+
+**Import:** `import { api } from './api.js';`
+
+### `api.config.credentials`
+
+Manages per-host git credentials. All tokens are **always returned masked** by the API (e.g. `****abc1`) — the plaintext token is never surfaced in any response.
+
+```js
+// List all configured credentials.
+// Returns: Promise<Record<string, string>>  // host → masked token
+api.config.credentials.list()
+
+// Add or update a host credential.
+// data: { host: string, token: string }
+// Returns: Promise<Record<string, string>>  // updated masked credentials map
+api.config.credentials.set(data)
+
+// Remove a host credential.
+// host: string — URL-encoded automatically by the client
+// Returns: Promise<Record<string, string>>  // updated masked credentials map after deletion
+api.config.credentials.delete(host)
+```
+
+> **Token masking:** The server applies `maskToken()` before every API response. The client never receives or stores a plaintext token. The `set()` form uses `<input type="password">` in the UI.
+
+> **Known edge case:** Hosts containing a colon (e.g. `gitlab.com:8080`) may be undeletable via the UI. `encodeURIComponent()` encodes the colon in the DELETE URL, but the server's `extractParams()` does not call `decodeURIComponent()` before the credential lookup. Tracked as a low-severity improvement for a follow-up.

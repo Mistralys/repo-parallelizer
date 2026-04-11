@@ -237,6 +237,26 @@ A minimal `config.json` looks like this:
 | `cloneDepth` | `number` | | `50` | Depth passed to `git clone --depth`. Use `0` for a full clone. |
 | `serverPort` | `number` | | `4200` | TCP port the built-in HTTP server listens on. |
 | `gitPollingIntervalSeconds` | `number` | | `30` | How often (in seconds) the tool polls git remotes for new commits. |
+| `gitCredentials` | `object` | | `{}` | Map of hostname → Personal Access Token (or password) for private repository access, e.g. `{ "github.com": "ghp_..." }`. Absent or empty means public repos only. |
+
+### Private repository authentication
+
+`gitCredentials` stores credentials **in plaintext** inside `config.json`. This is an accepted trade-off for a single-user local tool, but take these steps to limit exposure:
+
+1. **Restrict file permissions** — run `chmod 600 config.json` after creating the file so only your user account can read it.
+2. **Never commit `config.json`** — it is already listed in `.gitignore`, but verify this if you fork or copy the project to a new location.
+3. **Use scoped PATs** — create tokens with the minimum required scope (typically read-only repository access) so that a leaked token has limited blast radius.
+
+Example `gitCredentials` block:
+
+```json
+"gitCredentials": {
+  "github.com": "ghp_your_token_here",
+  "gitlab.company.com": "glpat-your_token_here"
+}
+```
+
+Credentials are matched by hostname and injected into the clone/fetch URL at runtime. They are never written to log files or error messages.
 
 ### Storage structure
 

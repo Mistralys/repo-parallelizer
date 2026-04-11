@@ -1,6 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { Router } from '../router.js';
 import type { WorkspaceManager } from '../../models/workspace/workspace.manager.js';
+import type { WorkspaceOrchestrator } from '../../orchestration/workspace-orchestrator.js';
+import type { AppConfig } from '../../config/config.types.js';
 import { NotFoundError } from '../../errors.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
 
@@ -29,7 +33,21 @@ import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUti
 export function registerWorkspaceRoutes(
     router: Router,
     workspaceManager: WorkspaceManager,
+    workspaceOrchestrator: WorkspaceOrchestrator,
+    appConfig: AppConfig,
 ): void {
+
+    // Helper: compute absolute workspace folder path.
+    function workspaceFolder(projectId: string, workspaceId: string): string {
+        return path.join(appConfig.projectsFolder, projectId, workspaceId);
+    }
+
+    // Helper: augment a WorkspaceInfo with an `Initialized` boolean.
+    function withInitialized<T extends { ProjectID: string; WorkspaceID: string }>(ws: T): T & { Initialized: boolean } {
+        const wsFolder = workspaceFolder(ws.ProjectID, ws.WorkspaceID);
+        return { ...ws, Initialized: fs.existsSync(wsFolder) };
+    }
+
     // ------------------------------------------------------------------
     // GET /api/projects/:id/workspaces — list all workspaces
     // ------------------------------------------------------------------
@@ -40,7 +58,7 @@ export function registerWorkspaceRoutes(
     ): void => {
         try {
             const workspaces = workspaceManager.list(params['id']);
-            sendJson(res, 200, workspaces);
+            sendJson(res, 200, workspaces.map(withInitialized));
         } catch (err) {
             if (err instanceof NotFoundError) {
                 sendError(res, 404, err.message);
@@ -107,7 +125,7 @@ export function registerWorkspaceRoutes(
                 sendError(res, 404, `Workspace "${params['wid']}" not found in project "${params['id']}".`);
                 return;
             }
-            sendJson(res, 200, workspace);
+            sendJson(res, 200, withInitialized(workspace));
         } catch (err) {
             // getById throws when the project does not exist
             sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
@@ -208,5 +226,38 @@ export function registerWorkspaceRoutes(
         }
         res.writeHead(204, {});
         res.end('');
+    });
+
+    // ------------------------------------------------------------------
+    // POST /api/projects/:id/workspaces/:wid/setup — initialize workspace
+    // filesystem (create folder, clone repos, generate .code-workspace file).
+    // Idempotent: skips repositories whose folder already exists on disk.
+    // ------------------------------------------------------------------
+    router.post('/api/projects/:id/workspaces/:wid/setup', async (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const projectId = params['id'];
+        const workspaceId = params['wid'];
+
+        // Verify workspace data entry exists
+        try {
+            const ws = workspaceManager.getById(projectId, workspaceId);
+            if (ws === undefined) {
+                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
+                return;
+            }
+        } catch (err) {
+            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
+            return;
+        }
+
+        try {
+            const result = await workspaceOrchestrator.createWorkspace(projectId, workspaceId);
+            sendJson(res, 200, result);
+        } catch (err) {
+            sendError(res, 500, err instanceof Error ? err.message : 'Failed to set up workspace.');
+        }
     });
 }

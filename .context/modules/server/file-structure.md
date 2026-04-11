@@ -9,6 +9,7 @@
         └── router.ts
         └── routes/
             ├── branches.ts
+            ├── config.ts
             ├── projects.ts
             ├── repositories.ts
             ├── status.ts
@@ -18,6 +19,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 536 B
-- **Lines**: 24
+- **Size**: 568 B
+- **Lines**: 25
 File: `modules/server/file-structure.md`

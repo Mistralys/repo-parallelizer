@@ -517,6 +517,7 @@ import type { AppConfig } from '../config/config.types.js';
 import type { ProjectManager } from '../models/project/project.manager.js';
 import type { RepositoryManager } from '../models/repository/repository.manager.js';
 import { cloneRepository } from '../git/git-clone.js';
+import { injectCredentials, stripEmbeddedCredentials } from '../git/git-credentials.js';
 import {
     generateWorkspaceFile,
     getWorkspaceFilePath,
@@ -627,7 +628,8 @@ export class RepositoryOrchestrator {
                     );
                 }
 
-                const gitResult = await cloneRepository(repo.Url, destination, {
+                const cloneUrl = injectCredentials(repo.Url, this.config.gitCredentials ?? {});
+                const gitResult = await cloneRepository(cloneUrl, destination, {
                     depth: this.config.cloneDepth > 0 ? this.config.cloneDepth : undefined,
                     timeoutMs: CLONE_TIMEOUT_MS,
                 });
@@ -636,7 +638,7 @@ export class RepositoryOrchestrator {
                     return {
                         workspaceId,
                         success: false,
-                        error: gitResult.stderr || `git clone exited with code ${gitResult.exitCode}`,
+                        error: stripEmbeddedCredentials(gitResult.stderr) || `git clone exited with code ${gitResult.exitCode}`,
                     };
                 }
 
@@ -852,6 +854,7 @@ import type { ProjectManager } from '../models/project/project.manager.js';
 import type { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import type { RepositoryManager } from '../models/repository/repository.manager.js';
 import { cloneRepository } from '../git/git-clone.js';
+import { injectCredentials, stripEmbeddedCredentials } from '../git/git-credentials.js';
 import {
     generateWorkspaceFile,
     removeWorkspaceFile,
@@ -935,6 +938,8 @@ export class WorkspaceOrchestrator {
         const wsFolder = this.workspaceFolder(projectId, workspaceId);
         fs.mkdirSync(wsFolder, { recursive: true });
 
+        const resolvedProjectsFolder = path.resolve(this.config.projectsFolder);
+
         const repoResults: OrchestrationRepoResult[] = await Promise.all(
             project.Repositories.map(async (repoId): Promise<OrchestrationRepoResult> => {
                 const repo = this.repositoryManager.getById(repoId);
@@ -947,7 +952,31 @@ export class WorkspaceOrchestrator {
                 }
 
                 const destination = this.repoPath(projectId, workspaceId, repoId);
-                const gitResult = await cloneRepository(repo.Url, destination, {
+
+                // Skip repos that are already cloned on disk (idempotent retry).
+                // Check for `.git` rather than just the directory: a failed clone
+                // may leave behind an empty or partial directory that is not a
+                // usable repository.
+                if (fs.existsSync(path.join(destination, '.git'))) {
+                    return { repositoryId: repoId, success: true };
+                }
+
+                // Remove leftover directory from a previously failed clone so
+                // that `git clone` can create it cleanly.
+                if (fs.existsSync(destination)) {
+                    // Path-traversal guard: ensure the clone destination stays under projectsFolder.
+                    const resolvedDest = path.resolve(destination);
+                    if (!resolvedDest.startsWith(resolvedProjectsFolder + path.sep)) {
+                        throw new Error(
+                            `Security check failed: clone path "${resolvedDest}" is not under ` +
+                            `projectsFolder "${resolvedProjectsFolder}"`
+                        );
+                    }
+                    fs.rmSync(destination, { recursive: true, force: true });
+                }
+
+                const cloneUrl = injectCredentials(repo.Url, this.config.gitCredentials ?? {});
+                const gitResult = await cloneRepository(cloneUrl, destination, {
                     depth: this.config.cloneDepth > 0 ? this.config.cloneDepth : undefined,
                     timeoutMs: CLONE_TIMEOUT_MS,
                 });
@@ -956,7 +985,7 @@ export class WorkspaceOrchestrator {
                     return {
                         repositoryId: repoId,
                         success: false,
-                        error: gitResult.stderr || `git clone exited with code ${gitResult.exitCode}`,
+                        error: stripEmbeddedCredentials(gitResult.stderr) || `git clone exited with code ${gitResult.exitCode}`,
                     };
                 }
 
@@ -1119,6 +1148,6 @@ export class WorkspaceOrchestrator {
 ```
 ---
 **File Statistics**
-- **Size**: 43.38 KB
-- **Lines**: 1125
+- **Size**: 45.09 KB
+- **Lines**: 1154
 File: `modules/orchestration/architecture-core.md`

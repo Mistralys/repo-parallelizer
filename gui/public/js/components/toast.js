@@ -72,7 +72,10 @@ function dismissToast(toastEl) {
 /**
  * Display a toast notification.
  *
- * @param {string} message            - Text to display inside the toast.
+ * @param {string} message            - Text to display inside the toast.  The
+ *   message is rendered via `textContent` (NOT `innerHTML`), so server-controlled
+ *   strings (including git error output) are safe to pass here — they will be
+ *   displayed as plain text and never interpreted as HTML.
  * @param {'success'|'error'|'info'|'warning'} type - Visual variant.
  * @param {number} [duration]         - Override the auto-dismiss delay in ms.
  * @returns {HTMLElement|null}        - The created toast element, or null if

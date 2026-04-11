@@ -65,6 +65,7 @@ interface AppConfig {
     cloneDepth: number;       // default: 50
     serverPort: number;       // default: 4200
     gitPollingIntervalSeconds: number; // default: 30
+    gitCredentials?: Record<string, string>; // hostname → PAT/password; absent = public repos only
 }
 ```
 
@@ -72,7 +73,10 @@ interface AppConfig {
 
 ```typescript
 function loadConfig(configPath?: string): AppConfig
+function saveConfigField(field: string, value: unknown, configPath?: string): void
 ```
+
+> **Security note — `saveConfigField` caller guard:** The `field` parameter is **not validated** inside `saveConfigField`. Any caller that passes user-supplied input for `field` (e.g. from an HTTP request body) **must** validate it against an explicit allowlist before calling this function. Example: `if (!['gitCredentials'].includes(field)) throw new Error('Invalid field')`. This guard belongs in the route handler, not in `saveConfigField` itself.
 
 ---
 
@@ -122,6 +126,17 @@ interface RunGitOptions {
 function runGit(args: string[], cwd?: string, options?: RunGitOptions): Promise<GitResult>
 function runGitOrThrow(args: string[], cwd?: string): Promise<string>
 ```
+
+### Credentials (`git-credentials.ts`)
+
+```typescript
+function extractHost(url: string): string | null
+function injectCredentials(url: string, credentials: Record<string, string>): string
+function hasEmbeddedCredentials(url: string): boolean
+function stripEmbeddedCredentials(input: string): string
+```
+
+> **`stripEmbeddedCredentials` contract:** Accepts an arbitrary string — not just a URL. Pure HTTPS URLs are sanitised via the WHATWG URL object (clean userinfo removal). All other inputs (non-HTTPS URLs, git prose error messages such as `"fatal: repository 'https://token@host/...' not found"`, and unparseable values) fall through to a regex scrub that replaces any `https?://…@` pattern with `https://***@`. Use this function on `gitResult.stderr` before surfaces it in API responses or logs.
 
 ### Clone (`git-clone.ts`)
 
@@ -656,14 +671,49 @@ function registerRepositoryRoutes(router: Router, repoManager: RepositoryManager
 function registerProjectRoutes(router: Router, projectManager: ProjectManager): void
 
 // workspaces.ts
-function registerWorkspaceRoutes(router: Router, workspaceManager: WorkspaceManager): void
+function registerWorkspaceRoutes(router: Router, workspaceManager: WorkspaceManager, workspaceOrchestrator: WorkspaceOrchestrator, appConfig: AppConfig): void
 
 // branches.ts
 function registerBranchRoutes(router: Router, orchestrator: BranchOrchestrator, workspaceManager: WorkspaceManager): void
 
 // status.ts
 function registerStatusRoutes(router: Router, pollingManager: PollingManager, projectManager: ProjectManager, workspaceManager: WorkspaceManager, config: AppConfig): void
+
+// config.ts
+function registerConfigRoutes(router: Router, appConfig: AppConfig): void
 ```
+
+---
+
+## GUI Client (`gui/public/js/api.js`)
+
+Vanilla JS HTTP client for the SPA frontend. All methods return Promises and throw an `Error` (with `message` taken from the `error` field in the JSON body) on non-2xx responses.
+
+**Import:** `import { api } from './api.js';`
+
+### `api.config.credentials`
+
+Manages per-host git credentials. All tokens are **always returned masked** by the API (e.g. `****abc1`) — the plaintext token is never surfaced in any response.
+
+```js
+// List all configured credentials.
+// Returns: Promise<Record<string, string>>  // host → masked token
+api.config.credentials.list()
+
+// Add or update a host credential.
+// data: { host: string, token: string }
+// Returns: Promise<Record<string, string>>  // updated masked credentials map
+api.config.credentials.set(data)
+
+// Remove a host credential.
+// host: string — URL-encoded automatically by the client
+// Returns: Promise<Record<string, string>>  // updated masked credentials map after deletion
+api.config.credentials.delete(host)
+```
+
+> **Token masking:** The server applies `maskToken()` before every API response. The client never receives or stores a plaintext token. The `set()` form uses `<input type="password">` in the UI.
+
+> **Known edge case:** Hosts containing a colon (e.g. `gitlab.com:8080`) may be undeletable via the UI. `encodeURIComponent()` encodes the colon in the DELETE URL, but the server's `extractParams()` does not call `decodeURIComponent()` before the credential lookup. Tracked as a low-severity improvement for a follow-up.
 
 ```
 ###  Path: `/docs/agents/project-manifest/constraints.md`
@@ -691,7 +741,10 @@ This is a strict requirement of the `Node16` module resolution setting. TypeScri
 - Arguments are passed as a typed `string[]` directly to `spawn()`.
 - Error messages use only `args[0]` (the subcommand name), never the full args array, to avoid leaking credential-bearing URLs.
 - `RepositoryManager.add()` redacts embedded credentials from URLs before interpolating into error messages.
-
+- `runGit()` always sets `GIT_TERMINAL_PROMPT=0` and `GIT_ASKPASS=echo` on every spawned subprocess. This prevents interactive credential prompts and credential-helper (osxkeychain, libsecret) blocking on unauthenticated requests. Do not remove either env var.
+- **Standing rule — credential stripping in git error output:** When credential injection is wired into future WPs (i.e., `injectCredentials()` is used to append tokens to URLs before passing to `runGit()`/`runGitOrThrow()`), all code paths that surface `GitResult.stderr` in thrown Error messages, log output, or API responses **must** apply `stripEmbeddedCredentials()` (from `src/git/git-credentials.ts`) to the stderr string first. Git may echo the credentialed URL back in error messages (e.g., `fatal: repository https://ghp_token@github.com/... not found`), which would expose the PAT. This is a non-optional security control for every credential-injection WP.
+- **Credential injection lifetime contract:** `injectCredentials()` must only be called immediately before a git subprocess invocation — never stored or returned through API boundaries. The injected URL must not appear in log output, API responses, or Error messages without first passing through `stripEmbeddedCredentials()`.
+- **Pre-embedded-credentials passthrough:** If a repo URL already contains embedded credentials (detected via `hasEmbeddedCredentials()`) and the URL’s host is not present in the `gitCredentials` map, `injectCredentials()` returns the URL unchanged — including its pre-existing credentials. Orchestrator implementations **must** call `hasEmbeddedCredentials()` before `injectCredentials()` and decide explicitly whether to strip and re-inject or reject the URL.- **Token masking rule (API responses):** The `gitCredentials` field in `AppConfig` / `config.json` stores **plaintext** tokens. No API handler, logger, or error message may expose a plaintext token in any response. All credential API responses must pass the map through `buildMaskedCredentials()` (in `src/server/routes/config.ts`) before serialisation — this applies `maskToken()` to every value, producing `****` + last-4-chars (e.g. `****abc1`). Tokens shorter than 4 characters are fully masked as `****`. This is a non-optional security control: any new credential endpoint **must** apply `buildMaskedCredentials()` before calling `sendJson()`.
 ## Stateless Managers
 
 All model managers (`RepositoryManager`, `ProjectManager`, `WorkspaceManager`) re-read their backing JSON file from disk on **every** public method call. There is no in-memory cache. This ensures concurrent writes from other processes are always reflected.
@@ -728,6 +781,7 @@ Both `storageFolder` and `projectsFolder` in `config.json` accept relative or ab
 - **Test runner:** Node.js built-in test runner (`node --test`).
 - **Cleanup:** All tests creating temporary files must register a `process.on('exit')` handler for synchronous cleanup, in addition to `afterAll`. The `'exit'` event fires on `SIGINT` or crash.
 - **Network tests:** Tests requiring outbound internet set `SKIP_NETWORK_TESTS=1` to self-skip.
+- **Fake-git binary pattern:** To test CLI argument construction (e.g., verifying credential-injected URLs are passed correctly to `cloneRepository()`), use a fake git binary stub rather than module mocking or network calls. The stub is a shell script placed in a uniquely-prefixed temp directory that is prepended to `process.env.PATH` for the test duration; it writes all received arguments to a capture file and exits with a non-zero code. The original PATH is always restored in a `finally` block. This approach is necessary because modern git (2.x/libcurl) strips embedded credentials from its own error messages, making the injected-URL string unavailable in `stderr`. See `src/tests/workspace-orchestrator.test.ts` and `src/tests/repository-orchestrator.test.ts` for the reference implementation (`setupFakeGit()`). **Note:** PATH mutation is not concurrency-safe — this pattern is safe only because the test runner executes test files sequentially.
 
 ## GUI Frontend Conventions
 
@@ -891,7 +945,60 @@ Browser → hash change (e.g. #/projects/my-app)
             └→ Store returned cleanup function (if any)
 ```
 
-## 9. Storage File Layout
+## 9. Credential-Bearing Git Operation (Private Repository)
+
+```
+Orchestrator (future WP) receives a repo URL (e.g. https://github.com/org/private.git)
+  └→ hasEmbeddedCredentials(url)?
+       ├→ true:  URL already has credentials — decide: strip-and-reinject or reject
+       └→ false: proceed to injection
+  └→ extractHost(url)                          # → 'github.com'
+  └→ config.gitCredentials['github.com']?
+       ├→ found: injectCredentials(url, config.gitCredentials)
+       │         # Returns https://ghp_token@github.com/org/private.git
+       │         # Token injected via WHATWG URL API (percent-encoded, not string concat)
+       └→ absent: pass original URL (auth will fail fast — GIT_ASKPASS=echo)
+  └→ cloneRepository(injectedUrl, destination, options)
+       └→ runGit(['clone', injectedUrl, ...])
+            └→ spawn() env: { GIT_TERMINAL_PROMPT:'0', GIT_ASKPASS:'echo' }
+  └→ On error (result.stderr contains 'auth'):
+       └→ stripEmbeddedCredentials(result.stderr)  ← REQUIRED before surfacing
+            # Removes ghp_token from error string before logging / API response
+```
+
+**Credential injection rules (standing constraints):**
+- `injectCredentials()` must only be called immediately before a git subprocess call — never stored or passed through API boundaries.
+- `stripEmbeddedCredentials()` must be applied to any `GitResult.stderr` and `Error.message` before the string is logged or returned in an API response.
+- `hasEmbeddedCredentials()` must be checked before calling `injectCredentials()` when the URL originates from user input.
+
+---
+
+## 10. Workspace Setup — Clone Failure Error Propagation
+
+```
+WorkspaceOrchestrator.createWorkspace() on clone failure:
+  └→ cloneRepository() → GitResult.stderr  (e.g. "fatal: Authentication failed for https://...")
+       └→ [FUTURE WP — MANDATORY] stripEmbeddedCredentials(gitResult.stderr)
+            # Must be applied before assigning to OrchestrationRepoResult.error
+            # Prevents PAT exposure when injectCredentials() is active
+       └→ OrchestrationRepoResult.error = (sanitised) stderr string
+  └→ API response: { failures: [{ repositoryId, error }] }
+  └→ Browser (project-detail.js):
+       for (const failure of failures):
+         showToast(`Failed to clone "${failure.repositoryId}": ${failure.error}`, 'error', 8000)
+         # message set via textContent — NOT innerHTML — so server-controlled strings are XSS-safe
+```
+
+**Standing security rule:** Once credential injection is active, `stripEmbeddedCredentials()` (from
+`src/git/git-credentials.ts`) **must** be applied to `gitResult.stderr` in
+`workspace-orchestrator.ts` and `repository-orchestrator.ts` before the string is assigned to
+`OrchestrationRepoResult.error` / `WorkspaceCloneResult.error`. This is a blocking prerequisite for
+the credential injection WP — without it, PATs will appear in API JSON responses and the browser
+toast UI.
+
+---
+
+## 11. Storage File Layout
 
 ```
 {storageFolder}/
@@ -944,9 +1051,10 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 |---|---|---|
 | `#/` | `dashboard.js` | Project listing with creation form. |
 | `#/repositories` | `repositories.js` | Repository CRUD table. |
-| `#/projects/:id` | `project-detail.js` | Project metadata, repo/workspace management. |
+| `#/projects/:id` | `project-detail.js` | Project metadata, tabbed repo/workspace/danger-zone management. |
 | `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with 10s polling. |
 | `#/projects/:id/workspaces/:wid/branch-switch` | `branch-switch.js` | 3-step branch switch wizard. |
+| `#/settings` | `settings.js` | Git credentials management (add/delete per-host tokens). |
 
 ## API Client
 
@@ -954,9 +1062,10 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 
 - `api.repositories` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `delete(id)`
 - `api.projects` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `rename(id, newId)`, `delete(id)`, `addRepository(pid, rid)`, `removeRepository(pid, rid)`
-- `api.workspaces` — `list(pid)`, `get(pid, wid)`, `create(pid, data)`, `update(pid, wid, data)`, `rename(pid, wid, newId)`, `delete(pid, wid)`
+- `api.workspaces` — `list(pid)`, `get(pid, wid)`, `create(pid, data)`, `update(pid, wid, data)`, `rename(pid, wid, newId)`, `delete(pid, wid)`, `setup(pid, wid)`
 - `api.branches` — `list(pid, wid)`, `switch(pid, wid, assignments)`
 - `api.status` — `get(pid, wid)`, `refresh(pid, wid)`
+- `api.config.credentials` — `list()`, `set(data)`, `delete(host)`
 
 ## Reusable Components
 
@@ -966,7 +1075,7 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 | Form Helpers | `components/form-helpers.js` | `createFormField()`, `validateRequired()`, `WORKSPACE_ID_PATTERN` | Form field generation and validation. |
 | Status Badge | `components/status-badge.js` | `createStatusBadge(gitStatusInfo): HTMLElement` | Git status badge with branch pill and detail chips. |
 | Theme Toggle | `components/theme-toggle.js` | `createThemeToggle(): HTMLButtonElement` | Light/dark mode toggle button. Reads/persists theme in `localStorage`. |
-| Toast | `components/toast.js` | `showToast(message, type, duration): HTMLElement\|null` | Auto-dismissing notification in `#toast-container`. |
+| Toast | `components/toast.js` | `showToast(message, type, duration): HTMLElement\|null` | Auto-dismissing notification in `#toast-container`. Message is rendered via `textContent` (not `innerHTML`) — server-controlled strings including git error output are XSS-safe to pass directly. |
 
 ## Utilities
 
@@ -996,6 +1105,10 @@ Views using router injection: `dashboard.js`, `project-detail.js`, `workspace-de
 Views with side-effects (e.g. `setInterval` polling) return a synchronous cleanup function from their entry point. The router calls it before rendering the next view. The cleanup must be returned **before** any async operations, so the router can register it immediately.
 
 Views returning cleanup: `workspace-detail.js` (clears 10-second polling interval).
+
+### Tabbed Navigation (Project Detail)
+
+The project detail view organises content into three tabs: **Repositories**, **Workspaces**, and **Danger Zone**. Tabs are implemented with `.tab-nav` / `.tab-btn` / `.tab-panel` CSS classes and ARIA `role="tablist"` / `role="tab"` / `role="tabpanel"` attributes. Switching is handled by a single delegated click listener on the tab nav container. Only one panel is visible at a time (`.tab-panel.active`).
 
 ```
 ###  Path: `/docs/agents/project-manifest/rest-api.md`
@@ -1038,12 +1151,13 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 
 | Method | Path | Success | Error Codes | Description |
 |---|---|---|---|---|
-| `GET` | `/api/projects/:id/workspaces` | 200 | 404 | List workspaces in a project. |
-| `GET` | `/api/projects/:id/workspaces/:wid` | 200 | 404 | Get a single workspace. |
+| `GET` | `/api/projects/:id/workspaces` | 200 | 404 | List workspaces in a project. Response includes `Initialized` boolean. |
+| `GET` | `/api/projects/:id/workspaces/:wid` | 200 | 404 | Get a single workspace. Response includes `Initialized` boolean. |
 | `POST` | `/api/projects/:id/workspaces` | 201 | 400, 404 | Create workspace. Body: `{ id, description? }`. |
 | `PUT` | `/api/projects/:id/workspaces/:wid` | 200 | 400, 404 | Update workspace. Body: `{ Description? }`. |
 | `PUT` | `/api/projects/:id/workspaces/:wid/rename` | 200 | 400, 404 | Rename workspace. Body: `{ newId }`. |
 | `DELETE` | `/api/projects/:id/workspaces/:wid` | 204 | 404 | Delete workspace (STABLE cannot be deleted). |
+| `POST` | `/api/projects/:id/workspaces/:wid/setup` | 200 | 400, 404, 500 | Initialize workspace on disk (clone repos, generate .code-workspace file). |
 
 ---
 
@@ -1100,6 +1214,57 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
         "hasConflicts": false
     }
 }
+```
+
+---
+
+## Credentials (`/api/config/credentials`)
+
+Manage per-host git credentials stored in `gitCredentials` within `config.json`. Changes take effect immediately (no server restart required) and are persisted to disk.
+
+**Token masking:** tokens are never returned in full. The response always shows `****` followed by the last 4 characters (e.g. `****abc1`). Tokens shorter than 4 characters are fully masked as `****`.
+
+| Method | Path | Success | Error Codes | Description |
+|---|---|---|---|---|
+| `GET` | `/api/config/credentials` | 200 | — | List all configured credentials with masked tokens. |
+| `PUT` | `/api/config/credentials` | 200 | 400 | Add or update a single host entry. Body: `{ host, token }`. |
+| `DELETE` | `/api/config/credentials/:host` | 200 | 404 | Remove a single host entry. |
+
+### Validation (PUT)
+
+- `host`: non-empty string; must not contain path separators (`/`, `\`) or whitespace.
+- `token`: non-empty string.
+
+Both fields are required; missing or invalid fields return `400` with a descriptive error message.
+
+### `GET /api/config/credentials` Response
+
+```json
+{
+    "github.com": "****abc1",
+    "gitlab.com": "****xyz9"
+}
+```
+
+An empty object `{}` is returned when no credentials are configured.
+
+### `PUT /api/config/credentials` Request / Response
+
+**Request body:**
+```json
+{ "host": "github.com", "token": "ghp_fulltoken" }
+```
+
+**Response** (full masked map after update):
+```json
+{ "github.com": "****oken" }
+```
+
+### `DELETE /api/config/credentials/:host` Response
+
+**Response** (full masked map after deletion — empty object when last entry removed):
+```json
+{}
 ```
 
 ```
@@ -1228,6 +1393,6 @@ Both scripts `cd` to their own directory before invoking `node dist/index.js men
 ```
 ---
 **File Statistics**
-- **Size**: 56.17 KB
-- **Lines**: 1398
+- **Size**: 57.06 KB
+- **Lines**: 1400
 File: `project-manifest.md`

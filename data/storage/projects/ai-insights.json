@@ -1,0 +1,19 @@
+{
+    "Id": "ai-insights",
+    "Name": "AI Insights",
+    "Description": "",
+    "DateCreated": "2026-04-08T14:06:22.503Z",
+    "DateModified": "2026-04-08T14:06:40.418Z",
+    "Repositories": [
+        "ai-insights",
+        "ai-persona-builder"
+    ],
+    "Workspaces": {
+        "STABLE": {
+            "Description": "Stable workspace",
+            "DateCreated": "2026-04-08T14:06:22.503Z",
+            "DateModified": "2026-04-08T14:06:22.503Z"
+        }
+    },
+    "SchemaVersion": 1
+}

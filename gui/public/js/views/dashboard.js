@@ -98,7 +98,12 @@ function buildProjectCard(project, workspaceCount) {
     wsStat.className = 'stat-chip';
     wsStat.textContent = `${workspaceCount} ${workspaceCount === 1 ? 'workspace' : 'workspaces'}`;
 
+    const separator = document.createElement('span');
+    separator.className = 'stat-separator';
+    separator.textContent = '·';
+
     stats.appendChild(repoStat);
+    stats.appendChild(separator);
     stats.appendChild(wsStat);
     card.appendChild(stats);
 
@@ -274,24 +279,31 @@ async function renderProjectList(listContainer) {
         return;
     }
 
-    // Fetch workspace counts in parallel; failures degrade gracefully.
-    const workspaceCounts = await Promise.all(
+    // Fetch full project data + workspace counts in parallel per project.
+    const projectDetails = await Promise.all(
         projects.map(async (project) => {
             const id = project.Id || project.id || '';
+            let fullProject = project;
+            let wsCount = 0;
             try {
-                const workspaces = await api.workspaces.list(id);
-                return Array.isArray(workspaces) ? workspaces.length : 0;
+                const [full, workspaces] = await Promise.all([
+                    api.projects.get(id),
+                    api.workspaces.list(id),
+                ]);
+                fullProject = full;
+                wsCount = Array.isArray(workspaces) ? workspaces.length : 0;
             } catch (_err) {
-                return 0;
+                // Degrade gracefully — show index data with 0 counts.
             }
+            return { fullProject, wsCount };
         }),
     );
 
     const grid = document.createElement('div');
     grid.className = 'project-grid';
 
-    projects.forEach((project, index) => {
-        grid.appendChild(buildProjectCard(project, workspaceCounts[index]));
+    projectDetails.forEach(({ fullProject, wsCount }) => {
+        grid.appendChild(buildProjectCard(fullProject, wsCount));
     });
 
     listContainer.appendChild(grid);

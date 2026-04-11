@@ -35,4 +35,15 @@ export interface AppConfig {
      * @default 30
      */
     gitPollingIntervalSeconds: number;
+
+    /**
+     * Map of hostname (or URL prefix) to Personal Access Token / password used
+     * when cloning or fetching from private repositories.
+     *
+     * Keys are matched against the remote URL (e.g. `"github.com"`).
+     * Values must be non-empty credential strings (PATs, passwords, etc.).
+     *
+     * Omit the field or leave the object empty for public repositories.
+     */
+    gitCredentials?: Record<string, string>;
 }

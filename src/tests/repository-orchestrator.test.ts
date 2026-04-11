@@ -11,6 +11,7 @@ import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import { WorkspaceOrchestrator } from '../orchestration/workspace-orchestrator.js';
 import { RepositoryOrchestrator } from '../orchestration/repository-orchestrator.js';
+import { setupFakeGit } from './test-helpers.js';
 
 // ─── Global fixtures ──────────────────────────────────────────────────────────
 
@@ -400,4 +401,86 @@ test('deleteRepositoryGlobally throws when repository does not exist globally', 
         () => orchestrator.deleteRepositoryGlobally('nonexistent-repo'),
         /does not exist/,
     );
+});
+
+// ─── Credential injection (addRepositoryToProject) ────────────────────────────
+
+test('addRepositoryToProject passes token-injected URL to cloneRepository when credentials match', async () => {
+    const base = makeTempDir();
+    const fakeGitDir = fs.mkdtempSync(path.join(tmpRoot, 'fake-git-ro-inj-'));
+    const capturedArgsFile = setupFakeGit(fakeGitDir);
+
+    const config = makeConfig(base);
+    // Only HTTPS URLs are processed by injectCredentials.
+    config.gitCredentials = { 'private.example': 'ghp_testtoken' };
+    initializeStorage(config);
+
+    const repoManager    = new RepositoryManager(config);
+    const projectManager = new ProjectManager(config, repoManager);
+    const orchestrator   = new RepositoryOrchestrator(config, projectManager, repoManager);
+
+    repoManager.add({ url: 'https://private.example/org/priv-repo.git', id: 'priv-repo' });
+    // Create project WITHOUT priv-repo so addRepositoryToProject can add it (that is its purpose).
+    projectManager.create('Priv Project', [], undefined, 'priv-project-ro-inject');
+
+    // Temporarily prepend the fake-git directory to PATH.
+    const origPath = process.env.PATH ?? '';
+    process.env.PATH = `${fakeGitDir}:${origPath}`;
+    let result;
+    try {
+        result = await orchestrator.addRepositoryToProject('priv-project-ro-inject', 'priv-repo');
+    } finally {
+        process.env.PATH = origPath;
+    }
+
+    // The fake git writes all CLI arguments to capturedArgsFile — the injected
+    // URL (https://ghp_testtoken@private.example/...) must appear among them.
+    const captured = fs.existsSync(capturedArgsFile)
+        ? fs.readFileSync(capturedArgsFile, 'utf8')
+        : '';
+    assert.ok(
+        captured.includes('ghp_testtoken@private.example'),
+        `expected injected URL with token in git arguments; got: "${captured}"`,
+    );
+    assert.ok(result.workspaceResults.length > 0, 'expected at least one workspace result');
+});
+
+test('addRepositoryToProject passes original URL to cloneRepository when no credentials match', async () => {
+    const base = makeTempDir();
+    const fakeGitDir = fs.mkdtempSync(path.join(tmpRoot, 'fake-git-ro-nocr-'));
+    const capturedArgsFile = setupFakeGit(fakeGitDir);
+
+    const config = makeConfig(base); // gitCredentials deliberately absent
+    initializeStorage(config);
+
+    const repoManager    = new RepositoryManager(config);
+    const projectManager = new ProjectManager(config, repoManager);
+    const orchestrator   = new RepositoryOrchestrator(config, projectManager, repoManager);
+
+    repoManager.add({ url: 'https://private.example/org/priv-repo.git', id: 'priv-repo' });
+    // Create project WITHOUT priv-repo so addRepositoryToProject can add it.
+    projectManager.create('Priv Project', [], undefined, 'priv-project-ro-no-creds');
+
+    const origPath = process.env.PATH ?? '';
+    process.env.PATH = `${fakeGitDir}:${origPath}`;
+    let result;
+    try {
+        result = await orchestrator.addRepositoryToProject('priv-project-ro-no-creds', 'priv-repo');
+    } finally {
+        process.env.PATH = origPath;
+    }
+
+    // Without credentials the URL must pass through unchanged — no token injected.
+    const captured = fs.existsSync(capturedArgsFile)
+        ? fs.readFileSync(capturedArgsFile, 'utf8')
+        : '';
+    assert.ok(
+        captured.includes('https://private.example/org/priv-repo.git'),
+        `expected original URL (no token) in git arguments; got: "${captured}"`,
+    );
+    assert.ok(
+        !captured.includes('@private.example'),
+        `expected no injected credentials in clone URL; got: "${captured}"`,
+    );
+    assert.ok(result.workspaceResults.length > 0, 'expected at least one workspace result');
 });

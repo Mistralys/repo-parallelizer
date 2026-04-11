@@ -93,31 +93,39 @@ function showLoading(el, label = 'Loading…') {
 
 /**
  * Build the project metadata header section.
- * Description is editable inline: clicking Edit shows a textarea; Save calls
- * `api.projects.update()`.
+ * Description is editable inline: clicking the edit icon shows a textarea;
+ * Save calls `api.projects.update()`.
  *
  * @param {{ id: string, name: string, description: string }} project
  * @returns {HTMLElement}
  */
 function buildMetaSection(project) {
     const section = document.createElement('section');
-    section.className = 'project-meta-section card';
+    section.className = 'project-meta-section';
 
-    // Project ID + Name
-    const idRow = document.createElement('div');
-    idRow.className = 'project-meta-id-row';
+    // Top row: name + ID + edit icon
+    const topRow = document.createElement('div');
+    topRow.className = 'project-meta-top-row';
 
-    const idLabel = document.createElement('span');
-    idLabel.className = 'project-meta-id text-muted';
-    idLabel.textContent = `ID: ${project.id}`;
-
-    const nameEl = document.createElement('h2');
+    const nameEl = document.createElement('h1');
     nameEl.className = 'project-meta-name';
     nameEl.textContent = project.name || project.id;
 
-    idRow.appendChild(nameEl);
-    idRow.appendChild(idLabel);
-    section.appendChild(idRow);
+    const idLabel = document.createElement('span');
+    idLabel.className = 'project-meta-id text-muted';
+    idLabel.textContent = project.id;
+
+    const editIconBtn = document.createElement('button');
+    editIconBtn.type      = 'button';
+    editIconBtn.className = 'btn-icon project-meta-edit-icon';
+    editIconBtn.title     = 'Edit project description';
+    editIconBtn.setAttribute('aria-label', 'Edit project description');
+    editIconBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 1.5l3 3L5 14H2v-3L11.5 1.5z"/></svg>';
+
+    topRow.appendChild(nameEl);
+    topRow.appendChild(idLabel);
+    topRow.appendChild(editIconBtn);
+    section.appendChild(topRow);
 
     // Description — read-mode
     const descRow = document.createElement('div');
@@ -127,13 +135,7 @@ function buildMetaSection(project) {
     descDisplay.className = 'project-meta-description text-secondary';
     descDisplay.textContent = project.description || 'No description.';
 
-    const editDescBtn = document.createElement('button');
-    editDescBtn.type      = 'button';
-    editDescBtn.className = 'btn btn-secondary btn-sm';
-    editDescBtn.textContent = 'Edit Description';
-
     descRow.appendChild(descDisplay);
-    descRow.appendChild(editDescBtn);
     section.appendChild(descRow);
 
     // Description — edit-mode (hidden initially)
@@ -143,7 +145,7 @@ function buildMetaSection(project) {
 
     const descTextarea = document.createElement('textarea');
     descTextarea.className = 'form-textarea';
-    descTextarea.rows  = 3;
+    descTextarea.rows  = 2;
     descTextarea.value = project.description;
     descTextarea.setAttribute('aria-label', 'Project description');
     editRow.appendChild(descTextarea);
@@ -168,7 +170,7 @@ function buildMetaSection(project) {
 
     // ---- Behaviour ----
 
-    editDescBtn.addEventListener('click', () => {
+    editIconBtn.addEventListener('click', () => {
         descRow.hidden   = true;
         editRow.hidden   = false;
         descTextarea.value = project.description;
@@ -221,32 +223,49 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
     const section = document.createElement('section');
     section.className = 'project-repos-section';
 
-    const heading = document.createElement('h3');
-    heading.className = 'section-title';
-    heading.textContent = 'Repositories';
-    section.appendChild(heading);
-
     // Build a map for quick lookup: repoId → { id, name, url }
     const repoMap = new Map(allRepos.map((r) => [r.id, r]));
 
-    // ---- Repo list ----
+    // ---- Repo table ----
     if (projectRepoIds.length === 0) {
         const empty = document.createElement('p');
         empty.className = 'empty-state-inline text-secondary';
         empty.textContent = 'No repositories in this project yet.';
         section.appendChild(empty);
     } else {
-        const list = document.createElement('ul');
-        list.className = 'repo-list';
+        const table = document.createElement('table');
+        table.className = 'data-table repos-table';
+
+        const thead = document.createElement('thead');
+        const htr   = document.createElement('tr');
+        ['Name', 'ID', 'Actions'].forEach((label) => {
+            const th = document.createElement('th');
+            th.textContent = label;
+            htr.appendChild(th);
+        });
+        thead.appendChild(htr);
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
 
         projectRepoIds.forEach((repoId) => {
             const repo = repoMap.get(repoId);
-            const li   = document.createElement('li');
-            li.className = 'repo-list-item';
+            const tr = document.createElement('tr');
 
-            const repoInfo = document.createElement('span');
-            repoInfo.className = 'repo-list-info';
-            repoInfo.textContent = repo ? `${repo.name || repo.id} (${repo.id})` : repoId;
+            // Name cell
+            const nameCell = document.createElement('td');
+            nameCell.textContent = repo ? (repo.name || repo.id) : repoId;
+            tr.appendChild(nameCell);
+
+            // ID cell
+            const idCell = document.createElement('td');
+            idCell.className = 'text-muted font-mono';
+            idCell.textContent = repoId;
+            tr.appendChild(idCell);
+
+            // Actions cell
+            const actCell = document.createElement('td');
+            actCell.className = 'actions';
 
             const removeBtn = document.createElement('button');
             removeBtn.type      = 'button';
@@ -278,12 +297,13 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
                 }
             });
 
-            li.appendChild(repoInfo);
-            li.appendChild(removeBtn);
-            list.appendChild(li);
+            actCell.appendChild(removeBtn);
+            tr.appendChild(actCell);
+            tbody.appendChild(tr);
         });
 
-        section.appendChild(list);
+        table.appendChild(tbody);
+        section.appendChild(table);
     }
 
     // ---- Add Repository picker ----
@@ -359,18 +379,13 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
  * Includes an "Add Workspace" form.
  *
  * @param {string}   projectId  - Current project ID.
- * @param {Array<{ id: string, description: string, createdAt: string }>} workspaces
+ * @param {Array<{ id: string, description: string, createdAt: string, initialized: boolean }>} workspaces
  * @param {function(): Promise<void>} onRefresh - Re-renders the entire view.
  * @returns {HTMLElement}
  */
 function buildWorkspacesSection(projectId, workspaces, onRefresh) {
     const section = document.createElement('section');
     section.className = 'project-workspaces-section';
-
-    const heading = document.createElement('h3');
-    heading.className = 'section-title';
-    heading.textContent = 'Workspaces';
-    section.appendChild(heading);
 
     // ---- Workspace list ----
     if (workspaces.length === 0) {
@@ -439,6 +454,43 @@ function buildWorkspacesSection(projectId, workspaces, onRefresh) {
             actCell.className = 'workspace-actions-cell';
 
             const isStable = ws.id === 'STABLE';
+
+            // Setup button — shown when workspace is not initialized on disk
+            if (!ws.initialized) {
+                const setupBtn = document.createElement('button');
+                setupBtn.type      = 'button';
+                setupBtn.className = 'btn btn-primary btn-sm';
+                setupBtn.textContent = 'Setup';
+                setupBtn.title = 'Initialize workspace on disk (create folder, clone repos).';
+
+                setupBtn.addEventListener('click', async () => {
+                    setupBtn.disabled = true;
+                    setupBtn.textContent = 'Setting up…';
+
+                    try {
+                        const result = await api.workspaces.setup(projectId, ws.id);
+
+                        // Report per-repo clone results
+                        const failures = (result && result.results || []).filter((r) => !r.success);
+                        if (failures.length > 0) {
+                            for (const failure of failures) {
+                                const detail = failure.error ? `: ${failure.error}` : '.';
+                                showToast(`Failed to clone "${failure.repositoryId}"${detail}`, 'warning', 8000);
+                            }
+                        } else {
+                            showToast(`Workspace "${ws.id}" set up successfully.`, 'success');
+                        }
+
+                        await onRefresh();
+                    } catch (err) {
+                        showToast(err.message || 'Failed to set up workspace.', 'error');
+                        setupBtn.disabled = false;
+                        setupBtn.textContent = 'Setup';
+                    }
+                });
+
+                actCell.appendChild(setupBtn);
+            }
 
             const deleteBtn = document.createElement('button');
             deleteBtn.type      = 'button';
@@ -825,10 +877,7 @@ export async function renderProjectDetail(container, params) {
     // -----------------------------------------------------------------------
     container.innerHTML = '';
 
-    // ---- Page header ----
-    const header = document.createElement('div');
-    header.className = 'page-header';
-
+    // ---- Page header (back link only — name is in the meta section) ----
     const backLink = document.createElement('a');
     backLink.href      = '#/';
     backLink.className = 'back-link text-muted';
@@ -839,20 +888,62 @@ export async function renderProjectDetail(container, params) {
             _router.navigate('#/');
         });
     }
-    header.appendChild(backLink);
-
-    const title = document.createElement('h1');
-    title.className = 'page-title';
-    title.textContent = normProject.name || normProject.id;
-    header.appendChild(title);
-
-    container.appendChild(header);
+    container.appendChild(backLink);
 
     // ---- Metadata section ----
     container.appendChild(buildMetaSection(normProject));
 
-    // ---- Repositories section ----
-    container.appendChild(
+    // ---- Tab navigation ----
+    const tabNav = document.createElement('nav');
+    tabNav.className = 'tab-nav';
+    tabNav.setAttribute('role', 'tablist');
+
+    const tabs = [
+        { id: 'workspaces', label: 'Workspaces' },
+        { id: 'repositories', label: 'Repositories' },
+        { id: 'danger', label: 'Danger Zone' },
+    ];
+
+    const panels = {};
+
+    tabs.forEach((tab, index) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'tab-btn' + (index === 0 ? ' active' : '');
+        btn.textContent = tab.label;
+        btn.setAttribute('role', 'tab');
+        btn.setAttribute('aria-selected', index === 0 ? 'true' : 'false');
+        btn.setAttribute('aria-controls', `tab-panel-${tab.id}`);
+        btn.dataset.tab = tab.id;
+        tabNav.appendChild(btn);
+
+        const panel = document.createElement('div');
+        panel.id = `tab-panel-${tab.id}`;
+        panel.className = 'tab-panel' + (index === 0 ? ' active' : '');
+        panel.setAttribute('role', 'tabpanel');
+        panels[tab.id] = panel;
+    });
+
+    tabNav.addEventListener('click', (e) => {
+        const btn = e.target.closest('.tab-btn');
+        if (!btn) return;
+        const tabId = btn.dataset.tab;
+
+        tabNav.querySelectorAll('.tab-btn').forEach((b) => {
+            b.classList.remove('active');
+            b.setAttribute('aria-selected', 'false');
+        });
+        btn.classList.add('active');
+        btn.setAttribute('aria-selected', 'true');
+
+        Object.values(panels).forEach((p) => p.classList.remove('active'));
+        panels[tabId].classList.add('active');
+    });
+
+    container.appendChild(tabNav);
+
+    // ---- Repositories panel ----
+    panels.repositories.appendChild(
         buildRepositoriesSection(
             normProject.id,
             normProject.repositories,
@@ -860,23 +951,21 @@ export async function renderProjectDetail(container, params) {
             refresh,
         ),
     );
+    container.appendChild(panels.repositories);
 
-    // ---- Workspaces section ----
-    container.appendChild(
+    // ---- Workspaces panel ----
+    panels.workspaces.appendChild(
         buildWorkspacesSection(normProject.id, normWorkspaces, refresh),
     );
+    container.appendChild(panels.workspaces);
 
-    // ---- Danger zone ----
+    // ---- Danger zone panel ----
     const dangerZone = document.createElement('div');
     dangerZone.className = 'danger-zone';
-
-    const dangerHeading = document.createElement('h3');
-    dangerHeading.className = 'section-title';
-    dangerHeading.textContent = 'Danger Zone';
-    dangerZone.appendChild(dangerHeading);
 
     dangerZone.appendChild(buildRenameSection(normProject));
     dangerZone.appendChild(buildDeleteSection(normProject));
 
-    container.appendChild(dangerZone);
+    panels.danger.appendChild(dangerZone);
+    container.appendChild(panels.danger);
 }

@@ -12,6 +12,16 @@ export interface Repository {
 
     /** Remote Git URL (HTTPS or SSH). */
     Url: string;
+
+    /**
+     * Transient flag set by `RepositoryManager.add()` when embedded credentials
+     * were stripped from the URL before storage. Not persisted to
+     * `repositories.json`.
+     *
+     * Uses camelCase (not PascalCase like the persisted fields above) to signal
+     * that this property is runtime-only and excluded from the data schema.
+     */
+    credentialsStripped?: boolean;
 }
 
 /**

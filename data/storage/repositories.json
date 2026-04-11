@@ -1,0 +1,25 @@
+{
+    "Repositories": [
+        {
+            "Id": "paralizer",
+            "Name": "Repo Parallelizer",
+            "Url": "https://github.com/Mistralys/repo-parallelizer.git"
+        },
+        {
+            "Id": "ai-persona-builder",
+            "Name": "AI Persona Builder",
+            "Url": "https://github.com/Mistralys/ai-persona-builder"
+        },
+        {
+            "Id": "application-framework",
+            "Name": "App Framework",
+            "Url": "https://github.com/Mistralys/application-framework"
+        },
+        {
+            "Id": "ai-insights",
+            "Name": "AI Insights",
+            "Url": "git@github.com:Mistralys/ai-insights.git"
+        }
+    ],
+    "SchemaVersion": 1
+}

@@ -10,6 +10,7 @@
  *   #/projects/:id                               → Project Detail   (WP-014)
  *   #/projects/:id/workspaces/:wid               → Workspace Detail (WP-016)
  *   #/projects/:id/workspaces/:wid/branch-switch → Branch Switch    (WP-017)
+ *   #/settings                                   → Settings         (WP-009)
  */
 
 import { Router }                                        from './router.js';
@@ -18,6 +19,7 @@ import { renderRepositories }                            from './views/repositor
 import { renderProjectDetail, setRouter as setProjectDetailRouter } from './views/project-detail.js';
 import { renderWorkspaceDetail, setRouter as setWorkspaceDetailRouter } from './views/workspace-detail.js';
 import { renderBranchSwitch, setRouter as setBranchSwitchRouter } from './views/branch-switch.js';
+import { renderSettings }                                from './views/settings.js';
 import { createThemeToggle }                             from './components/theme-toggle.js';
 import { initNavHighlight }                              from './utils/nav-highlight.js';
 
@@ -47,6 +49,9 @@ router.register('#/projects/:id/workspaces/:wid', renderWorkspaceDetail);
 
 // Branch switch (WP-017)
 router.register('#/projects/:id/workspaces/:wid/branch-switch', renderBranchSwitch);
+
+// Settings (WP-009)
+router.register('#/settings', renderSettings);
 
 // ---------------------------------------------------------------------------
 // Theme toggle — apply saved theme before first render to avoid flash

@@ -8,7 +8,15 @@
 └── LICENSE/
 └── README.md
 └── config.dist.json
+└── config.json
 └── context.yaml
+└── data/
+    ├── storage/
+    │   └── projects-index.json
+    │   └── projects/
+    │       ├── ai-insights.json
+    │       ├── repo-parallelizer.json
+    │   └── repositories.json
 └── docs/
     ├── agents/
     │   ├── project-manifest/
@@ -48,6 +56,7 @@
     │           └── dashboard.js
     │           └── project-detail.js
     │           └── repositories.js
+    │           └── settings.js
     │           └── workspace-detail.js
 └── menu.cmd
 └── menu.sh
@@ -70,6 +79,7 @@
     │   ├── git-branch.ts
     │   ├── git-cli.ts
     │   ├── git-clone.ts
+    │   ├── git-credentials.ts
     │   ├── git-status.ts
     │   ├── git.types.ts
     │   ├── module-context.yaml
@@ -104,6 +114,7 @@
     │   │   ├── router.test.ts
     │   │   ├── routes/
     │   │   │   ├── branches.test.ts
+    │   │   │   ├── config.test.ts
     │   │   │   ├── projects.test.ts
     │   │   │   ├── repositories.test.ts
     │   │   │   ├── status.test.ts
@@ -116,6 +127,7 @@
     │   ├── router.ts
     │   ├── routes/
     │   │   ├── branches.ts
+    │   │   ├── config.ts
     │   │   ├── projects.ts
     │   │   ├── repositories.ts
     │   │   ├── status.ts
@@ -132,6 +144,7 @@
     │   ├── git-branch.test.ts
     │   ├── git-cli.test.ts
     │   ├── git-clone.test.ts
+    │   ├── git-credentials.test.ts
     │   ├── git-status.test.ts
     │   ├── json-storage.test.ts
     │   ├── paths.test.ts
@@ -155,6 +168,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 5.32 KB
-- **Lines**: 162
+- **Size**: 5.73 KB
+- **Lines**: 174
 File: `project-folder-structure.md`

@@ -43,13 +43,17 @@ export function normaliseProject(project) {
 /**
  * Normalise a workspace object from the backend.
  *
+ * The backend returns `WorkspaceID` and `DateCreated` (not `Id` / `CreatedAt`),
+ * so we must map both naming conventions.
+ *
  * @param {Object} ws
- * @returns {{ id: string, description: string, createdAt: string }}
+ * @returns {{ id: string, description: string, createdAt: string, initialized: boolean }}
  */
 export function normaliseWorkspace(ws) {
     return {
-        id:          ws.Id          || ws.id          || '',
+        id:          ws.WorkspaceID || ws.Id   || ws.id          || '',
         description: ws.Description || ws.description || '',
-        createdAt:   ws.CreatedAt   || ws.createdAt   || ws.created_at || '',
+        createdAt:   ws.DateCreated || ws.CreatedAt || ws.createdAt || ws.created_at || '',
+        initialized: ws.Initialized != null ? ws.Initialized : (ws.initialized != null ? ws.initialized : true),
     };
 }

@@ -6,10 +6,9 @@ import * as path from 'node:path';
 import type { AppConfig } from '../config/config.types.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { NotFoundError } from '../errors.js';
+import { createTempDirTracker } from './test-helpers.js';
 
-function makeTempDir(): string {
-    return fs.mkdtempSync(path.join(os.tmpdir(), 'paralizer-repo-test-'));
-}
+const makeTempDir = createTempDirTracker('paralizer-repo-test-');
 
 function makeTestConfig(base: string): AppConfig {
     return {
@@ -289,7 +288,53 @@ test('add does not expose credentials in duplicate URL error messages', () => {
         assert.fail('expected an error to be thrown');
     } catch (err) {
         const message = (err as Error).message;
+        // Credentials are stripped before the duplicate check, so the raw token
+        // must never appear in the error message.
         assert.ok(!message.includes('token@'), 'error message should not contain credentials');
-        assert.ok(message.includes('***@'), 'error message should contain redacted URL');
     }
+});
+
+// ─── Embedded credential stripping ───────────────────────────────────────────
+
+test('add strips embedded credentials from URL before storing', () => {
+    const manager = makeManager(makeTempDir());
+    const repo = manager.add({ url: 'https://ghp_abc@github.com/user/repo.git' });
+    assert.strictEqual(repo.Url, 'https://github.com/user/repo.git');
+});
+
+test('add sets credentialsStripped flag when credentials are stripped', () => {
+    const manager = makeManager(makeTempDir());
+    const repo = manager.add({ url: 'https://ghp_abc@github.com/user/repo.git' });
+    assert.strictEqual(repo.credentialsStripped, true);
+});
+
+test('add does not set credentialsStripped when URL has no embedded credentials', () => {
+    const manager = makeManager(makeTempDir());
+    const repo = manager.add({ url: 'https://github.com/user/clean-repo.git' });
+    assert.strictEqual(repo.credentialsStripped, undefined);
+});
+
+test('add does not persist credentialsStripped to the store', () => {
+    const base = makeTempDir();
+    const manager = makeManager(base);
+    manager.add({ url: 'https://ghp_abc@github.com/user/repo.git' });
+    // Re-read from disk — credentialsStripped must not be present.
+    const stored = manager.getById('repo');
+    assert.strictEqual(stored?.credentialsStripped, undefined);
+});
+
+test('add compares duplicate URL against the clean URL, not the original', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git' });
+    // Adding the same URL with embedded credentials should still trigger the duplicate check.
+    assert.throws(
+        () => manager.add({ url: 'https://ghp_abc@github.com/user/repo.git', id: 'repo-alias' }),
+        /already exists/,
+    );
+});
+
+test('add stores URL unchanged when URL has no embedded credentials', () => {
+    const manager = makeManager(makeTempDir());
+    const repo = manager.add({ url: 'https://github.com/user/clean-repo.git' });
+    assert.strictEqual(repo.Url, 'https://github.com/user/clean-repo.git');
 });

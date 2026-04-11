@@ -8,10 +8,9 @@ import { initializeStorage } from '../storage/json-storage.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { NotFoundError } from '../errors.js';
+import { createTempDirTracker } from './test-helpers.js';
 
-function makeTempDir(): string {
-    return fs.mkdtempSync(path.join(os.tmpdir(), 'paralizer-project-test-'));
-}
+const makeTempDir = createTempDirTracker('paralizer-project-test-');
 
 function makeTestConfig(base: string): AppConfig {
     return {

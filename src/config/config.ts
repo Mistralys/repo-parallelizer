@@ -1,5 +1,6 @@
+import { chmodSync } from 'node:fs';
 import { getConfigPath } from '../utils/paths.js';
-import { readJsonFile, FileNotFoundError } from '../storage/json-storage.js';
+import { readJsonFile, writeJsonFile, FileNotFoundError } from '../storage/json-storage.js';
 import type { AppConfig } from './config.types.js';
 
 const REQUIRED_FIELDS: ReadonlyArray<keyof AppConfig> = ['projectsFolder', 'storageFolder'];
@@ -57,5 +58,76 @@ export function loadConfig(configPath?: string): AppConfig {
             typeof raw['gitPollingIntervalSeconds'] === 'number'
                 ? raw['gitPollingIntervalSeconds']
                 : DEFAULTS.gitPollingIntervalSeconds,
+        gitCredentials: parseGitCredentials(raw['gitCredentials']),
     };
+}
+
+/**
+ * Validates and returns the `gitCredentials` value from the raw config.
+ *
+ * @returns undefined when the field is absent or null.
+ * @throws {Error} If the value is present but is not a plain object, or if any
+ *   key maps to a non-string or empty-string token.
+ */
+function parseGitCredentials(value: unknown): Record<string, string> | undefined {
+    if (value === undefined || value === null) {
+        return undefined;
+    }
+
+    if (typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error(
+            'Configuration error: "gitCredentials" must be a plain object mapping hostnames to credential strings.'
+        );
+    }
+
+    const credentials = value as Record<string, unknown>;
+
+    for (const [key, token] of Object.entries(credentials)) {
+        if (typeof token !== 'string') {
+            throw new Error(
+                `Configuration error: gitCredentials["${key}"] must be a string, got ${typeof token}.`
+            );
+        }
+        if (token === '') {
+            throw new Error(
+                `Configuration error: gitCredentials["${key}"] must not be an empty string.`
+            );
+        }
+    }
+
+    return credentials as Record<string, string>;
+}
+
+/**
+ * Reads `config.json`, sets or removes a single top-level field, and writes the
+ * file back via `writeJsonFile()`. All other fields — including `_instructions`
+ * — are preserved.
+ *
+ * @param field - The top-level key to modify (e.g. `"gitCredentials"`).
+ * @param value - The value to set, or `undefined` to remove the field.
+ * @param configPath - Optional absolute path to the config file. Defaults to
+ *   the tool-root `config.json`.
+ * @throws {Error} If `config.json` cannot be read or written.
+ */
+export function saveConfigField(
+    field: string,
+    value: unknown,
+    configPath?: string,
+): void {
+    const resolvedConfigPath = configPath ?? getConfigPath();
+    const raw = readJsonFile<Record<string, unknown>>(resolvedConfigPath);
+
+    if (value === undefined) {
+        delete raw[field];
+    } else {
+        raw[field] = value;
+    }
+
+    writeJsonFile(resolvedConfigPath, raw);
+
+    // config.json may contain plaintext PATs in gitCredentials — restrict
+    // file permissions to owner-only on POSIX systems.
+    if (process.platform !== 'win32') {
+        chmodSync(resolvedConfigPath, 0o600);
+    }
 }

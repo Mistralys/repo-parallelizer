@@ -4,6 +4,7 @@ import type { AppConfig } from '../config/config.types.js';
 import type { ProjectManager } from '../models/project/project.manager.js';
 import type { RepositoryManager } from '../models/repository/repository.manager.js';
 import { cloneRepository } from '../git/git-clone.js';
+import { injectCredentials, stripEmbeddedCredentials } from '../git/git-credentials.js';
 import {
     generateWorkspaceFile,
     getWorkspaceFilePath,
@@ -114,7 +115,8 @@ export class RepositoryOrchestrator {
                     );
                 }
 
-                const gitResult = await cloneRepository(repo.Url, destination, {
+                const cloneUrl = injectCredentials(repo.Url, this.config.gitCredentials ?? {});
+                const gitResult = await cloneRepository(cloneUrl, destination, {
                     depth: this.config.cloneDepth > 0 ? this.config.cloneDepth : undefined,
                     timeoutMs: CLONE_TIMEOUT_MS,
                 });
@@ -123,7 +125,7 @@ export class RepositoryOrchestrator {
                     return {
                         workspaceId,
                         success: false,
-                        error: gitResult.stderr || `git clone exited with code ${gitResult.exitCode}`,
+                        error: stripEmbeddedCredentials(gitResult.stderr) || `git clone exited with code ${gitResult.exitCode}`,
                     };
                 }
 

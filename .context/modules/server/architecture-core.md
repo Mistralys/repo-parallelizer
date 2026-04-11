@@ -21,6 +21,7 @@ import type { AppConfig } from '../config/config.types.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
+import { WorkspaceOrchestrator } from '../orchestration/workspace-orchestrator.js';
 import { BranchOrchestrator } from '../orchestration/branch-orchestrator.js';
 import { PollingManager } from './pollingManager.js';
 import { Router } from './router.js';
@@ -31,6 +32,7 @@ import { registerProjectRoutes } from './routes/projects.js';
 import { registerWorkspaceRoutes } from './routes/workspaces.js';
 import { registerBranchRoutes } from './routes/branches.js';
 import { registerStatusRoutes } from './routes/status.js';
+import { registerConfigRoutes } from './routes/config.js';
 
 // ---------------------------------------------------------------------------
 // Public configuration type
@@ -99,6 +101,12 @@ export function startServer(config: ServerConfig): Promise<void> {
     const repoManager = new RepositoryManager(config.appConfig);
     const projectManager = new ProjectManager(config.appConfig, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
+    const workspaceOrchestrator = new WorkspaceOrchestrator(
+        config.appConfig,
+        projectManager,
+        workspaceManager,
+        repoManager,
+    );
     const branchOrchestrator = new BranchOrchestrator(
         config.appConfig,
         projectManager,
@@ -116,9 +124,10 @@ export function startServer(config: ServerConfig): Promise<void> {
     const router = new Router();
     registerRepositoryRoutes(router, repoManager);
     registerProjectRoutes(router, projectManager);
-    registerWorkspaceRoutes(router, workspaceManager);
+    registerWorkspaceRoutes(router, workspaceManager, workspaceOrchestrator, config.appConfig);
     registerBranchRoutes(router, branchOrchestrator, workspaceManager);
     registerStatusRoutes(router, pollingManager, projectManager, workspaceManager, config.appConfig);
+    registerConfigRoutes(router, config.appConfig);
 
     // ------------------------------------------------------------------
     // Create HTTP server with the static-first request pipeline
@@ -804,6 +813,6 @@ export async function serveStatic(
 ```
 ---
 **File Statistics**
-- **Size**: 28.25 KB
-- **Lines**: 810
+- **Size**: 28.65 KB
+- **Lines**: 819
 File: `modules/server/architecture-core.md`

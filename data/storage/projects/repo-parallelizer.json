@@ -1,0 +1,18 @@
+{
+    "Id": "repo-parallelizer",
+    "Name": "Repo Parallelizer",
+    "Description": "Project used to work on the repository parallelizer.",
+    "DateCreated": "2026-04-08T13:18:49.912Z",
+    "DateModified": "2026-04-08T13:59:48.944Z",
+    "Repositories": [
+        "paralizer"
+    ],
+    "Workspaces": {
+        "STABLE": {
+            "Description": "Stable workspace",
+            "DateCreated": "2026-04-08T13:18:49.912Z",
+            "DateModified": "2026-04-08T13:18:49.912Z"
+        }
+    },
+    "SchemaVersion": 1
+}

@@ -9,10 +9,9 @@ import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import { NotFoundError } from '../errors.js';
+import { createTempDirTracker } from './test-helpers.js';
 
-function makeTempDir(): string {
-    return fs.mkdtempSync(path.join(os.tmpdir(), 'paralizer-workspace-test-'));
-}
+const makeTempDir = createTempDirTracker('paralizer-workspace-test-');
 
 function makeTestConfig(base: string): AppConfig {
     return {
