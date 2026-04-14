@@ -8,6 +8,7 @@ _SOURCE: REST API route handlers_
         └── routes/
             └── branches.ts
             └── config.ts
+            └── error-log.ts
             └── projects.ts
             └── repositories.ts
             └── status.ts
@@ -179,8 +180,19 @@ export function registerBranchRoutes(
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Router } from '../router.js';
 import type { AppConfig } from '../../config/config.types.js';
+import type { PollingManager } from '../pollingManager.js';
 import { saveConfigField } from '../../config/config.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimum allowed polling interval in seconds.
+ * Enforced by PUT /api/config/polling.
+ */
+const MIN_POLLING_INTERVAL_SECONDS = 10;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -214,13 +226,23 @@ function buildMaskedCredentials(
 // ---------------------------------------------------------------------------
 
 /**
- * Registers REST endpoints for managing `gitCredentials` in `config.json`.
+ * Registers REST endpoints for managing application configuration in
+ * `config.json`.
+ *
+ * **Credentials endpoints:**
  *
  * | Method | Path                              | Description               |
  * |--------|-----------------------------------|---------------------------|
  * | GET    | /api/config/credentials           | List credentials (masked) |
  * | PUT    | /api/config/credentials           | Add / update an entry     |
  * | DELETE | /api/config/credentials/:host     | Remove an entry           |
+ *
+ * **Polling endpoints:**
+ *
+ * | Method | Path                    | Description                              |
+ * |--------|-------------------------|------------------------------------------|
+ * | GET    | /api/config/polling     | Return current `gitPollingIntervalSeconds` |
+ * | PUT    | /api/config/polling     | Update the polling interval (min 10 s)   |
  *
  * Changes take effect immediately (the in-memory `appConfig` is mutated) and
  * are persisted to `config.json` via `saveConfigField()`.
@@ -231,11 +253,16 @@ function buildMaskedCredentials(
  * @param configPath - Optional absolute path to `config.json`. Defaults to the
  *   tool-root `config.json`. Pass a custom path in tests to avoid touching the
  *   real config file.
+ * @param pollingManager - Optional `PollingManager` reference. When provided,
+ *   the PUT /api/config/polling endpoint calls `pollingManager.restart()` after
+ *   persisting the new interval. Existing callers that omit this parameter
+ *   continue to work without error.
  */
 export function registerConfigRoutes(
     router: Router,
     appConfig: AppConfig,
     configPath?: string,
+    pollingManager?: PollingManager,
 ): void {
     // ------------------------------------------------------------------
     // GET /api/config/credentials — list all (tokens masked)
@@ -290,6 +317,12 @@ export function registerConfigRoutes(
             return;
         }
 
+        // Defence-in-depth: reject prototype-pollution keys.
+        if (['__proto__', 'constructor', 'prototype'].includes(cleanHost)) {
+            sendError(res, 400, 'Field "host" contains a reserved name.');
+            return;
+        }
+
         const cleanToken = token.trim();
 
         // Update in-memory config.
@@ -306,13 +339,20 @@ export function registerConfigRoutes(
 
     // ------------------------------------------------------------------
     // DELETE /api/config/credentials/:host — remove a single entry
+    // Sync handler (no request body to parse — unlike the async PUT above).
     // ------------------------------------------------------------------
     router.delete('/api/config/credentials/:host', (
         _req: IncomingMessage,
         res: ServerResponse,
         params: Record<string, string>,
     ): void => {
-        const host = params['host'];
+        let host: string;
+        try {
+            host = decodeURIComponent(params['host']);
+        } catch {
+            sendError(res, 400, 'Malformed host parameter.');
+            return;
+        }
 
         if (!appConfig.gitCredentials || !(host in appConfig.gitCredentials)) {
             sendError(res, 404, `No credential entry found for host "${host}".`);
@@ -331,6 +371,253 @@ export function registerConfigRoutes(
         saveConfigField('gitCredentials', appConfig.gitCredentials, configPath);
 
         sendJson(res, 200, buildMaskedCredentials(appConfig.gitCredentials));
+    });
+
+    // ------------------------------------------------------------------
+    // GET /api/config/polling — return the current polling interval
+    // ------------------------------------------------------------------
+    router.get('/api/config/polling', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): void => {
+        sendJson(res, 200, {
+            gitPollingIntervalSeconds: appConfig.gitPollingIntervalSeconds,
+        });
+    });
+
+    // ------------------------------------------------------------------
+    // PUT /api/config/polling — update the polling interval
+    // Validates: must be a finite integer >= 10.
+    // ------------------------------------------------------------------
+    router.put('/api/config/polling', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): Promise<void> => {
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { seconds } = body as { seconds?: unknown };
+
+        if (typeof seconds !== 'number') {
+            sendError(res, 400, 'Missing or invalid field "seconds": must be a number.');
+            return;
+        }
+
+        if (!Number.isFinite(seconds) || !Number.isInteger(seconds)) {
+            sendError(res, 400, 'Field "seconds" must be a finite integer.');
+            return;
+        }
+
+        if (seconds < MIN_POLLING_INTERVAL_SECONDS) {
+            sendError(
+                res,
+                400,
+                `Field "seconds" must be at least ${MIN_POLLING_INTERVAL_SECONDS}. Received: ${seconds}.`,
+            );
+            return;
+        }
+
+        // Update in-memory config.
+        appConfig.gitPollingIntervalSeconds = seconds;
+
+        // Persist to disk.
+        saveConfigField('gitPollingIntervalSeconds', seconds, configPath);
+
+        // Restart the polling loop with the new interval (if a manager was provided).
+        if (pollingManager !== undefined) {
+            pollingManager.restart(seconds);
+        }
+
+        sendJson(res, 200, { gitPollingIntervalSeconds: appConfig.gitPollingIntervalSeconds });
+    });
+}
+
+```
+###  Path: `/src/server/routes/error-log.ts`
+
+```ts
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Router } from '../router.js';
+import type { ErrorLogManager } from '../../error-log/error-log.manager.js';
+import type { ErrorSeverity } from '../../error-log/error-log.types.js';
+import { sendJson, sendError } from '../requestUtils.js';
+
+// ---------------------------------------------------------------------------
+// Route registration
+// ---------------------------------------------------------------------------
+
+/**
+ * Registers the error-log REST routes on the provided `Router` instance.
+ *
+ * | Method | Path                  | Success | Failure    |
+ * |--------|-----------------------|---------|------------|
+ * | GET    | /api/error-log        | 200     | —          |
+ * | GET    | /api/error-log/:id    | 200     | 400 / 404  |
+ * | DELETE | /api/error-log        | 204     | —          |
+ *
+ * @param router           - The Router to register routes on.
+ * @param errorLogManager  - Provides `list()`, `sources()`, `getById()`, and `clear()`.
+ */
+export function registerErrorLogRoutes(
+    router: Router,
+    errorLogManager: ErrorLogManager,
+): void {
+    // ------------------------------------------------------------------
+    // GET /api/error-log — list entries with optional filtering/pagination
+    //
+    // Query parameters (all optional):
+    //
+    //   severity  "error" | "warning"
+    //             Filter by severity level. Any other value is silently
+    //             ignored (treated as no filter).
+    //
+    //   source    string
+    //             Exact-match filter on the entry's Source field.
+    //             Case-sensitive; no allowlist — intended for internal use.
+    //
+    //   limit     integer >= 0  (default: 100)
+    //             Maximum number of entries to return. Defaults to 100 to
+    //             prevent unbounded result sets. Passing limit=0 returns an
+    //             empty `entries` array while still populating `total` — useful
+    //             for polling the current count without fetching entry data.
+    //             Non-numeric and negative values are clamped to 0.
+    //
+    //   offset    integer >= 0  (default: 0 / omitted)
+    //             Zero-based offset into the filtered result set for
+    //             pagination. Negative values are treated as 0.
+    //
+    // Response shape (HTTP 200):
+    //
+    //   {
+    //     "entries": [
+    //       {
+    //         "Id": 42,
+    //         "Timestamp": "2026-04-11T09:00:00.000Z",
+    //         "Severity": "error" | "warning",
+    //         "Source": "<string>",
+    //         "Operation": "<string>",
+    //         "Context": { ... },
+    //         "Message": "<string>",
+    //         "Details": "<string>" | undefined
+    //       },
+    //       ...
+    //     ],
+    //     "total": N   // post-filter, pre-pagination count
+    //   }
+    //
+    // Entries are returned newest first (reverse-chronological order).
+    // `total` reflects how many entries match the active filters before
+    // `limit` / `offset` are applied — useful for building pagination UIs.
+    // ------------------------------------------------------------------
+    router.get('/api/error-log', (
+        req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): void => {
+        // Parse query parameters from the URL.
+        const rawUrl = req.url ?? '';
+        const queryString = rawUrl.includes('?') ? rawUrl.split('?')[1] : '';
+        const qs = new URLSearchParams(queryString);
+
+        const severityRaw = qs.get('severity') ?? undefined;
+        const source = qs.get('source') ?? undefined;
+        const limitRaw = qs.get('limit');
+        const offsetRaw = qs.get('offset');
+
+        // Validate and cast severity to the union type.
+        const severity =
+            severityRaw === 'error' || severityRaw === 'warning'
+                ? (severityRaw as ErrorSeverity)
+                : undefined;
+
+        // Default limit to 100 to prevent unbounded query results.
+        const limit = limitRaw !== null ? Math.max(0, parseInt(limitRaw, 10) || 0) : 100;
+        const offset = offsetRaw !== null ? Math.max(0, parseInt(offsetRaw, 10) || 0) : undefined;
+
+        const result = errorLogManager.list({ severity, source, limit, offset });
+        sendJson(res, 200, result);
+    });
+
+    // ------------------------------------------------------------------
+    // GET /api/error-log/sources — distinct source values in the store
+    //
+    // Returns the sorted list of unique Source values currently stored in
+    // the error log. Useful for populating filter dropdowns dynamically.
+    //
+    // Response shape (HTTP 200):
+    //   { "sources": ["branch-switch", "clone", "fetch", ...] }
+    //
+    // Note: this route MUST be registered before GET /api/error-log/:id so
+    // that the literal path segment "sources" is not captured as an :id.
+    // ------------------------------------------------------------------
+    router.get('/api/error-log/sources', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): void => {
+        const sources = errorLogManager.sources();
+        sendJson(res, 200, { sources });
+    });
+
+    // ------------------------------------------------------------------
+    // GET /api/error-log/:id — get a single entry by numeric ID
+    // ------------------------------------------------------------------
+    router.get('/api/error-log/:id', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        const rawId = params['id'];
+
+        // Reject non-numeric or otherwise invalid ID formats (e.g. "abc", "1.5", "12abc").
+        if (!/^\d+$/.test(rawId)) {
+            sendError(res, 400, `Invalid error log ID: "${rawId}". ID must be a positive integer.`);
+            return;
+        }
+
+        const id = parseInt(rawId, 10);
+
+        // The regex above guarantees `id` is a non-negative finite integer, so
+        // we only need to guard `id <= 0` to reject "0" as an invalid ID (IDs start at 1).
+        if (id <= 0) {
+            sendError(res, 400, `Invalid error log ID: "${rawId}". ID must be a positive integer.`);
+            return;
+        }
+
+        const entry = errorLogManager.getById(id);
+        if (entry === undefined) {
+            sendError(res, 404, `Error log entry with ID ${id} not found.`);
+            return;
+        }
+
+        sendJson(res, 200, entry);
+    });
+
+    // ------------------------------------------------------------------
+    // DELETE /api/error-log — clear all entries
+    // ------------------------------------------------------------------
+    router.delete('/api/error-log', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): void => {
+        errorLogManager.clear();
+
+        // 204 No Content — no body
+        res.writeHead(204, {});
+        res.end('');
     });
 }
 
@@ -994,10 +1281,10 @@ export function registerWorkspaceRoutes(
         return path.join(appConfig.projectsFolder, projectId, workspaceId);
     }
 
-    // Helper: augment a WorkspaceInfo with an `Initialized` boolean.
-    function withInitialized<T extends { ProjectID: string; WorkspaceID: string }>(ws: T): T & { Initialized: boolean } {
+    // Helper: augment a WorkspaceInfo with an `Initialized` boolean and `FolderPath` string.
+    function withInitialized<T extends { ProjectID: string; WorkspaceID: string }>(ws: T): T & { Initialized: boolean; FolderPath: string } {
         const wsFolder = workspaceFolder(ws.ProjectID, ws.WorkspaceID);
-        return { ...ws, Initialized: fs.existsSync(wsFolder) };
+        return { ...ws, Initialized: fs.existsSync(wsFolder), FolderPath: wsFolder };
     }
 
     // ------------------------------------------------------------------
@@ -1217,6 +1504,6 @@ export function registerWorkspaceRoutes(
 ```
 ---
 **File Statistics**
-- **Size**: 46.06 KB
-- **Lines**: 1223
+- **Size**: 57.05 KB
+- **Lines**: 1510
 File: `modules/server/architecture-routes.md`

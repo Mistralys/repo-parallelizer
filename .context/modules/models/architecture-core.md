@@ -673,13 +673,10 @@ export class RepositoryManager {
 
         // Strip embedded credentials from the URL before storing.
         let cleanUrl = params.url;
+        let credentialsWereStripped = false;
         if (hasEmbeddedCredentials(params.url)) {
             cleanUrl = stripEmbeddedCredentials(params.url);
-            console.warn(
-                `[repo-parallelizer] Warning: repository URL contains embedded credentials. ` +
-                `The credentials have been stripped from the stored URL. ` +
-                `Configure private repository access via "gitCredentials" in config.json instead.`
-            );
+            credentialsWereStripped = true;
         }
 
         const duplicate = store.Repositories.find((r) => r.Id === id);
@@ -699,6 +696,10 @@ export class RepositoryManager {
         const repo: Repository = { Id: id, Name: name, Url: cleanUrl };
         store.Repositories.push(repo);
         this.save(store);
+
+        if (credentialsWereStripped) {
+            return { ...repo, credentialsStripped: true };
+        }
         return repo;
     }
 
@@ -756,6 +757,16 @@ export interface Repository {
 
     /** Remote Git URL (HTTPS or SSH). */
     Url: string;
+
+    /**
+     * Transient flag set by `RepositoryManager.add()` when embedded credentials
+     * were stripped from the URL before storage. Not persisted to
+     * `repositories.json`.
+     *
+     * Uses camelCase (not PascalCase like the persisted fields above) to signal
+     * that this property is runtime-only and excluded from the data schema.
+     */
+    credentialsStripped?: boolean;
 }
 
 /**
@@ -1084,6 +1095,6 @@ export interface WorkspaceInfo {
 ```
 ---
 **File Statistics**
-- **Size**: 37.47 KB
-- **Lines**: 1090
+- **Size**: 37.74 KB
+- **Lines**: 1101
 File: `modules/models/architecture-core.md`

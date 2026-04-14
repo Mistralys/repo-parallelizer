@@ -12,6 +12,7 @@
 └── context.yaml
 └── data/
     ├── storage/
+    │   └── error-log.json
     │   └── projects-index.json
     │   └── projects/
     │       ├── ai-insights.json
@@ -39,11 +40,13 @@
     │       │   └── pico.classless.min.css
     │   └── index.html
     │   └── js/
+    │       └── api.errorLog.test.mjs
     │       └── api.js
     │       └── app.js
     │       └── components/
     │           ├── confirm-dialog.js
     │           ├── form-helpers.js
+    │           ├── nav-badge.js
     │           ├── status-badge.js
     │           ├── theme-toggle.js
     │           ├── toast.js
@@ -51,9 +54,11 @@
     │       └── utils/
     │           ├── nav-highlight.js
     │           ├── normalise.js
+    │           ├── time.js
     │       └── views/
     │           └── branch-switch.js
     │           └── dashboard.js
+    │           └── error-log.js
     │           └── project-detail.js
     │           └── repositories.js
     │           └── settings.js
@@ -72,6 +77,11 @@
     │   ├── README.md
     │   ├── config.ts
     │   ├── config.types.ts
+    │   ├── module-context.yaml
+    ├── error-log/
+    │   ├── README.md
+    │   ├── error-log.manager.ts
+    │   ├── error-log.types.ts
     │   ├── module-context.yaml
     ├── errors.ts
     ├── git/
@@ -109,12 +119,14 @@
     │   ├── README.md
     │   ├── __tests__/
     │   │   ├── index.test.ts
+    │   │   ├── pollingManager.errorLog.test.ts
     │   │   ├── pollingManager.test.ts
     │   │   ├── requestUtils.test.ts
     │   │   ├── router.test.ts
     │   │   ├── routes/
     │   │   │   ├── branches.test.ts
     │   │   │   ├── config.test.ts
+    │   │   │   ├── error-log.test.ts
     │   │   │   ├── projects.test.ts
     │   │   │   ├── repositories.test.ts
     │   │   │   ├── status.test.ts
@@ -128,6 +140,7 @@
     │   ├── routes/
     │   │   ├── branches.ts
     │   │   ├── config.ts
+    │   │   ├── error-log.ts
     │   │   ├── projects.ts
     │   │   ├── repositories.ts
     │   │   ├── status.ts
@@ -141,6 +154,7 @@
     ├── tests/
     │   ├── branch-orchestrator.test.ts
     │   ├── config.test.ts
+    │   ├── error-log.manager.test.ts
     │   ├── git-branch.test.ts
     │   ├── git-cli.test.ts
     │   ├── git-clone.test.ts
@@ -155,6 +169,7 @@
     │   ├── setup.test.ts
     │   ├── slug.test.ts
     │   ├── storage-init.test.ts
+    │   ├── test-helpers.ts
     │   ├── vscode-workspace.test.ts
     │   ├── workspace-orchestrator.test.ts
     │   ├── workspace.manager.test.ts
@@ -168,6 +183,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 5.73 KB
-- **Lines**: 174
+- **Size**: 6.32 KB
+- **Lines**: 189
 File: `project-folder-structure.md`

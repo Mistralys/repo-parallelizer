@@ -12,6 +12,7 @@ _SOURCE: Configuration types and loader_
 ###  Path: `/src/config/config.ts`
 
 ```ts
+import { chmodSync } from 'node:fs';
 import { getConfigPath } from '../utils/paths.js';
 import { readJsonFile, writeJsonFile, FileNotFoundError } from '../storage/json-storage.js';
 import type { AppConfig } from './config.types.js';
@@ -137,6 +138,12 @@ export function saveConfigField(
     }
 
     writeJsonFile(resolvedConfigPath, raw);
+
+    // config.json may contain plaintext PATs in gitCredentials — restrict
+    // file permissions to owner-only on POSIX systems.
+    if (process.platform !== 'win32') {
+        chmodSync(resolvedConfigPath, 0o600);
+    }
 }
 
 ```
@@ -191,11 +198,18 @@ export interface AppConfig {
      * Omit the field or leave the object empty for public repositories.
      */
     gitCredentials?: Record<string, string>;
+
+    /**
+     * Maximum number of entries retained in the error log. Oldest entries are
+     * evicted once this limit is exceeded.
+     * @default 500
+     */
+    maxErrorLogEntries?: number;
 }
 
 ```
 ---
 **File Statistics**
-- **Size**: 6.36 KB
-- **Lines**: 202
+- **Size**: 6.8 KB
+- **Lines**: 216
 File: `modules/config/architecture-core.md`

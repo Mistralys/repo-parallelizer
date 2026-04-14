@@ -9,8 +9,10 @@ _SOURCE: Page-level view functions_
             └── views/
                 └── branch-switch.js
                 └── dashboard.js
+                └── error-log.js
                 └── project-detail.js
                 └── repositories.js
+                └── settings.js
                 └── workspace-detail.js
 
 ```
@@ -1045,7 +1047,12 @@ function buildProjectCard(project, workspaceCount) {
     wsStat.className = 'stat-chip';
     wsStat.textContent = `${workspaceCount} ${workspaceCount === 1 ? 'workspace' : 'workspaces'}`;
 
+    const separator = document.createElement('span');
+    separator.className = 'stat-separator';
+    separator.textContent = '·';
+
     stats.appendChild(repoStat);
+    stats.appendChild(separator);
     stats.appendChild(wsStat);
     card.appendChild(stats);
 
@@ -1221,24 +1228,31 @@ async function renderProjectList(listContainer) {
         return;
     }
 
-    // Fetch workspace counts in parallel; failures degrade gracefully.
-    const workspaceCounts = await Promise.all(
+    // Fetch full project data + workspace counts in parallel per project.
+    const projectDetails = await Promise.all(
         projects.map(async (project) => {
             const id = project.Id || project.id || '';
+            let fullProject = project;
+            let wsCount = 0;
             try {
-                const workspaces = await api.workspaces.list(id);
-                return Array.isArray(workspaces) ? workspaces.length : 0;
+                const [full, workspaces] = await Promise.all([
+                    api.projects.get(id),
+                    api.workspaces.list(id),
+                ]);
+                fullProject = full;
+                wsCount = Array.isArray(workspaces) ? workspaces.length : 0;
             } catch (_err) {
-                return 0;
+                // Degrade gracefully — show index data with 0 counts.
             }
+            return { fullProject, wsCount };
         }),
     );
 
     const grid = document.createElement('div');
     grid.className = 'project-grid';
 
-    projects.forEach((project, index) => {
-        grid.appendChild(buildProjectCard(project, workspaceCounts[index]));
+    projectDetails.forEach(({ fullProject, wsCount }) => {
+        grid.appendChild(buildProjectCard(fullProject, wsCount));
     });
 
     listContainer.appendChild(grid);
@@ -1287,6 +1301,438 @@ export async function renderDashboard(container, _params) {
     // Initial load
     // -----------------------------------------------------------------------
     await renderProjectList(listContainer);
+}
+
+```
+###  Path: `/gui/public/js/views/error-log.js`
+
+```js
+/**
+ * Error Log View — Repo Parallelizer GUI.
+ *
+ * Renders a paginated, filterable table of error log entries fetched from the
+ * REST API:
+ *   - Severity and source filter dropdowns re-fetch entries on change.
+ *   - Clicking a row toggles an inline `<pre>` detail panel below it.
+ *   - "Clear All" button prompts a confirmation dialog and clears all entries.
+ *   - Timestamps display relative time (e.g. "3 min ago") with the full ISO
+ *     timestamp in the `title` tooltip.
+ *   - Severity is rendered as a coloured badge using `.severity-error` or
+ *     `.severity-warning` CSS classes.
+ *   - All dynamic text is set via `textContent` (never `innerHTML`) for XSS
+ *     safety.
+ *
+ * @param {HTMLElement} container - The `#app` root element supplied by the router.
+ * @param {Object}      _params   - Route params (none for this route).
+ */
+
+import { api }          from '../api.js';
+import { showToast }    from '../components/toast.js';
+import { showConfirm }  from '../components/confirm-dialog.js';
+import { normaliseErrorEntry } from '../utils/normalise.js';
+import { relativeTime } from '../utils/time.js';
+import { refreshNavBadge } from '../components/nav-badge.js';
+
+// ---------------------------------------------------------------------------
+// Severity options — kept in one place so filters and dropdowns stay in sync.
+// ---------------------------------------------------------------------------
+
+const SEVERITY_OPTIONS = [
+    { value: 'all',     label: 'All Severities' },
+    { value: 'error',   label: 'Error'          },
+    { value: 'warning', label: 'Warning'        },
+];
+
+// ---------------------------------------------------------------------------
+// Context breadcrumb helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a compact breadcrumb string from project / workspace / repository fields.
+ *
+ * @param {{ project: string, workspace: string, repository: string }} entry
+ * @returns {string}
+ */
+function buildContextBreadcrumb(entry) {
+    return [entry.project, entry.workspace, entry.repository]
+        .filter(Boolean)
+        .join(' / ') || '—';
+}
+
+// ---------------------------------------------------------------------------
+// Filter bar
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the filter bar containing the severity and source dropdowns plus the
+ * "Clear All" button.
+ *
+ * @param {{ severity: string, source: string }} currentFilters
+ * @param {Array<{ value: string, label: string }>} sourceOptions
+ * @param {function({ severity: string, source: string }): void} onFilterChange
+ * @param {function(): void} onClearAll
+ * @returns {HTMLElement}
+ */
+function buildFilterBar(currentFilters, sourceOptions, onFilterChange, onClearAll) {
+    const bar = document.createElement('div');
+    bar.className = 'error-log-filter-bar';
+
+    // ---- Severity dropdown ----
+    const severityLabel = document.createElement('label');
+    severityLabel.textContent = 'Severity:';
+    severityLabel.setAttribute('for', 'error-log-severity-filter');
+    severityLabel.className = 'filter-label';
+
+    const severitySelect = document.createElement('select');
+    severitySelect.id        = 'error-log-severity-filter';
+    severitySelect.className = 'form-select';
+
+    SEVERITY_OPTIONS.forEach(({ value, label }) => {
+        const opt = document.createElement('option');
+        opt.value       = value;
+        opt.textContent = label;
+        opt.selected    = value === currentFilters.severity;
+        severitySelect.appendChild(opt);
+    });
+
+    // ---- Source dropdown ----
+    const sourceLabel = document.createElement('label');
+    sourceLabel.textContent = 'Source:';
+    sourceLabel.setAttribute('for', 'error-log-source-filter');
+    sourceLabel.className = 'filter-label';
+
+    const sourceSelect = document.createElement('select');
+    sourceSelect.id        = 'error-log-source-filter';
+    sourceSelect.className = 'form-select';
+
+    sourceOptions.forEach(({ value, label }) => {
+        const opt = document.createElement('option');
+        opt.value       = value;
+        opt.textContent = label;
+        opt.selected    = value === currentFilters.source;
+        sourceSelect.appendChild(opt);
+    });
+    // ---- Clear All button ----
+    const clearBtn = document.createElement('button');
+    clearBtn.type      = 'button';
+    clearBtn.className = 'btn btn-danger';
+    clearBtn.textContent = 'Clear All';
+
+    // ---- Event wiring ----
+    function emitFilterChange() {
+        onFilterChange({
+            severity: severitySelect.value,
+            source:   sourceSelect.value,
+        });
+    }
+
+    severitySelect.addEventListener('change', emitFilterChange);
+    sourceSelect.addEventListener('change', emitFilterChange);
+    clearBtn.addEventListener('click', onClearAll);
+
+    // ---- Assemble ----
+    bar.appendChild(severityLabel);
+    bar.appendChild(severitySelect);
+    bar.appendChild(sourceLabel);
+    bar.appendChild(sourceSelect);
+    bar.appendChild(clearBtn);
+
+    return bar;
+}
+
+// ---------------------------------------------------------------------------
+// Table building
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the `<thead>` element for the error log table.
+ *
+ * @returns {HTMLTableSectionElement}
+ */
+function buildTableHead() {
+    const thead = document.createElement('thead');
+    const tr    = document.createElement('tr');
+
+    ['Timestamp', 'Severity', 'Source', 'Context', 'Message'].forEach((label) => {
+        const th = document.createElement('th');
+        th.textContent = label;
+        tr.appendChild(th);
+    });
+
+    thead.appendChild(tr);
+    return thead;
+}
+
+/**
+ * Build a severity badge `<span>` for the given severity string.
+ *
+ * @param {string} severity - 'error', 'warning', or any other string.
+ * @returns {HTMLSpanElement}
+ */
+function buildSeverityBadge(severity) {
+    const badge = document.createElement('span');
+    const normalised = severity ? severity.toLowerCase() : '';
+    badge.className = normalised
+        ? `severity-badge severity-${normalised}`
+        : 'severity-badge';
+    badge.textContent = severity || '—';
+    return badge;
+}
+
+/**
+ * Build a table row pair: the main data row and a hidden detail row below it.
+ *
+ * Clicking the main row toggles the visibility of the detail row.
+ *
+ * @param {Object} rawEntry - Raw entry object from the API response.
+ * @returns {DocumentFragment} A fragment containing the data row and the
+ *   (initially hidden) detail row.
+ */
+function buildEntryRows(rawEntry) {
+    const entry = normaliseErrorEntry(rawEntry);
+    const frag  = document.createDocumentFragment();
+
+    // ---- Main data row ----
+    const tr = document.createElement('tr');
+    tr.className = 'error-log-entry-row';
+    tr.setAttribute('role', 'button');
+    tr.setAttribute('tabindex', '0');
+    tr.setAttribute('aria-expanded', 'false');
+
+    // Timestamp cell
+    const tsCell = document.createElement('td');
+    tsCell.className = 'error-log-ts-cell';
+    const tsSpan = document.createElement('span');
+    tsSpan.textContent = relativeTime(entry.timestamp);
+    tsSpan.title       = entry.timestamp;
+    tsCell.appendChild(tsSpan);
+    tr.appendChild(tsCell);
+
+    // Severity cell
+    const severityCell = document.createElement('td');
+    severityCell.className = 'error-log-severity-cell';
+    severityCell.appendChild(buildSeverityBadge(entry.severity));
+    tr.appendChild(severityCell);
+
+    // Source cell
+    const sourceCell = document.createElement('td');
+    sourceCell.className = 'error-log-source-cell';
+    sourceCell.textContent = entry.source || '—';
+    tr.appendChild(sourceCell);
+
+    // Context cell
+    const contextCell = document.createElement('td');
+    contextCell.className = 'error-log-context-cell text-muted';
+    contextCell.textContent = buildContextBreadcrumb(entry);
+    tr.appendChild(contextCell);
+
+    // Message cell
+    const msgCell = document.createElement('td');
+    msgCell.className = 'error-log-message-cell';
+    msgCell.textContent = entry.message || '—';
+    tr.appendChild(msgCell);
+
+    // ---- Detail row (hidden by default) ----
+    const detailTr = document.createElement('tr');
+    detailTr.className = 'error-log-detail-row';
+    detailTr.hidden    = true;
+
+    const detailTd = document.createElement('td');
+    detailTd.colSpan = 5;
+
+    const pre = document.createElement('pre');
+    pre.className  = 'error-log-detail-pre';
+    pre.textContent = entry.details || '(no details)';
+
+    detailTd.appendChild(pre);
+    detailTr.appendChild(detailTd);
+
+    // ---- Toggle behaviour ----
+    function toggleDetail() {
+        const expanded = detailTr.hidden;
+        detailTr.hidden = !expanded;
+        tr.setAttribute('aria-expanded', String(expanded));
+        tr.classList.toggle('is-expanded', expanded);
+    }
+
+    tr.addEventListener('click', toggleDetail);
+    tr.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            toggleDetail();
+        }
+    });
+
+    frag.appendChild(tr);
+    frag.appendChild(detailTr);
+    return frag;
+}
+
+// ---------------------------------------------------------------------------
+// Empty state
+// ---------------------------------------------------------------------------
+
+/**
+ * Build an empty-state row spanning all columns.
+ *
+ * @returns {HTMLTableRowElement}
+ */
+function buildEmptyRow() {
+    const tr = document.createElement('tr');
+    tr.className = 'error-log-empty-row';
+
+    const td = document.createElement('td');
+    td.colSpan = 5;
+    td.className = 'text-muted';
+    td.textContent = 'No error log entries found.';
+
+    tr.appendChild(td);
+    return tr;
+}
+
+// ---------------------------------------------------------------------------
+// Main render function
+// ---------------------------------------------------------------------------
+
+/**
+ * Render the Error Log view into `container`.
+ *
+ * Called by the router whenever the user navigates to `#/error-log`.
+ *
+ * @param {HTMLElement} container - The `#app` root element supplied by the router.
+ * @param {Object}      _params   - Route params (none for this route).
+ */
+export async function renderErrorLog(container, _params) {
+    // ---- Active filter state ----
+    const filters = {
+        severity: 'all',
+        source:   'all',
+    };
+
+    // Current source options (fetched from API; refreshed after clear).
+    let sourceOptions = [{ value: 'all', label: 'All Sources' }];
+
+    // ---- Scaffold ----
+    container.textContent = '';
+
+    const heading = document.createElement('h1');
+    heading.textContent = 'Error Log';
+    container.appendChild(heading);
+
+    // Filter bar placeholder — re-created on each render.
+    const filterBarSlot = document.createElement('div');
+    filterBarSlot.className = 'error-log-filter-bar-slot';
+    container.appendChild(filterBarSlot);
+
+    // Summary line (e.g. "42 entries")
+    const summary = document.createElement('p');
+    summary.className = 'error-log-summary text-muted';
+    container.appendChild(summary);
+
+    // Table wrapper
+    const tableWrapper = document.createElement('div');
+    tableWrapper.className = 'table-responsive';
+    container.appendChild(tableWrapper);
+
+    const table = document.createElement('table');
+    table.className = 'error-log-table';
+    table.appendChild(buildTableHead());
+
+    const tbody = document.createElement('tbody');
+    table.appendChild(tbody);
+    tableWrapper.appendChild(table);
+
+    // ---- loadSources — fetches distinct source values and rebuilds filter bar ----
+    async function loadSources() {
+        try {
+            const result = await api.errorLog.sources();
+            const fetched = Array.isArray(result.sources) ? result.sources : [];
+            sourceOptions = [
+                { value: 'all', label: 'All Sources' },
+                ...fetched.map((s) => ({ value: s, label: s })),
+            ];
+        } catch {
+            // Non-fatal — keep the current sourceOptions (at minimum "All Sources").
+        }
+        rebuildFilterBar();
+    }
+
+    // ---- loadEntries — re-fetches and re-renders the tbody ----
+    async function loadEntries() {
+        tbody.textContent = '';
+        summary.textContent = 'Loading…';
+
+        /** @type {{ severity?: string, source?: string }} */
+        const apiParams = {};
+        if (filters.severity !== 'all') apiParams.severity = filters.severity;
+        if (filters.source   !== 'all') apiParams.source   = filters.source;
+
+        let result;
+        try {
+            result = await api.errorLog.list(apiParams);
+        } catch (err) {
+            summary.textContent = '';
+            showToast(err.message || 'Failed to load error log.', 'error');
+            return;
+        }
+
+        const entries = Array.isArray(result.entries) ? result.entries : [];
+        const total   = typeof result.total === 'number' ? result.total : entries.length;
+
+        summary.textContent = `${total} entr${total === 1 ? 'y' : 'ies'}`;
+
+        if (entries.length === 0) {
+            tbody.appendChild(buildEmptyRow());
+            return;
+        }
+
+        entries.forEach((rawEntry) => {
+            tbody.appendChild(buildEntryRows(rawEntry));
+        });
+    }
+
+    // ---- onFilterChange ----
+    function onFilterChange(newFilters) {
+        filters.severity = newFilters.severity;
+        filters.source   = newFilters.source;
+        loadEntries();
+    }
+
+    // ---- onClearAll ----
+    async function onClearAll() {
+        try {
+            await showConfirm(
+                'Clear Error Log',
+                'Delete all error log entries? This action cannot be undone.',
+            );
+        } catch {
+            // User cancelled — do nothing.
+            return;
+        }
+
+        try {
+            await api.errorLog.clear();
+            showToast('Error log cleared.', 'success');
+            // Reset filters, refresh sources (log is now empty), and reload.
+            filters.severity = 'all';
+            filters.source   = 'all';
+            await loadSources();
+            loadEntries();
+            refreshNavBadge();
+        } catch (err) {
+            showToast(err.message || 'Failed to clear error log.', 'error');
+        }
+    }
+
+    // ---- rebuildFilterBar — replaces the filter bar DOM node ----
+    function rebuildFilterBar() {
+        filterBarSlot.textContent = '';
+        filterBarSlot.appendChild(buildFilterBar(filters, sourceOptions, onFilterChange, onClearAll));
+    }
+
+    // ---- Initial render ----
+    await loadSources();
+    await loadEntries();
 }
 
 ```
@@ -1388,31 +1834,39 @@ function showLoading(el, label = 'Loading…') {
 
 /**
  * Build the project metadata header section.
- * Description is editable inline: clicking Edit shows a textarea; Save calls
- * `api.projects.update()`.
+ * Description is editable inline: clicking the edit icon shows a textarea;
+ * Save calls `api.projects.update()`.
  *
  * @param {{ id: string, name: string, description: string }} project
  * @returns {HTMLElement}
  */
 function buildMetaSection(project) {
     const section = document.createElement('section');
-    section.className = 'project-meta-section card';
+    section.className = 'project-meta-section';
 
-    // Project ID + Name
-    const idRow = document.createElement('div');
-    idRow.className = 'project-meta-id-row';
+    // Top row: name + ID + edit icon
+    const topRow = document.createElement('div');
+    topRow.className = 'project-meta-top-row';
 
-    const idLabel = document.createElement('span');
-    idLabel.className = 'project-meta-id text-muted';
-    idLabel.textContent = `ID: ${project.id}`;
-
-    const nameEl = document.createElement('h2');
+    const nameEl = document.createElement('h1');
     nameEl.className = 'project-meta-name';
     nameEl.textContent = project.name || project.id;
 
-    idRow.appendChild(nameEl);
-    idRow.appendChild(idLabel);
-    section.appendChild(idRow);
+    const idLabel = document.createElement('span');
+    idLabel.className = 'project-meta-id text-muted';
+    idLabel.textContent = project.id;
+
+    const editIconBtn = document.createElement('button');
+    editIconBtn.type      = 'button';
+    editIconBtn.className = 'btn-icon project-meta-edit-icon';
+    editIconBtn.title     = 'Edit project description';
+    editIconBtn.setAttribute('aria-label', 'Edit project description');
+    editIconBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 1.5l3 3L5 14H2v-3L11.5 1.5z"/></svg>';
+
+    topRow.appendChild(nameEl);
+    topRow.appendChild(idLabel);
+    topRow.appendChild(editIconBtn);
+    section.appendChild(topRow);
 
     // Description — read-mode
     const descRow = document.createElement('div');
@@ -1422,13 +1876,7 @@ function buildMetaSection(project) {
     descDisplay.className = 'project-meta-description text-secondary';
     descDisplay.textContent = project.description || 'No description.';
 
-    const editDescBtn = document.createElement('button');
-    editDescBtn.type      = 'button';
-    editDescBtn.className = 'btn btn-secondary btn-sm';
-    editDescBtn.textContent = 'Edit Description';
-
     descRow.appendChild(descDisplay);
-    descRow.appendChild(editDescBtn);
     section.appendChild(descRow);
 
     // Description — edit-mode (hidden initially)
@@ -1438,7 +1886,7 @@ function buildMetaSection(project) {
 
     const descTextarea = document.createElement('textarea');
     descTextarea.className = 'form-textarea';
-    descTextarea.rows  = 3;
+    descTextarea.rows  = 2;
     descTextarea.value = project.description;
     descTextarea.setAttribute('aria-label', 'Project description');
     editRow.appendChild(descTextarea);
@@ -1463,7 +1911,7 @@ function buildMetaSection(project) {
 
     // ---- Behaviour ----
 
-    editDescBtn.addEventListener('click', () => {
+    editIconBtn.addEventListener('click', () => {
         descRow.hidden   = true;
         editRow.hidden   = false;
         descTextarea.value = project.description;
@@ -1516,32 +1964,49 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
     const section = document.createElement('section');
     section.className = 'project-repos-section';
 
-    const heading = document.createElement('h3');
-    heading.className = 'section-title';
-    heading.textContent = 'Repositories';
-    section.appendChild(heading);
-
     // Build a map for quick lookup: repoId → { id, name, url }
     const repoMap = new Map(allRepos.map((r) => [r.id, r]));
 
-    // ---- Repo list ----
+    // ---- Repo table ----
     if (projectRepoIds.length === 0) {
         const empty = document.createElement('p');
         empty.className = 'empty-state-inline text-secondary';
         empty.textContent = 'No repositories in this project yet.';
         section.appendChild(empty);
     } else {
-        const list = document.createElement('ul');
-        list.className = 'repo-list';
+        const table = document.createElement('table');
+        table.className = 'data-table repos-table';
+
+        const thead = document.createElement('thead');
+        const htr   = document.createElement('tr');
+        ['Name', 'ID', 'Actions'].forEach((label) => {
+            const th = document.createElement('th');
+            th.textContent = label;
+            htr.appendChild(th);
+        });
+        thead.appendChild(htr);
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
 
         projectRepoIds.forEach((repoId) => {
             const repo = repoMap.get(repoId);
-            const li   = document.createElement('li');
-            li.className = 'repo-list-item';
+            const tr = document.createElement('tr');
 
-            const repoInfo = document.createElement('span');
-            repoInfo.className = 'repo-list-info';
-            repoInfo.textContent = repo ? `${repo.name || repo.id} (${repo.id})` : repoId;
+            // Name cell
+            const nameCell = document.createElement('td');
+            nameCell.textContent = repo ? (repo.name || repo.id) : repoId;
+            tr.appendChild(nameCell);
+
+            // ID cell
+            const idCell = document.createElement('td');
+            idCell.className = 'text-muted font-mono';
+            idCell.textContent = repoId;
+            tr.appendChild(idCell);
+
+            // Actions cell
+            const actCell = document.createElement('td');
+            actCell.className = 'actions';
 
             const removeBtn = document.createElement('button');
             removeBtn.type      = 'button';
@@ -1573,12 +2038,13 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
                 }
             });
 
-            li.appendChild(repoInfo);
-            li.appendChild(removeBtn);
-            list.appendChild(li);
+            actCell.appendChild(removeBtn);
+            tr.appendChild(actCell);
+            tbody.appendChild(tr);
         });
 
-        section.appendChild(list);
+        table.appendChild(tbody);
+        section.appendChild(table);
     }
 
     // ---- Add Repository picker ----
@@ -1649,23 +2115,19 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
 /**
  * Build the Workspaces section for a project.
  *
- * Lists workspaces with ID, description, creation date, a link to the
- * workspace detail view, and a Delete button (disabled for STABLE).
+ * Lists workspaces with ID, description, creation date, current branches,
+ * a link to the workspace detail view, and a Delete button (disabled for STABLE).
  * Includes an "Add Workspace" form.
  *
  * @param {string}   projectId  - Current project ID.
- * @param {Array<{ id: string, description: string, createdAt: string }>} workspaces
+ * @param {Array<{ id: string, description: string, createdAt: string, initialized: boolean }>} workspaces
+ * @param {Record<string, Record<string, Object>|null>} wsStatusMap - Keyed by workspace ID; values are status maps (repoId → GitStatusInfo) or null.
  * @param {function(): Promise<void>} onRefresh - Re-renders the entire view.
  * @returns {HTMLElement}
  */
-function buildWorkspacesSection(projectId, workspaces, onRefresh) {
+function buildWorkspacesSection(projectId, workspaces, wsStatusMap, onRefresh) {
     const section = document.createElement('section');
     section.className = 'project-workspaces-section';
-
-    const heading = document.createElement('h3');
-    heading.className = 'section-title';
-    heading.textContent = 'Workspaces';
-    section.appendChild(heading);
 
     // ---- Workspace list ----
     if (workspaces.length === 0) {
@@ -1679,7 +2141,7 @@ function buildWorkspacesSection(projectId, workspaces, onRefresh) {
 
         const thead = document.createElement('thead');
         const htr   = document.createElement('tr');
-        ['ID', 'Description', 'Created', 'Actions'].forEach((label) => {
+        ['ID', 'Description', 'Created', 'Branches', 'Actions'].forEach((label) => {
             const th = document.createElement('th');
             th.textContent = label;
             htr.appendChild(th);
@@ -1729,11 +2191,63 @@ function buildWorkspacesSection(projectId, workspaces, onRefresh) {
             }
             tr.appendChild(createdCell);
 
+            // Branches cell — aggregated current branches across all repos in this workspace
+            const branchesCell = document.createElement('td');
+            branchesCell.className = 'workspace-branches-cell font-mono text-muted';
+            const repoStatuses = wsStatusMap[ws.id];
+            if (repoStatuses && typeof repoStatuses === 'object') {
+                const branches = Object.values(repoStatuses)
+                    .map((s) => s && s.currentBranch)
+                    .filter(Boolean);
+                const unique = [...new Set(branches)];
+                branchesCell.textContent = unique.length > 0 ? unique.join(', ') : '—';
+            } else {
+                branchesCell.textContent = '—';
+            }
+            tr.appendChild(branchesCell);
+
             // Actions cell
             const actCell = document.createElement('td');
             actCell.className = 'workspace-actions-cell';
 
             const isStable = ws.id === 'STABLE';
+
+            // Setup button — shown when workspace is not initialized on disk
+            if (!ws.initialized) {
+                const setupBtn = document.createElement('button');
+                setupBtn.type      = 'button';
+                setupBtn.className = 'btn btn-primary btn-sm';
+                setupBtn.textContent = 'Setup';
+                setupBtn.title = 'Initialize workspace on disk (create folder, clone repos).';
+
+                setupBtn.addEventListener('click', async () => {
+                    setupBtn.disabled = true;
+                    setupBtn.textContent = 'Setting up…';
+
+                    try {
+                        const result = await api.workspaces.setup(projectId, ws.id);
+
+                        // Report per-repo clone results
+                        const failures = (result && result.results || []).filter((r) => !r.success);
+                        if (failures.length > 0) {
+                            for (const failure of failures) {
+                                const detail = failure.error ? `: ${failure.error}` : '.';
+                                showToast(`Failed to clone "${failure.repositoryId}"${detail}`, 'warning', 8000);
+                            }
+                        } else {
+                            showToast(`Workspace "${ws.id}" set up successfully.`, 'success');
+                        }
+
+                        await onRefresh();
+                    } catch (err) {
+                        showToast(err.message || 'Failed to set up workspace.', 'error');
+                        setupBtn.disabled = false;
+                        setupBtn.textContent = 'Setup';
+                    }
+                });
+
+                actCell.appendChild(setupBtn);
+            }
 
             const deleteBtn = document.createElement('button');
             deleteBtn.type      = 'button';
@@ -2108,6 +2622,23 @@ export async function renderProjectDetail(container, params) {
         : [];
 
     // -----------------------------------------------------------------------
+    // Fetch workspace statuses for the branches column (best-effort)
+    // -----------------------------------------------------------------------
+    /** @type {Record<string, Record<string, Object>|null>} */
+    const wsStatusMap = {};
+    const initializedWs = normWorkspaces.filter((ws) => ws.initialized);
+    if (initializedWs.length > 0) {
+        const statusResults = await Promise.allSettled(
+            initializedWs.map((ws) => api.status.get(projectId, ws.id)),
+        );
+        initializedWs.forEach((ws, i) => {
+            wsStatusMap[ws.id] = statusResults[i].status === 'fulfilled'
+                ? statusResults[i].value
+                : null;
+        });
+    }
+
+    // -----------------------------------------------------------------------
     // Re-render helper — re-fetches all data and re-renders the view
     // -----------------------------------------------------------------------
     async function refresh() {
@@ -2120,10 +2651,7 @@ export async function renderProjectDetail(container, params) {
     // -----------------------------------------------------------------------
     container.innerHTML = '';
 
-    // ---- Page header ----
-    const header = document.createElement('div');
-    header.className = 'page-header';
-
+    // ---- Page header (back link only — name is in the meta section) ----
     const backLink = document.createElement('a');
     backLink.href      = '#/';
     backLink.className = 'back-link text-muted';
@@ -2134,20 +2662,62 @@ export async function renderProjectDetail(container, params) {
             _router.navigate('#/');
         });
     }
-    header.appendChild(backLink);
-
-    const title = document.createElement('h1');
-    title.className = 'page-title';
-    title.textContent = normProject.name || normProject.id;
-    header.appendChild(title);
-
-    container.appendChild(header);
+    container.appendChild(backLink);
 
     // ---- Metadata section ----
     container.appendChild(buildMetaSection(normProject));
 
-    // ---- Repositories section ----
-    container.appendChild(
+    // ---- Tab navigation ----
+    const tabNav = document.createElement('nav');
+    tabNav.className = 'tab-nav';
+    tabNav.setAttribute('role', 'tablist');
+
+    const tabs = [
+        { id: 'workspaces', label: 'Workspaces' },
+        { id: 'repositories', label: 'Repositories' },
+        { id: 'danger', label: 'Danger Zone' },
+    ];
+
+    const panels = {};
+
+    tabs.forEach((tab, index) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'tab-btn' + (index === 0 ? ' active' : '');
+        btn.textContent = tab.label;
+        btn.setAttribute('role', 'tab');
+        btn.setAttribute('aria-selected', index === 0 ? 'true' : 'false');
+        btn.setAttribute('aria-controls', `tab-panel-${tab.id}`);
+        btn.dataset.tab = tab.id;
+        tabNav.appendChild(btn);
+
+        const panel = document.createElement('div');
+        panel.id = `tab-panel-${tab.id}`;
+        panel.className = 'tab-panel' + (index === 0 ? ' active' : '');
+        panel.setAttribute('role', 'tabpanel');
+        panels[tab.id] = panel;
+    });
+
+    tabNav.addEventListener('click', (e) => {
+        const btn = e.target.closest('.tab-btn');
+        if (!btn) return;
+        const tabId = btn.dataset.tab;
+
+        tabNav.querySelectorAll('.tab-btn').forEach((b) => {
+            b.classList.remove('active');
+            b.setAttribute('aria-selected', 'false');
+        });
+        btn.classList.add('active');
+        btn.setAttribute('aria-selected', 'true');
+
+        Object.values(panels).forEach((p) => p.classList.remove('active'));
+        panels[tabId].classList.add('active');
+    });
+
+    container.appendChild(tabNav);
+
+    // ---- Repositories panel ----
+    panels.repositories.appendChild(
         buildRepositoriesSection(
             normProject.id,
             normProject.repositories,
@@ -2155,25 +2725,23 @@ export async function renderProjectDetail(container, params) {
             refresh,
         ),
     );
+    container.appendChild(panels.repositories);
 
-    // ---- Workspaces section ----
-    container.appendChild(
-        buildWorkspacesSection(normProject.id, normWorkspaces, refresh),
+    // ---- Workspaces panel ----
+    panels.workspaces.appendChild(
+        buildWorkspacesSection(normProject.id, normWorkspaces, wsStatusMap, refresh),
     );
+    container.appendChild(panels.workspaces);
 
-    // ---- Danger zone ----
+    // ---- Danger zone panel ----
     const dangerZone = document.createElement('div');
     dangerZone.className = 'danger-zone';
-
-    const dangerHeading = document.createElement('h3');
-    dangerHeading.className = 'section-title';
-    dangerHeading.textContent = 'Danger Zone';
-    dangerZone.appendChild(dangerHeading);
 
     dangerZone.appendChild(buildRenameSection(normProject));
     dangerZone.appendChild(buildDeleteSection(normProject));
 
-    container.appendChild(dangerZone);
+    panels.danger.appendChild(dangerZone);
+    container.appendChild(panels.danger);
 }
 
 ```
@@ -2638,6 +3206,447 @@ export async function renderRepositories(container, _params) {
 }
 
 ```
+###  Path: `/gui/public/js/views/settings.js`
+
+```js
+/**
+ * Settings View — Repo Parallelizer GUI.
+ *
+ * Renders two settings sections:
+ *   1. **Git Credentials** — table of per-host PATs with add/delete controls.
+ *   2. **Repositories Refresh Delay** — number input for `gitPollingIntervalSeconds`
+ *      with client-side validation (min 10) and save/feedback.
+ *
+ * This view has no side-effects (no polling), so it returns no cleanup function.
+ *
+ * @param {HTMLElement} container - The `#app` root element supplied by the router.
+ * @param {Object}      _params   - Route params (none for this route).
+ */
+
+import { api } from '../api.js';
+import { showToast } from '../components/toast.js';
+import { showConfirm } from '../components/confirm-dialog.js';
+import { createFormField, validateRequired } from '../components/form-helpers.js';
+
+// ---------------------------------------------------------------------------
+// Table rendering
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the `<thead>` for the credentials table.
+ *
+ * @returns {HTMLElement}
+ */
+function buildTableHead() {
+    const thead = document.createElement('thead');
+    const tr = document.createElement('tr');
+
+    ['Host', 'Token', 'Actions'].forEach((label) => {
+        const th = document.createElement('th');
+        th.textContent = label;
+        tr.appendChild(th);
+    });
+
+    thead.appendChild(tr);
+    return thead;
+}
+
+/**
+ * Build a single `<tr>` for one credential entry.
+ *
+ * @param {string}            host       - The hostname key.
+ * @param {string}            maskedToken - The masked token string (e.g. `****abc1`).
+ * @param {function(): void}  onDeleted  - Callback to refresh the table after deletion.
+ * @returns {HTMLTableRowElement}
+ */
+function buildCredentialRow(host, maskedToken, onDeleted) {
+    const tr = document.createElement('tr');
+    tr.dataset.credHost = host;
+
+    // ---- Host cell (read-only) ----
+    const hostCell = document.createElement('td');
+    hostCell.className = 'cred-host-cell';
+    hostCell.textContent = host;
+    tr.appendChild(hostCell);
+
+    // ---- Masked token cell (read-only) ----
+    const tokenCell = document.createElement('td');
+    tokenCell.className = 'cred-token-cell text-muted';
+    tokenCell.textContent = maskedToken;
+    tr.appendChild(tokenCell);
+
+    // ---- Actions cell ----
+    const actionsCell = document.createElement('td');
+    actionsCell.className = 'cred-actions-cell';
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'btn btn-danger btn-sm';
+    deleteBtn.textContent = 'Delete';
+
+    actionsCell.appendChild(deleteBtn);
+    tr.appendChild(actionsCell);
+
+    // ---- Behaviour ----
+
+    deleteBtn.addEventListener('click', async () => {
+        try {
+            await showConfirm(
+                'Delete Credential',
+                `Remove the credential for "${host}"? This action cannot be undone.`,
+            );
+        } catch {
+            // User cancelled — do nothing.
+            return;
+        }
+
+        deleteBtn.disabled = true;
+        deleteBtn.textContent = 'Deleting…';
+
+        try {
+            await api.config.credentials.delete(host);
+            showToast(`Credential for "${host}" deleted.`, 'success');
+            onDeleted();
+        } catch (err) {
+            showToast(err.message || 'Failed to delete credential.', 'error');
+            deleteBtn.disabled = false;
+            deleteBtn.textContent = 'Delete';
+        }
+    });
+
+    return tr;
+}
+
+// ---------------------------------------------------------------------------
+// Credentials table rendering
+// ---------------------------------------------------------------------------
+
+/**
+ * Render a loading indicator into `tableContainer`.
+ *
+ * @param {HTMLElement} tableContainer
+ */
+function showLoading(tableContainer) {
+    tableContainer.innerHTML = `
+        <div class="loading-indicator" aria-live="polite" aria-label="Loading credentials…">
+            <span class="spinner" aria-hidden="true"></span>
+            <span>Loading credentials…</span>
+        </div>
+    `;
+}
+
+/**
+ * Fetch all credentials and render them into `tableContainer`.
+ *
+ * @param {HTMLElement} tableContainer
+ */
+async function renderCredentialsTable(tableContainer) {
+    showLoading(tableContainer);
+
+    let credentials;
+    try {
+        credentials = await api.config.credentials.list();
+    } catch (err) {
+        tableContainer.innerHTML = '';
+        const errorP = document.createElement('p');
+        errorP.className = 'error-message';
+        errorP.setAttribute('role', 'alert');
+        errorP.textContent = `Failed to load credentials: ${err.message || 'Unknown error'}`;
+        tableContainer.appendChild(errorP);
+        return;
+    }
+
+    const entries = Object.entries(credentials || {});
+
+    if (entries.length === 0) {
+        tableContainer.innerHTML = `
+            <p class="empty-state">No credentials configured. Use the form below to add one.</p>
+        `;
+        return;
+    }
+
+    const table = document.createElement('table');
+    table.className = 'credentials-table';
+    table.setAttribute('role', 'table');
+    table.setAttribute('aria-label', 'Git credentials');
+
+    table.appendChild(buildTableHead());
+
+    const tbody = document.createElement('tbody');
+
+    for (const [host, maskedToken] of entries) {
+        tbody.appendChild(buildCredentialRow(host, maskedToken, () => {
+            renderCredentialsTable(tableContainer);
+        }));
+    }
+
+    table.appendChild(tbody);
+    tableContainer.innerHTML = '';
+    tableContainer.appendChild(table);
+}
+
+// ---------------------------------------------------------------------------
+// Add / Update credential form
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the "Add / Update Credential" section with a toggle button and inline form.
+ *
+ * @param {HTMLElement} tableContainer - Used to trigger a refresh after a successful save.
+ * @returns {HTMLElement} The wrapper element containing the toggle button and form.
+ */
+function buildAddCredentialForm(tableContainer) {
+    const section = document.createElement('div');
+    section.className = 'add-credential-section';
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.className = 'btn btn-primary';
+    toggleBtn.textContent = 'Add / Update Credential';
+
+    const formWrapper = document.createElement('div');
+    formWrapper.className = 'form-wrapper';
+    formWrapper.hidden = true;
+
+    const form = document.createElement('form');
+    form.noValidate = true;
+
+    form.appendChild(createFormField('Host', 'text', 'host', {
+        placeholder: 'e.g. github.com',
+        required: true,
+    }));
+
+    form.appendChild(createFormField('Token', 'password', 'token', {
+        placeholder: 'Personal access token',
+        required: true,
+    }));
+
+    const actions = document.createElement('div');
+    actions.className = 'form-actions';
+
+    const submitBtn = document.createElement('button');
+    submitBtn.type = 'submit';
+    submitBtn.className = 'btn btn-primary';
+    submitBtn.textContent = 'Save';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'btn btn-secondary';
+    cancelBtn.textContent = 'Cancel';
+
+    actions.appendChild(submitBtn);
+    actions.appendChild(cancelBtn);
+    form.appendChild(actions);
+    formWrapper.appendChild(form);
+
+    section.appendChild(toggleBtn);
+    section.appendChild(formWrapper);
+
+    // ---- Behaviour ----
+
+    toggleBtn.addEventListener('click', () => {
+        formWrapper.hidden = !formWrapper.hidden;
+        if (!formWrapper.hidden) {
+            const hostInput = form.querySelector('[name="host"]');
+            if (hostInput) hostInput.focus();
+        }
+    });
+
+    cancelBtn.addEventListener('click', () => {
+        form.reset();
+        formWrapper.hidden = true;
+    });
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+
+        if (!validateRequired(form, ['host', 'token'])) return;
+
+        const host  = form.querySelector('[name="host"]').value.trim();
+        const token = form.querySelector('[name="token"]').value.trim();
+
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Saving…';
+
+        try {
+            await api.config.credentials.set({ host, token });
+            showToast(`Credential for "${host}" saved.`, 'success');
+            form.reset();
+            formWrapper.hidden = true;
+            renderCredentialsTable(tableContainer);
+        } catch (err) {
+            showToast(err.message || 'Failed to save credential.', 'error');
+        } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Save';
+        }
+    });
+
+    return section;
+}
+
+// ---------------------------------------------------------------------------
+// Repositories Refresh Delay section
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the "Repositories Refresh Delay" section.
+ *
+ * Fetches the current server-side `gitPollingIntervalSeconds` value on mount,
+ * populates a number input, and persists changes via `PUT /api/config/polling`.
+ *
+ * Client-side validation rejects values below 10 without sending a request.
+ * A success or error toast is shown after every save attempt.
+ *
+ * @returns {HTMLElement} The section wrapper element.
+ */
+function buildRefreshDelaySection() {
+    const section = document.createElement('div');
+    section.className = 'refresh-delay-section';
+
+    const heading = document.createElement('h2');
+    heading.textContent = 'Repositories Refresh Delay';
+    section.appendChild(heading);
+
+    const description = document.createElement('p');
+    description.textContent =
+        'How often (in seconds) the server polls remote repositories for new commits. ' +
+        'Changes take effect immediately — the current polling cycle is restarted with the new interval. ' +
+        'Minimum value is 10 seconds.';
+    section.appendChild(description);
+
+    // ---- Input row ----
+    const inputRow = document.createElement('div');
+    inputRow.className = 'refresh-delay-input-row';
+
+    const label = document.createElement('label');
+    label.htmlFor = 'refresh-delay-input';
+    label.textContent = 'Interval';
+    label.className = 'refresh-delay-label';
+
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.id = 'refresh-delay-input';
+    input.name = 'refreshDelay';
+    input.className = 'form-input refresh-delay-input';
+    input.min = '10';
+    input.step = '1';
+    input.placeholder = '30';
+    input.setAttribute('aria-label', 'Polling interval in seconds');
+
+    const unitLabel = document.createElement('span');
+    unitLabel.className = 'refresh-delay-unit';
+    unitLabel.textContent = 'seconds';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'btn btn-primary';
+    saveBtn.textContent = 'Save';
+
+    inputRow.appendChild(label);
+    inputRow.appendChild(input);
+    inputRow.appendChild(unitLabel);
+    inputRow.appendChild(saveBtn);
+    section.appendChild(inputRow);
+
+    // ---- Inline error message ----
+    const errorMsg = document.createElement('p');
+    errorMsg.className = 'error-message';
+    errorMsg.setAttribute('role', 'alert');
+    errorMsg.hidden = true;
+    section.appendChild(errorMsg);
+
+    // ---- Populate current value on mount ----
+    (async () => {
+        try {
+            const cfg = await api.config.polling.get();
+            if (cfg && typeof cfg.gitPollingIntervalSeconds === 'number') {
+                input.value = String(cfg.gitPollingIntervalSeconds);
+            }
+        } catch {
+            // Non-fatal — leave the placeholder in place.
+        }
+    })();
+
+    // ---- Save behaviour ----
+    saveBtn.addEventListener('click', async () => {
+        const raw   = input.value.trim();
+        const value = Number(raw);
+
+        // Client-side validation.
+        if (!raw || !Number.isFinite(value) || !Number.isInteger(value) || value < 10) {
+            errorMsg.textContent = 'Please enter a whole number of 10 or more.';
+            errorMsg.hidden = false;
+            input.focus();
+            return;
+        }
+
+        errorMsg.hidden = true;
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving…';
+
+        try {
+            await api.config.polling.set(value);
+            showToast('Refresh delay saved.', 'success');
+        } catch (err) {
+            showToast(err.message || 'Failed to save refresh delay.', 'error');
+        } finally {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+        }
+    });
+
+    return section;
+}
+
+// ---------------------------------------------------------------------------
+// View entry point
+// ---------------------------------------------------------------------------
+
+/**
+ * Render the Settings view into `container`.
+ *
+ * No cleanup function is returned because this view has no side-effects:
+ * it does not start polling, install global event listeners, or hold any
+ * external resources. The router does not need to call a teardown. This
+ * is consistent with the `repositories` view, which follows the same pattern.
+ *
+ * @param {HTMLElement} container - The `#app` root element supplied by the router.
+ * @param {Object}      _params   - Route params (none for this route).
+ * @returns {void}
+ */
+export function renderSettings(container, _params) {
+    container.innerHTML = '';
+
+    // Page heading
+    const heading = document.createElement('h1');
+    heading.textContent = 'Settings';
+    container.appendChild(heading);
+
+    // Credentials section
+    const credHeading = document.createElement('h2');
+    credHeading.textContent = 'Git Credentials';
+    container.appendChild(credHeading);
+
+    const credDescription = document.createElement('p');
+    credDescription.textContent =
+        'Manage per-host personal access tokens used for authenticating with private repositories. Tokens are stored masked — only the last 4 characters are visible.';
+    container.appendChild(credDescription);
+
+    const tableContainer = document.createElement('div');
+    tableContainer.className = 'credentials-table-container';
+    container.appendChild(tableContainer);
+
+    container.appendChild(buildAddCredentialForm(tableContainer));
+
+    // Initial data load
+    renderCredentialsTable(tableContainer);
+
+    // ---- Refresh Delay section ----
+    container.appendChild(buildRefreshDelaySection());
+}
+
+```
 ###  Path: `/gui/public/js/views/workspace-detail.js`
 
 ```js
@@ -2649,9 +3658,11 @@ export async function renderRepositories(container, _params) {
  *   - Repository status table: one row per repository, showing current branch,
  *     a color-coded Git status badge, and an error/loading indicator for repos
  *     with no status data yet.
- *   - Live polling: status badges refresh in-place every 10 seconds via
- *     `setInterval`. The interval is cleared via the cleanup function returned
- *     from `renderWorkspaceDetail`, which the router calls before navigating
+ *   - Live polling: status badges refresh in-place via a 1-second countdown
+ *     interval that triggers a poll every 10 seconds. A visible countdown
+ *     label and a "Refresh Now" button provide user control. The interval
+ *     is cleared via the cleanup function returned from
+ *     `renderWorkspaceDetail`, which the router calls before navigating
  *     away.
  *   - Actions: "Switch Branches" navigation button, "Rename Workspace" (disabled
  *     for STABLE), "Delete Workspace" (disabled for STABLE).
@@ -2747,12 +3758,46 @@ function extractRepoName(repo) {
  * @param {string} [label]
  */
 function showLoading(el, label = 'Loading…') {
-    el.innerHTML = `
-        <div class="loading-indicator" aria-live="polite">
-            <span class="spinner" aria-hidden="true"></span>
-            <span>${label}</span>
-        </div>
-    `;
+    el.innerHTML = '';
+    const wrapper = document.createElement('div');
+    wrapper.className = 'loading-indicator';
+    wrapper.setAttribute('aria-live', 'polite');
+
+    const spinner = document.createElement('span');
+    spinner.className = 'spinner';
+    spinner.setAttribute('aria-hidden', 'true');
+    wrapper.appendChild(spinner);
+
+    const labelEl = document.createElement('span');
+    labelEl.textContent = label;
+    wrapper.appendChild(labelEl);
+
+    el.appendChild(wrapper);
+}
+
+// ---------------------------------------------------------------------------
+// Setup helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Run workspace setup and show appropriate toast notification.
+ *
+ * @param {string} projectId
+ * @param {string} workspaceId
+ * @param {string} successMessage - Toast message shown when all repos succeed.
+ * @returns {Promise<Object>} The setup result from the API.
+ * @throws {Error} Re-throws API errors for the caller to handle.
+ */
+async function runSetup(projectId, workspaceId, successMessage) {
+    const result = await api.workspaces.setup(projectId, workspaceId);
+    const failures = (result && result.results || []).filter((r) => !r.success);
+    if (failures.length > 0) {
+        const names = failures.map((f) => f.repositoryId).join(', ');
+        showToast(`Setup complete with errors. Failed to clone: ${names}`, 'warning', 8000);
+    } else {
+        showToast(successMessage, 'success');
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -2847,24 +3892,139 @@ function updateStatusTable(tableBody, statusMap) {
 // ---------------------------------------------------------------------------
 
 /**
- * Build the workspace header section.
+ * Build the rename workspace inline form and wire up its event handlers.
  *
  * @param {string} projectId
- * @param {{ id: string, description: string }} workspace
+ * @param {{ id: string }} workspace
+ * @param {HTMLButtonElement} renameBtn - The "Rename" button that toggles form visibility.
  * @returns {HTMLElement}
  */
-function buildHeaderSection(projectId, workspace) {
-    const header = document.createElement('div');
-    header.className = 'page-header workspace-detail-header';
+function buildRenameForm(projectId, workspace, renameBtn) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'rename-workspace-form-wrapper card';
+    wrapper.hidden = true;
+
+    const formTitle = document.createElement('h4');
+    formTitle.className   = 'form-section-title';
+    formTitle.textContent = 'Rename Workspace';
+    wrapper.appendChild(formTitle);
+
+    const newIdField = createFormField('New Workspace ID', 'text', 'newWorkspaceId', {
+        required:    true,
+        placeholder: 'e.g. DEV or FEATURE',
+        hint:        'Must be 2–6 uppercase letters (A-Z only).',
+    });
+    wrapper.appendChild(newIdField);
+
+    const newIdInput   = newIdField.querySelector('[name="newWorkspaceId"]');
+    const newIdErrorEl = newIdField.querySelector('.field-error');
+
+    const formActions = document.createElement('div');
+    formActions.className = 'form-actions';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type      = 'button';
+    saveBtn.className = 'btn btn-primary btn-sm';
+    saveBtn.textContent = 'Save';
+
+    const cancelFormBtn = document.createElement('button');
+    cancelFormBtn.type      = 'button';
+    cancelFormBtn.className = 'btn btn-secondary btn-sm';
+    cancelFormBtn.textContent = 'Cancel';
+
+    formActions.appendChild(saveBtn);
+    formActions.appendChild(cancelFormBtn);
+    wrapper.appendChild(formActions);
+
+    // Behaviour
+    renameBtn.addEventListener('click', () => {
+        wrapper.hidden = false;
+        if (newIdInput) newIdInput.focus();
+    });
+
+    cancelFormBtn.addEventListener('click', () => {
+        wrapper.hidden = true;
+        if (newIdInput) newIdInput.value = '';
+        if (newIdErrorEl) newIdErrorEl.hidden = true;
+    });
+
+    saveBtn.addEventListener('click', async () => {
+        if (newIdErrorEl) newIdErrorEl.hidden = true;
+        if (newIdInput) {
+            newIdInput.classList.remove('error');
+            newIdInput.removeAttribute('aria-invalid');
+        }
+
+        if (!validateRequired(wrapper, ['newWorkspaceId'])) return;
+
+        const newId = newIdInput ? newIdInput.value.trim() : '';
+
+        if (!WORKSPACE_ID_PATTERN.test(newId)) {
+            if (newIdErrorEl) {
+                newIdErrorEl.textContent = 'Must be 2–6 uppercase letters (A-Z only).';
+                newIdErrorEl.hidden      = false;
+            }
+            if (newIdInput) {
+                newIdInput.classList.add('error');
+                newIdInput.setAttribute('aria-invalid', 'true');
+                newIdInput.focus();
+            }
+            return;
+        }
+
+        try {
+            await showConfirm(
+                'Rename Workspace',
+                `Rename workspace "${workspace.id}" to "${newId}"? The page will navigate to the new workspace URL.`,
+            );
+        } catch {
+            return;
+        }
+
+        saveBtn.disabled    = true;
+        saveBtn.textContent = 'Saving…';
+
+        try {
+            await api.workspaces.rename(projectId, workspace.id, newId);
+            showToast(`Workspace renamed to "${newId}".`, 'success');
+            const target = `#/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(newId)}`;
+            if (_router) {
+                _router.navigate(target);
+            } else {
+                location.hash = target;
+            }
+        } catch (err) {
+            showToast(err.message || 'Failed to rename workspace.', 'error');
+            saveBtn.disabled    = false;
+            saveBtn.textContent = 'Save';
+        }
+    });
+
+    return wrapper;
+}
+
+/**
+ * Build the workspace header section — compact layout with breadcrumb,
+ * workspace name, and a meta card for description + management actions.
+ *
+ * @param {string} projectId
+ * @param {{ id: string, description: string, initialized: boolean, folderPath: string }} workspace
+ * @param {boolean} isStable
+ * @param {function(): void} [onSetupSuccess] - Called after a successful setup to trigger refresh.
+ * @returns {HTMLElement}
+ */
+function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'workspace-detail-header';
 
     // Breadcrumb
     const breadcrumb = document.createElement('nav');
-    breadcrumb.className = 'breadcrumb';
+    breadcrumb.className = 'breadcrumb back-link text-muted';
     breadcrumb.setAttribute('aria-label', 'Breadcrumb');
 
     const projectLink = document.createElement('a');
     projectLink.href      = `#/projects/${encodeURIComponent(projectId)}`;
-    projectLink.textContent = projectId;
+    projectLink.textContent = `← ${projectId}`;
     projectLink.className = 'breadcrumb-link';
     if (_router) {
         projectLink.addEventListener('click', (e) => {
@@ -2872,37 +4032,139 @@ function buildHeaderSection(projectId, workspace) {
             _router.navigate(`#/projects/${encodeURIComponent(projectId)}`);
         });
     }
-
-    const separator = document.createElement('span');
-    separator.className   = 'breadcrumb-sep';
-    separator.textContent = ' / ';
-    separator.setAttribute('aria-hidden', 'true');
-
-    const currentPage = document.createElement('span');
-    currentPage.className   = 'breadcrumb-current';
-    currentPage.textContent = workspace.id;
-    currentPage.setAttribute('aria-current', 'page');
-
     breadcrumb.appendChild(projectLink);
-    breadcrumb.appendChild(separator);
-    breadcrumb.appendChild(currentPage);
-    header.appendChild(breadcrumb);
+    wrapper.appendChild(breadcrumb);
 
-    // Title
+    // Title row: workspace ID
+    const titleRow = document.createElement('div');
+    titleRow.className = 'workspace-meta-top-row';
+
     const titleEl = document.createElement('h1');
-    titleEl.className   = 'workspace-detail-title';
-    titleEl.textContent = `Workspace: ${workspace.id}`;
-    header.appendChild(titleEl);
+    titleEl.className   = 'project-meta-name';
+    titleEl.textContent = workspace.id;
+    titleRow.appendChild(titleEl);
 
-    // Description
+    // Description (inline, muted)
     if (workspace.description) {
-        const descEl = document.createElement('p');
-        descEl.className   = 'workspace-detail-description text-secondary';
+        const descEl = document.createElement('span');
+        descEl.className   = 'project-meta-id text-muted';
         descEl.textContent = workspace.description;
-        header.appendChild(descEl);
+        titleRow.appendChild(descEl);
     }
 
-    return header;
+    wrapper.appendChild(titleRow);
+
+    // Folder path row (shown when path is available)
+    if (workspace.folderPath) {
+        const pathRow = document.createElement('div');
+        pathRow.className = 'workspace-folder-path-row';
+
+        const pathLabel = document.createElement('span');
+        pathLabel.className = 'text-muted';
+        pathLabel.textContent = 'Path: ';
+
+        const pathValue = document.createElement('code');
+        pathValue.className = 'workspace-folder-path font-mono';
+        pathValue.textContent = workspace.folderPath;
+
+        pathRow.appendChild(pathLabel);
+        pathRow.appendChild(pathValue);
+        wrapper.appendChild(pathRow);
+    }
+
+    // Management row: rename, delete, setup
+    const mgmtRow = document.createElement('div');
+    mgmtRow.className = 'workspace-mgmt-row';
+
+    // Setup button (if not initialized)
+    if (!workspace.initialized) {
+        const setupBtn = document.createElement('button');
+        setupBtn.type      = 'button';
+        setupBtn.className = 'btn btn-primary btn-sm';
+        setupBtn.textContent = 'Setup Workspace';
+        setupBtn.title = 'Initialize workspace on disk (create folder, clone repos).';
+
+        setupBtn.addEventListener('click', async () => {
+            setupBtn.disabled = true;
+            setupBtn.textContent = 'Setting up…';
+
+            try {
+                await runSetup(projectId, workspace.id,
+                    `Workspace "${workspace.id}" set up successfully.`);
+
+                // Update DOM in-place — remove setup button and notify caller
+                setupBtn.remove();
+                workspace.initialized = true;
+                if (onSetupSuccess) onSetupSuccess();
+            } catch (err) {
+                showToast(err.message || 'Failed to set up workspace.', 'error');
+                setupBtn.disabled = false;
+                setupBtn.textContent = 'Setup Workspace';
+            }
+        });
+        mgmtRow.appendChild(setupBtn);
+    }
+
+    // Rename button (disabled for STABLE)
+    const renameBtn = document.createElement('button');
+    renameBtn.type      = 'button';
+    renameBtn.className = 'btn btn-secondary btn-sm';
+    renameBtn.textContent = 'Rename';
+
+    if (isStable) {
+        renameBtn.disabled = true;
+        renameBtn.title    = 'The STABLE workspace cannot be renamed.';
+    }
+    mgmtRow.appendChild(renameBtn);
+
+    // Delete button (disabled for STABLE)
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type      = 'button';
+    deleteBtn.className = 'btn btn-danger btn-sm';
+    deleteBtn.textContent = 'Delete';
+
+    if (isStable) {
+        deleteBtn.disabled = true;
+        deleteBtn.title    = 'The STABLE workspace cannot be deleted.';
+    }
+    mgmtRow.appendChild(deleteBtn);
+
+    wrapper.appendChild(mgmtRow);
+
+    // Rename inline form + delete handler (non-STABLE only)
+    if (!isStable) {
+        wrapper.appendChild(buildRenameForm(projectId, workspace, renameBtn));
+
+        deleteBtn.addEventListener('click', async () => {
+            try {
+                await showConfirm(
+                    'Delete Workspace',
+                    `Delete workspace "${workspace.id}"? All cloned repositories in this workspace will be permanently removed. This action cannot be undone.`,
+                );
+            } catch {
+                return;
+            }
+
+            deleteBtn.disabled    = true;
+            deleteBtn.textContent = 'Deleting…';
+
+            try {
+                await api.workspaces.delete(projectId, workspace.id);
+                showToast(`Workspace "${workspace.id}" deleted.`, 'success');
+                if (_router) {
+                    _router.navigate(`#/projects/${encodeURIComponent(projectId)}`);
+                } else {
+                    location.hash = `#/projects/${encodeURIComponent(projectId)}`;
+                }
+            } catch (err) {
+                showToast(err.message || 'Failed to delete workspace.', 'error');
+                deleteBtn.disabled    = false;
+                deleteBtn.textContent = 'Delete';
+            }
+        });
+    }
+
+    return wrapper;
 }
 
 /**
@@ -2915,11 +4177,6 @@ function buildHeaderSection(projectId, workspace) {
 function buildStatusTableSection(repos, statusMap) {
     const section = document.createElement('section');
     section.className = 'workspace-status-section';
-
-    const heading = document.createElement('h2');
-    heading.className   = 'section-title';
-    heading.textContent = 'Repository Status';
-    section.appendChild(heading);
 
     if (repos.length === 0) {
         const empty = document.createElement('p');
@@ -2956,26 +4213,13 @@ function buildStatusTableSection(repos, statusMap) {
 }
 
 /**
- * Build the actions section.
+ * Build the Switch Branches button.
  *
  * @param {string} projectId
  * @param {string} wid        - Workspace ID.
- * @param {boolean} isStable  - Whether this is the STABLE workspace.
  * @returns {HTMLElement}
  */
-function buildActionsSection(projectId, wid, isStable) {
-    const section = document.createElement('section');
-    section.className = 'workspace-actions-section';
-
-    const heading = document.createElement('h2');
-    heading.className   = 'section-title';
-    heading.textContent = 'Actions';
-    section.appendChild(heading);
-
-    const actionsRow = document.createElement('div');
-    actionsRow.className = 'workspace-actions-row';
-
-    // ---- Switch Branches button ----
+function buildSwitchBranchesButton(projectId, wid) {
     const switchBtn = document.createElement('button');
     switchBtn.type      = 'button';
     switchBtn.className = 'btn btn-primary';
@@ -2988,197 +4232,32 @@ function buildActionsSection(projectId, wid, isStable) {
             location.hash = target;
         }
     });
-    actionsRow.appendChild(switchBtn);
-
-    // ---- Rename Workspace ----
-    const renameWrapper = buildRenameWorkspaceAction(projectId, wid, isStable);
-    actionsRow.appendChild(renameWrapper);
-
-    // ---- Delete Workspace button ----
-    const deleteBtn = document.createElement('button');
-    deleteBtn.type      = 'button';
-    deleteBtn.className = 'btn btn-danger';
-    deleteBtn.textContent = 'Delete Workspace';
-
-    if (isStable) {
-        deleteBtn.disabled = true;
-        deleteBtn.title    = 'The STABLE workspace cannot be deleted.';
-        deleteBtn.classList.add('btn-disabled');
-    } else {
-        deleteBtn.addEventListener('click', async () => {
-            try {
-                await showConfirm(
-                    'Delete Workspace',
-                    `Delete workspace "${wid}"? All cloned repositories in this workspace will be permanently removed. This action cannot be undone.`,
-                );
-            } catch {
-                return; // User cancelled.
-            }
-
-            deleteBtn.disabled    = true;
-            deleteBtn.textContent = 'Deleting…';
-
-            try {
-                await api.workspaces.delete(projectId, wid);
-                showToast(`Workspace "${wid}" deleted.`, 'success');
-                if (_router) {
-                    _router.navigate(`#/projects/${encodeURIComponent(projectId)}`);
-                } else {
-                    location.hash = `#/projects/${encodeURIComponent(projectId)}`;
-                }
-            } catch (err) {
-                showToast(err.message || 'Failed to delete workspace.', 'error');
-                deleteBtn.disabled    = false;
-                deleteBtn.textContent = 'Delete Workspace';
-            }
-        });
-    }
-
-    actionsRow.appendChild(deleteBtn);
-    section.appendChild(actionsRow);
-
-    return section;
+    return switchBtn;
 }
 
 /**
- * Build the Rename Workspace inline action.
+ * Build the refresh toolbar row with progress bar and "Refresh Now" button.
  *
- * Returns a wrapper `<div>` containing the "Rename Workspace" button and a
- * hidden inline form. When shown, the form accepts a new workspace ID and
- * calls `api.workspaces.rename()` on submit.
- *
- * @param {string}  projectId
- * @param {string}  wid       - Current workspace ID.
- * @param {boolean} isStable
  * @returns {HTMLElement}
  */
-function buildRenameWorkspaceAction(projectId, wid, isStable) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'rename-workspace-wrapper';
+function buildRefreshToolbar() {
+    const toolbar = document.createElement('div');
+    toolbar.className = 'workspace-refresh-toolbar';
 
-    // ---- Toggle button ----
-    const renameBtn = document.createElement('button');
-    renameBtn.type      = 'button';
-    renameBtn.className = 'btn btn-secondary';
-    renameBtn.textContent = 'Rename Workspace';
+    const btn = document.createElement('button');
+    btn.type      = 'button';
+    btn.className = 'btn btn-secondary btn-sm refresh-now-btn';
+    btn.textContent = 'Refresh Now';
+    toolbar.appendChild(btn);
 
-    if (isStable) {
-        renameBtn.disabled = true;
-        renameBtn.title    = 'The STABLE workspace cannot be renamed.';
-        renameBtn.classList.add('btn-disabled');
-        wrapper.appendChild(renameBtn);
-        return wrapper;
-    }
+    const track = document.createElement('div');
+    track.className = 'refresh-progress-track';
+    const bar = document.createElement('div');
+    bar.className = 'refresh-progress-bar';
+    track.appendChild(bar);
+    toolbar.appendChild(track);
 
-    wrapper.appendChild(renameBtn);
-
-    // ---- Inline form (hidden initially) ----
-    const formWrapper = document.createElement('div');
-    formWrapper.className = 'rename-workspace-form-wrapper card';
-    formWrapper.hidden = true;
-    wrapper.appendChild(formWrapper);
-
-    const formTitle = document.createElement('h4');
-    formTitle.className   = 'form-section-title';
-    formTitle.textContent = 'Rename Workspace';
-    formWrapper.appendChild(formTitle);
-
-    const newIdField = createFormField('New Workspace ID', 'text', 'newWorkspaceId', {
-        required:    true,
-        placeholder: 'e.g. DEV or FEATURE',
-        hint:        'Must be 2–6 uppercase letters (A-Z only).',
-    });
-    formWrapper.appendChild(newIdField);
-
-    const newIdInput   = newIdField.querySelector('[name="newWorkspaceId"]');
-    const newIdErrorEl = newIdField.querySelector('.field-error');
-
-    const formActions = document.createElement('div');
-    formActions.className = 'form-actions';
-
-    const saveBtn = document.createElement('button');
-    saveBtn.type      = 'button';
-    saveBtn.className = 'btn btn-primary btn-sm';
-    saveBtn.textContent = 'Save';
-
-    const cancelBtn = document.createElement('button');
-    cancelBtn.type      = 'button';
-    cancelBtn.className = 'btn btn-secondary btn-sm';
-    cancelBtn.textContent = 'Cancel';
-
-    formActions.appendChild(saveBtn);
-    formActions.appendChild(cancelBtn);
-    formWrapper.appendChild(formActions);
-
-    // ---- Behaviour ----
-
-    renameBtn.addEventListener('click', () => {
-        formWrapper.hidden = false;
-        renameBtn.hidden   = true;
-        if (newIdInput) newIdInput.focus();
-    });
-
-    cancelBtn.addEventListener('click', () => {
-        formWrapper.hidden = true;
-        renameBtn.hidden   = false;
-        if (newIdInput) newIdInput.value = '';
-        if (newIdErrorEl) newIdErrorEl.hidden = true;
-    });
-
-    saveBtn.addEventListener('click', async () => {
-        // Clear previous validation errors.
-        if (newIdErrorEl) newIdErrorEl.hidden = true;
-        if (newIdInput) {
-            newIdInput.classList.remove('error');
-            newIdInput.removeAttribute('aria-invalid');
-        }
-
-        if (!validateRequired(formWrapper, ['newWorkspaceId'])) return;
-
-        const newId = newIdInput ? newIdInput.value.trim() : '';
-
-        if (!WORKSPACE_ID_PATTERN.test(newId)) {
-            if (newIdErrorEl) {
-                newIdErrorEl.textContent = 'Must be 2–6 uppercase letters (A-Z only).';
-                newIdErrorEl.hidden      = false;
-            }
-            if (newIdInput) {
-                newIdInput.classList.add('error');
-                newIdInput.setAttribute('aria-invalid', 'true');
-                newIdInput.focus();
-            }
-            return;
-        }
-
-        try {
-            await showConfirm(
-                'Rename Workspace',
-                `Rename workspace "${wid}" to "${newId}"? The page will navigate to the new workspace URL.`,
-            );
-        } catch {
-            return; // User cancelled.
-        }
-
-        saveBtn.disabled    = true;
-        saveBtn.textContent = 'Saving…';
-
-        try {
-            await api.workspaces.rename(projectId, wid, newId);
-            showToast(`Workspace renamed to "${newId}".`, 'success');
-            const target = `#/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(newId)}`;
-            if (_router) {
-                _router.navigate(target);
-            } else {
-                location.hash = target;
-            }
-        } catch (err) {
-            showToast(err.message || 'Failed to rename workspace.', 'error');
-            saveBtn.disabled    = false;
-            saveBtn.textContent = 'Save';
-        }
-    });
-
-    return wrapper;
+    return toolbar;
 }
 
 // ---------------------------------------------------------------------------
@@ -3201,14 +4280,14 @@ export function renderWorkspaceDetail(container, params) {
     const projectId = params.id;
     const wid       = params.wid;
 
-    let pollingInterval = null;
+    let countdownInterval = null;
 
     // Return the cleanup function immediately so the router can register it
     // even if the async bootstrap hasn't resolved yet.
     const cleanup = () => {
-        if (pollingInterval !== null) {
-            clearInterval(pollingInterval);
-            pollingInterval = null;
+        if (countdownInterval !== null) {
+            clearInterval(countdownInterval);
+            countdownInterval = null;
         }
     };
 
@@ -3219,7 +4298,7 @@ export function renderWorkspaceDetail(container, params) {
     Promise.all([
         api.workspaces.get(projectId, wid),
         api.projects.get(projectId),
-        api.status.get(projectId, wid),
+        api.status.refresh(projectId, wid),
     ]).then(([rawWorkspace, rawProject, statusMap]) => {
         // Guard: if the container was cleared by navigation before we resolved,
         // do nothing and let the cleanup function handle the interval.
@@ -3239,28 +4318,181 @@ export function renderWorkspaceDetail(container, params) {
 
         const isStable = wid === STABLE_WS_ID;
 
-        container.appendChild(buildHeaderSection(projectId, workspace));
+        // Build status table first to obtain tbody reference for helpers.
         const { section: statusSection, tbody } = buildStatusTableSection(repos, statusMap || {});
-        container.appendChild(statusSection);
-        container.appendChild(buildActionsSection(projectId, wid, isStable));
 
-        // Start polling only when there are repos to update.
-        if (tbody && repos.length > 0) {
-            pollingInterval = setInterval(async () => {
-                // Stop polling if the container is no longer in the DOM.
+        // -------------------------------------------------------------------
+        // Refresh helpers (referenced by toolbar, polling, and setup)
+        // -------------------------------------------------------------------
+
+        let remainingSeconds = POLL_INTERVAL_MS / 1000;
+        let refreshInProgress = false;
+
+        // Retry row reference — kept so polling can update/hide it.
+        let retryRow = null;
+        let retryHint = null;
+
+        // Toolbar elements — built now, wired after helpers are defined.
+        const toolbar = buildRefreshToolbar();
+        const progressBar = toolbar.querySelector('.refresh-progress-bar');
+        const refreshNowBtn = toolbar.querySelector('.refresh-now-btn');
+
+        /**
+         * Re-evaluate missing repos after a status update and hide/update
+         * the retry row accordingly.
+         */
+        function updateMissingReposRow(freshStatusMap) {
+            const currentMissing = repos.filter((r) => !freshStatusMap[r.repoId]);
+            if (currentMissing.length === 0) {
+                if (retryRow) {
+                    retryRow.remove();
+                    retryRow = null;
+                    retryHint = null;
+                }
+            } else if (retryHint) {
+                retryHint.textContent = `${currentMissing.length} ${currentMissing.length === 1 ? 'repository has' : 'repositories have'} no data \u2014 clone may have failed.`;
+            }
+        }
+
+        /**
+         * Automatic poll — uses cached status endpoint.
+         */
+        async function doPoll() {
+            if (refreshInProgress) return;
+            refreshInProgress = true;
+            try {
+                const fresh = await api.status.get(projectId, wid);
+                if (container.isConnected && fresh) {
+                    updateStatusTable(tbody, fresh);
+                    updateMissingReposRow(fresh);
+                }
+            } catch {
+                // Silently ignore polling errors — stale badges remain.
+            } finally {
+                refreshInProgress = false;
+                remainingSeconds = POLL_INTERVAL_MS / 1000;
+                progressBar.classList.remove('refreshing');
+                progressBar.style.width = '0%';
+            }
+        }
+
+        /**
+         * Manual force-refresh — calls the live git-fetch endpoint.
+         */
+        async function doRefresh() {
+            if (refreshInProgress) return;
+            refreshInProgress = true;
+            refreshNowBtn.disabled = true;
+            progressBar.classList.add('refreshing');
+            try {
+                const fresh = await api.status.refresh(projectId, wid);
+                if (container.isConnected && fresh) {
+                    updateStatusTable(tbody, fresh);
+                    updateMissingReposRow(fresh);
+                }
+            } catch {
+                // Silently ignore — stale badges remain.
+            } finally {
+                refreshInProgress = false;
+                refreshNowBtn.disabled = false;
+                remainingSeconds = POLL_INTERVAL_MS / 1000;
+                progressBar.classList.remove('refreshing');
+                progressBar.style.width = '0%';
+            }
+        }
+
+        /**
+         * Start the 1-second countdown interval.
+         */
+        function startCountdown() {
+            if (countdownInterval) return;
+            countdownInterval = setInterval(() => {
                 if (!container.isConnected) {
                     cleanup();
                     return;
                 }
-                try {
-                    const fresh = await api.status.get(projectId, wid);
-                    if (container.isConnected && fresh) {
-                        updateStatusTable(tbody, fresh);
-                    }
-                } catch {
-                    // Silently ignore polling errors — the stale badges remain.
+                remainingSeconds--;
+                if (remainingSeconds <= 0) {
+                    progressBar.classList.add('refreshing');
+                    doPoll();
+                } else {
+                    const totalSeconds = POLL_INTERVAL_MS / 1000;
+                    const pct = ((totalSeconds - remainingSeconds) / totalSeconds) * 100;
+                    progressBar.style.width = `${pct}%`;
                 }
-            }, POLL_INTERVAL_MS);
+            }, 1000);
+        }
+
+        refreshNowBtn.addEventListener('click', doRefresh);
+
+        // Setup success callback — hides setup button, triggers refresh.
+        const onSetupSuccess = () => {
+            doRefresh();
+            if (!countdownInterval && tbody && repos.length > 0) {
+                startCountdown();
+            }
+        };
+
+        // -------------------------------------------------------------------
+        // Assemble DOM
+        // -------------------------------------------------------------------
+
+        container.appendChild(buildHeaderSection(projectId, workspace, isStable, onSetupSuccess));
+
+        // Refresh toolbar (between header and status table)
+        if (repos.length > 0) {
+            container.appendChild(toolbar);
+        }
+
+        container.appendChild(statusSection);
+
+        // Show "Retry Setup" when workspace is initialized but some repos
+        // have no status data (likely failed to clone).
+        const safeStatusMap = statusMap || {};
+        const missingRepos = repos.filter((r) => !safeStatusMap[r.repoId]);
+        if (workspace.initialized && missingRepos.length > 0) {
+            retryRow = document.createElement('div');
+            retryRow.className = 'workspace-mgmt-row';
+
+            retryHint = document.createElement('span');
+            retryHint.className = 'text-secondary text-sm';
+            retryHint.textContent = `${missingRepos.length} ${missingRepos.length === 1 ? 'repository has' : 'repositories have'} no data \u2014 clone may have failed.`;
+            retryRow.appendChild(retryHint);
+
+            const retryBtn = document.createElement('button');
+            retryBtn.type      = 'button';
+            retryBtn.className = 'btn btn-secondary btn-sm';
+            retryBtn.textContent = 'Retry Setup';
+            retryBtn.title = 'Re-run workspace setup to clone missing repositories.';
+
+            retryBtn.addEventListener('click', async () => {
+                retryBtn.disabled = true;
+                retryBtn.textContent = 'Setting up\u2026';
+
+                try {
+                    await runSetup(projectId, workspace.id,
+                        'All repositories cloned successfully.');
+
+                    // Trigger immediate refresh to update the status table.
+                    doRefresh();
+                } catch (err) {
+                    showToast(err.message || 'Failed to set up workspace.', 'error');
+                    retryBtn.disabled = false;
+                    retryBtn.textContent = 'Retry Setup';
+                }
+            });
+
+            retryRow.appendChild(retryBtn);
+            container.appendChild(retryRow);
+        }
+
+        if (!isStable) {
+            container.appendChild(buildSwitchBranchesButton(projectId, wid));
+        }
+
+        // Start polling countdown when there are repos to update.
+        if (tbody && repos.length > 0) {
+            startCountdown();
         }
     }).catch((err) => {
         if (!container.isConnected) return;
@@ -3299,6 +4531,6 @@ export function renderWorkspaceDetail(container, params) {
 ```
 ---
 **File Statistics**
-- **Size**: 114.3 KB
-- **Lines**: 3305
+- **Size**: 157.82 KB
+- **Lines**: 4537
 File: `modules/gui/architecture-views.md`

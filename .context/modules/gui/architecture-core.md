@@ -339,6 +339,19 @@ const workspaces = {
             `/api/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wid)}`,
         );
     },
+
+    /**
+     * Set up a workspace on disk (create folder, clone repos, generate .code-workspace file).
+     * @param {string} projectId
+     * @param {string} wid
+     * @returns {Promise<Object>}
+     */
+    setup(projectId, wid) {
+        return request(
+            'POST',
+            `/api/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wid)}/setup`,
+        );
+    },
 };
 
 /**
@@ -424,6 +437,131 @@ const status = {
     },
 };
 
+/**
+ * Error Log endpoints.
+ *
+ * @namespace api.errorLog
+ */
+const errorLog = {
+    /**
+     * List error log entries, with optional filters.
+     *
+     * @param {{ severity?: string, source?: string, limit?: number, offset?: number }} [params]
+     * @returns {Promise<Object>} Paginated result containing `entries` and `total`.
+     */
+    list(params) {
+        let url = '/api/error-log';
+        if (params && Object.keys(params).length > 0) {
+            const qs = new URLSearchParams();
+            if (params.severity !== undefined) qs.set('severity', params.severity);
+            if (params.source   !== undefined) qs.set('source',   params.source);
+            if (params.limit    !== undefined) qs.set('limit',    String(params.limit));
+            if (params.offset   !== undefined) qs.set('offset',   String(params.offset));
+            const qsString = qs.toString();
+            if (qsString) url += '?' + qsString;
+        }
+        return request('GET', url);
+    },
+
+    /**
+     * Get a single error log entry by ID.
+     *
+     * @param {number} id
+     * @returns {Promise<Object>}
+     */
+    get(id) {
+        return request('GET', `/api/error-log/${encodeURIComponent(id)}`);
+    },
+
+    /**
+     * Clear all error log entries.
+     *
+     * @returns {Promise<void>} Resolves with `undefined` on HTTP 204.
+     */
+    clear() {
+        return request('DELETE', '/api/error-log');
+    },
+
+    /**
+     * Return the distinct Source values present in the error log, sorted
+     * alphabetically. Useful for populating filter dropdowns dynamically.
+     *
+     * @returns {Promise<{ sources: string[] }>}
+     */
+    sources() {
+        return request('GET', '/api/error-log/sources');
+    },
+
+    /**
+     * Return only the total count of error log entries (no entry payload).
+     * Useful for badge/counter display.
+     *
+     * @returns {Promise<Object>} Object containing at least a `total` field.
+     */
+    count() {
+        return request('GET', '/api/error-log?limit=0');
+    },
+};
+
+/**
+ * Config / credentials endpoints.
+ *
+ * @namespace api.config
+ */
+const config = {
+    credentials: {
+        /**
+         * List all configured git credentials with masked tokens.
+         *
+         * @returns {Promise<Record<string, string>>} Map of host → masked token.
+         */
+        list() {
+            return request('GET', '/api/config/credentials');
+        },
+
+        /**
+         * Add or update a host credential.
+         *
+         * @param {{ host: string, token: string }} data
+         * @returns {Promise<Record<string, string>>} Updated masked credentials map.
+         */
+        set(data) {
+            return request('PUT', '/api/config/credentials', data);
+        },
+
+        /**
+         * Remove a host credential.
+         *
+         * @param {string} host
+         * @returns {Promise<Record<string, string>>} Updated masked credentials map after deletion.
+         */
+        delete(host) {
+            return request('DELETE', `/api/config/credentials/${encodeURIComponent(host)}`);
+        },
+    },
+
+    polling: {
+        /**
+         * Get the current polling configuration.
+         *
+         * @returns {Promise<{ gitPollingIntervalSeconds: number }>}
+         */
+        get() {
+            return request('GET', '/api/config/polling');
+        },
+
+        /**
+         * Update the git polling interval.
+         *
+         * @param {number} seconds - New interval in seconds (minimum 10).
+         * @returns {Promise<{ gitPollingIntervalSeconds: number }>}
+         */
+        set(seconds) {
+            return request('PUT', '/api/config/polling', { seconds });
+        },
+    },
+};
+
 // ---------------------------------------------------------------------------
 // Public export
 // ---------------------------------------------------------------------------
@@ -436,7 +574,9 @@ const status = {
  *   projects:     typeof projects,
  *   workspaces:   typeof workspaces,
  *   branches:     typeof branches,
- *   status:       typeof status
+ *   status:       typeof status,
+ *   config:       typeof config,
+ *   errorLog:     typeof errorLog,
  * }}
  */
 export const api = {
@@ -445,6 +585,8 @@ export const api = {
     workspaces,
     branches,
     status,
+    config,
+    errorLog,
 };
 
 ```
@@ -463,6 +605,8 @@ export const api = {
  *   #/projects/:id                               → Project Detail   (WP-014)
  *   #/projects/:id/workspaces/:wid               → Workspace Detail (WP-016)
  *   #/projects/:id/workspaces/:wid/branch-switch → Branch Switch    (WP-017)
+ *   #/settings                                   → Settings         (WP-009)
+ *   #/error-log                                  → Error Log        (WP-011)
  */
 
 import { Router }                                        from './router.js';
@@ -471,6 +615,11 @@ import { renderRepositories }                            from './views/repositor
 import { renderProjectDetail, setRouter as setProjectDetailRouter } from './views/project-detail.js';
 import { renderWorkspaceDetail, setRouter as setWorkspaceDetailRouter } from './views/workspace-detail.js';
 import { renderBranchSwitch, setRouter as setBranchSwitchRouter } from './views/branch-switch.js';
+import { renderSettings }                                from './views/settings.js';
+import { renderErrorLog }                                from './views/error-log.js';
+import { createThemeToggle }                             from './components/theme-toggle.js';
+import { initNavHighlight }                              from './utils/nav-highlight.js';
+import { initNavBadge }                                  from './components/nav-badge.js';
 
 // ---------------------------------------------------------------------------
 // Router instantiation & route registration
@@ -499,6 +648,21 @@ router.register('#/projects/:id/workspaces/:wid', renderWorkspaceDetail);
 // Branch switch (WP-017)
 router.register('#/projects/:id/workspaces/:wid/branch-switch', renderBranchSwitch);
 
+// Settings (WP-009)
+router.register('#/settings', renderSettings);
+
+// Error Log (WP-011)
+router.register('#/error-log', renderErrorLog);
+
+// ---------------------------------------------------------------------------
+// Theme toggle — apply saved theme before first render to avoid flash
+// ---------------------------------------------------------------------------
+
+const themeToggleContainer = document.getElementById('theme-toggle-container');
+if (themeToggleContainer) {
+    themeToggleContainer.appendChild(createThemeToggle());
+}
+
 // ---------------------------------------------------------------------------
 // Start the router — must be called after all routes are registered
 // ---------------------------------------------------------------------------
@@ -509,17 +673,13 @@ router.start();
 // Active nav-link highlighting
 // ---------------------------------------------------------------------------
 
-function updateActiveNavLink() {
-    const hash = location.hash || '#/';
-    document.querySelectorAll('.nav-link').forEach((link) => {
-        const linkHash = link.getAttribute('href');
-        const isActive = hash === linkHash || (linkHash !== '#/' && hash.startsWith(linkHash));
-        link.classList.toggle('active', isActive);
-    });
-}
+initNavHighlight();
 
-window.addEventListener('hashchange', updateActiveNavLink);
-updateActiveNavLink();
+// ---------------------------------------------------------------------------
+// Error log nav badge — poll for error count and update the badge
+// ---------------------------------------------------------------------------
+
+initNavBadge();
 
 ```
 ###  Path: `/gui/public/js/router.js`
@@ -729,6 +889,6 @@ export class Router {
 ```
 ---
 **File Statistics**
-- **Size**: 21.91 KB
-- **Lines**: 735
+- **Size**: 26.93 KB
+- **Lines**: 895
 File: `modules/gui/architecture-core.md`

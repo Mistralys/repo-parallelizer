@@ -5,28 +5,37 @@
     └── public/
         └── css/
             ├── styles.css
+            ├── vendor/
+            │   └── pico.classless.min.css
         └── index.html
         └── js/
+            └── api.errorLog.test.mjs
             └── api.js
             └── app.js
             └── components/
                 ├── confirm-dialog.js
                 ├── form-helpers.js
+                ├── nav-badge.js
                 ├── status-badge.js
+                ├── theme-toggle.js
                 ├── toast.js
             └── router.js
             └── utils/
+                ├── nav-highlight.js
                 ├── normalise.js
+                ├── time.js
             └── views/
                 └── branch-switch.js
                 └── dashboard.js
+                └── error-log.js
                 └── project-detail.js
                 └── repositories.js
+                └── settings.js
                 └── workspace-detail.js
 
 ```
 ---
 **File Statistics**
-- **Size**: 876 B
-- **Lines**: 33
+- **Size**: 1.21 KB
+- **Lines**: 42
 File: `modules/gui/file-structure.md`

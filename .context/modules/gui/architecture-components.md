@@ -9,10 +9,14 @@ _SOURCE: Reusable UI components and utilities_
             └── components/
                 ├── confirm-dialog.js
                 ├── form-helpers.js
+                ├── nav-badge.js
                 ├── status-badge.js
+                ├── theme-toggle.js
                 ├── toast.js
             └── utils/
+                └── nav-highlight.js
                 └── normalise.js
+                └── time.js
 
 ```
 ###  Path: `/gui/public/js/components/confirm-dialog.js`
@@ -434,6 +438,83 @@ export function validateRequired(form, fields) {
 }
 
 ```
+###  Path: `/gui/public/js/components/nav-badge.js`
+
+```js
+/**
+ * Nav Badge Component — polls the error-log count endpoint and updates the
+ * badge element in the top navigation bar.
+ *
+ * Usage:
+ *   import { initNavBadge, destroyNavBadge, refreshNavBadge } from './components/nav-badge.js';
+ *
+ *   initNavBadge();          // start polling
+ *   refreshNavBadge();       // force an immediate refresh (e.g. after "Clear All")
+ *   destroyNavBadge();       // stop polling
+ */
+
+import { api } from '../api.js';
+
+const POLL_INTERVAL_MS = 30_000; // 30 seconds
+
+/** @type {number|null} */
+let intervalId = null;
+
+/**
+ * Fetch the current error-log count and update the badge element.
+ */
+async function updateBadge() {
+    const badge = document.getElementById('error-log-badge');
+    if (!badge) return;
+
+    try {
+        const result = await api.errorLog.count();
+        const count = typeof result.total === 'number' ? result.total : 0;
+
+        if (count > 0) {
+            badge.textContent = String(count);
+            badge.hidden = false;
+        } else {
+            badge.textContent = '';
+            badge.hidden = true;
+        }
+    } catch {
+        // Silently ignore — badge is a non-critical UI element.
+    }
+}
+
+/**
+ * Start the nav badge polling loop. Safe to call multiple times — subsequent
+ * calls are no-ops if already running.
+ */
+export function initNavBadge() {
+    if (intervalId !== null) return;
+
+    // Immediate first fetch.
+    updateBadge();
+
+    intervalId = window.setInterval(updateBadge, POLL_INTERVAL_MS);
+}
+
+/**
+ * Stop the nav badge polling loop and hide the badge.
+ */
+export function destroyNavBadge() {
+    if (intervalId !== null) {
+        window.clearInterval(intervalId);
+        intervalId = null;
+    }
+}
+
+/**
+ * Force an immediate badge refresh. Call this after actions that change the
+ * error-log count (e.g. "Clear All").
+ */
+export function refreshNavBadge() {
+    updateBadge();
+}
+
+```
 ###  Path: `/gui/public/js/components/status-badge.js`
 
 ```js
@@ -458,37 +539,11 @@ export function validateRequired(form, fields) {
  * @property {boolean}      hasConflicts      - True when merge conflicts exist.
  */
 
+import { formatLastActivity } from '../utils/time.js';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Format an ISO timestamp into a human-readable relative or absolute string.
- * Returns an empty string when the input is falsy.
- *
- * @param {string|null} isoTimestamp
- * @returns {string}
- */
-function formatLastActivity(isoTimestamp) {
-    if (!isoTimestamp) return '';
-
-    const date = new Date(isoTimestamp);
-    if (isNaN(date.getTime())) return isoTimestamp; // pass through if unparseable
-
-    const now = Date.now();
-    const diffMs = now - date.getTime();
-    const diffMinutes = Math.floor(diffMs / 60_000);
-    const diffHours = Math.floor(diffMinutes / 60);
-    const diffDays = Math.floor(diffHours / 24);
-
-    if (diffMinutes < 1)  return 'just now';
-    if (diffMinutes < 60) return `${diffMinutes}m ago`;
-    if (diffHours < 24)   return `${diffHours}h ago`;
-    if (diffDays < 7)     return `${diffDays}d ago`;
-
-    // Fall back to locale date string for older commits.
-    return date.toLocaleDateString();
-}
 
 /**
  * Determine the primary CSS modifier class for the badge based on status
@@ -608,6 +663,97 @@ export function createStatusBadge(gitStatusInfo) {
 }
 
 ```
+###  Path: `/gui/public/js/components/theme-toggle.js`
+
+```js
+/**
+ * Theme toggle component.
+ *
+ * Renders a button that switches between light and dark mode by toggling
+ * the `data-theme` attribute on `<html>`. The user's preference is persisted
+ * in `localStorage` under the key `"theme"`.
+ *
+ * @module components/theme-toggle
+ */
+
+const STORAGE_KEY = 'theme';
+const THEME_LIGHT = 'light';
+const THEME_DARK = 'dark';
+
+/**
+ * Returns the stored theme preference, falling back to `"light"`.
+ * @returns {'light' | 'dark'}
+ */
+function getStoredTheme() {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored === THEME_DARK) return THEME_DARK;
+    return THEME_LIGHT;
+}
+
+/**
+ * Apply a theme to the document and persist it.
+ * @param {'light' | 'dark'} theme
+ */
+function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(STORAGE_KEY, theme);
+}
+
+/**
+ * Update the button label to reflect the current theme.
+ * Shows a sun when in dark mode (click to go light) and a moon when in
+ * light mode (click to go dark).
+ * @param {HTMLButtonElement} button
+ * @param {'light' | 'dark'} currentTheme
+ */
+/** Inline SVG icon for the sun (shown in dark mode). */
+const SUN_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
+
+/** Inline SVG icon for the moon (shown in light mode). */
+const MOON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+
+function updateButtonLabel(button, currentTheme) {
+    if (currentTheme === THEME_DARK) {
+        button.innerHTML = SUN_SVG;
+        button.setAttribute('aria-label', 'Switch to light mode');
+        button.title = 'Switch to light mode';
+    } else {
+        button.innerHTML = MOON_SVG;
+        button.setAttribute('aria-label', 'Switch to dark mode');
+        button.title = 'Switch to dark mode';
+    }
+}
+
+/**
+ * Create a theme toggle button element.
+ *
+ * The button reads the initial theme from `localStorage` (defaulting to
+ * `"light"`), applies it to `document.documentElement.dataset.theme`, and
+ * toggles between light and dark on each click — persisting the choice.
+ *
+ * @returns {HTMLButtonElement} The toggle button, ready to be appended to the DOM.
+ */
+export function createThemeToggle() {
+    const currentTheme = getStoredTheme();
+    applyTheme(currentTheme);
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn-icon';
+    updateButtonLabel(button, currentTheme);
+
+    button.addEventListener('click', () => {
+        const active = document.documentElement.dataset.theme === THEME_DARK
+            ? THEME_LIGHT
+            : THEME_DARK;
+        applyTheme(active);
+        updateButtonLabel(button, active);
+    });
+
+    return button;
+}
+
+```
 ###  Path: `/gui/public/js/components/toast.js`
 
 ```js
@@ -685,7 +831,10 @@ function dismissToast(toastEl) {
 /**
  * Display a toast notification.
  *
- * @param {string} message            - Text to display inside the toast.
+ * @param {string} message            - Text to display inside the toast.  The
+ *   message is rendered via `textContent` (NOT `innerHTML`), so server-controlled
+ *   strings (including git error output) are safe to pass here — they will be
+ *   displayed as plain text and never interpreted as HTML.
  * @param {'success'|'error'|'info'|'warning'} type - Visual variant.
  * @param {number} [duration]         - Override the auto-dismiss delay in ms.
  * @returns {HTMLElement|null}        - The created toast element, or null if
@@ -739,6 +888,43 @@ export function showToast(message, type, duration = TOAST_DISPLAY_MS) {
 }
 
 ```
+###  Path: `/gui/public/js/utils/nav-highlight.js`
+
+```js
+/**
+ * Active nav-link highlighting utility.
+ *
+ * Listens for hash changes and toggles the `.active` class on `.nav-link`
+ * elements whose `href` matches the current location hash.
+ *
+ * @module utils/nav-highlight
+ */
+
+/**
+ * Update the `active` class on all `.nav-link` elements to reflect the
+ * current `location.hash`.
+ */
+function updateActiveNavLink() {
+    const hash = location.hash || '#/';
+    document.querySelectorAll('.nav-link').forEach((link) => {
+        const linkHash = link.getAttribute('href');
+        const isActive = hash === linkHash || (linkHash !== '#/' && hash.startsWith(linkHash));
+        link.classList.toggle('active', isActive);
+    });
+}
+
+/**
+ * Initialise nav-link highlighting.
+ *
+ * Performs an immediate highlight pass and registers a `hashchange` listener
+ * so the active state stays in sync with navigation.
+ */
+export function initNavHighlight() {
+    window.addEventListener('hashchange', updateActiveNavLink);
+    updateActiveNavLink();
+}
+
+```
 ###  Path: `/gui/public/js/utils/normalise.js`
 
 ```js
@@ -787,20 +973,148 @@ export function normaliseProject(project) {
 /**
  * Normalise a workspace object from the backend.
  *
+ * The backend returns `WorkspaceID` and `DateCreated` (not `Id` / `CreatedAt`),
+ * so we must map both naming conventions.
+ *
  * @param {Object} ws
- * @returns {{ id: string, description: string, createdAt: string }}
+ * @returns {{ id: string, description: string, createdAt: string, initialized: boolean }}
  */
 export function normaliseWorkspace(ws) {
     return {
-        id:          ws.Id          || ws.id          || '',
+        id:          ws.WorkspaceID || ws.Id   || ws.id          || '',
         description: ws.Description || ws.description || '',
-        createdAt:   ws.CreatedAt   || ws.createdAt   || ws.created_at || '',
+        createdAt:   ws.DateCreated || ws.CreatedAt || ws.createdAt || ws.created_at || '',
+        initialized: ws.Initialized != null ? ws.Initialized : (ws.initialized != null ? ws.initialized : true),
+        folderPath:  ws.FolderPath  || ws.folderPath  || '',
     };
+}
+
+/**
+ * Normalise an error log entry from the backend.
+ *
+ * The Go backend serialises struct fields with capitalised keys (`Id`,
+ * `Severity`, `Source`, `Message`, `Details`, `Timestamp`, `Project`,
+ * `Workspace`, `Repository`). This helper accepts either casing and returns
+ * a consistently camelCase-keyed object for use in view code.
+ *
+ * @param {Object} entry
+ * @returns {{
+ *   id:         number,
+ *   severity:   string,
+ *   source:     string,
+ *   message:    string,
+ *   details:    string,
+ *   timestamp:  string,
+ *   project:    string,
+ *   workspace:  string,
+ *   repository: string
+ * }}
+ */
+export function normaliseErrorEntry(entry) {
+    return {
+        id:         entry.Id         ?? entry.id         ?? 0,
+        severity:   entry.Severity   || entry.severity   || '',
+        source:     entry.Source     || entry.source     || '',
+        message:    entry.Message    || entry.message    || '',
+        details:    entry.Details    || entry.details    || '',
+        timestamp:  entry.Timestamp  || entry.timestamp  || '',
+        project:    entry.Project    || entry.project    || '',
+        workspace:  entry.Workspace  || entry.workspace  || '',
+        repository: entry.Repository || entry.repository || '',
+    };
+}
+
+```
+###  Path: `/gui/public/js/utils/time.js`
+
+```js
+/**
+ * Shared time-formatting utilities for the GUI.
+ *
+ * Consolidates relative-time logic previously duplicated in:
+ *   - views/error-log.js (relativeTime)
+ *   - components/status-badge.js (formatLastActivity)
+ */
+
+// ---------------------------------------------------------------------------
+// relativeTime — verbose relative timestamps for error-log entries
+// ---------------------------------------------------------------------------
+
+/**
+ * Return a human-readable relative time string for the given ISO timestamp.
+ * Falls back to the raw timestamp string if parsing fails.
+ *
+ * @param {string} isoString - ISO 8601 timestamp from the backend.
+ * @returns {string}
+ */
+export function relativeTime(isoString) {
+    if (!isoString) return '—';
+
+    let date;
+    try {
+        date = new Date(isoString);
+        if (isNaN(date.getTime())) return isoString;
+    } catch {
+        return isoString;
+    }
+
+    const diffMs  = Date.now() - date.getTime();
+    const diffSec = Math.floor(diffMs / 1000);
+
+    if (diffSec < 5)   return 'just now';
+    if (diffSec < 60)  return `${diffSec} sec ago`;
+
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60)  return `${diffMin} min ago`;
+
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24)   return `${diffHr} hr ago`;
+
+    const diffDay = Math.floor(diffHr / 24);
+    if (diffDay < 30)  return `${diffDay} day${diffDay === 1 ? '' : 's'} ago`;
+
+    const diffMo = Math.floor(diffDay / 30);
+    if (diffMo < 12)   return `${diffMo} month${diffMo === 1 ? '' : 's'} ago`;
+
+    const diffYr = Math.floor(diffMo / 12);
+    return `${diffYr} yr${diffYr === 1 ? '' : 's'} ago`;
+}
+
+// ---------------------------------------------------------------------------
+// formatLastActivity — compact relative timestamps for status badges
+// ---------------------------------------------------------------------------
+
+/**
+ * Format an ISO timestamp into a human-readable relative or absolute string.
+ * Returns an empty string when the input is falsy.
+ *
+ * @param {string|null} isoTimestamp
+ * @returns {string}
+ */
+export function formatLastActivity(isoTimestamp) {
+    if (!isoTimestamp) return '';
+
+    const date = new Date(isoTimestamp);
+    if (isNaN(date.getTime())) return isoTimestamp; // pass through if unparseable
+
+    const now = Date.now();
+    const diffMs = now - date.getTime();
+    const diffMinutes = Math.floor(diffMs / 60_000);
+    const diffHours = Math.floor(diffMinutes / 60);
+    const diffDays = Math.floor(diffHours / 24);
+
+    if (diffMinutes < 1)  return 'just now';
+    if (diffMinutes < 60) return `${diffMinutes}m ago`;
+    if (diffHours < 24)   return `${diffHours}h ago`;
+    if (diffDays < 7)     return `${diffDays}d ago`;
+
+    // Fall back to locale date string for older commits.
+    return date.toLocaleDateString();
 }
 
 ```
 ---
 **File Statistics**
-- **Size**: 27.5 KB
-- **Lines**: 807
+- **Size**: 37.65 KB
+- **Lines**: 1121
 File: `modules/gui/architecture-components.md`

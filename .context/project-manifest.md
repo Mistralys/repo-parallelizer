@@ -32,7 +32,7 @@ _SOURCE: Agent project manifest — tech stack, API surface, constraints, data f
 | REST API | [rest-api.md](rest-api.md) | HTTP endpoints served by the built-in server. |
 | GUI Frontend | [gui-frontend.md](gui-frontend.md) | SPA architecture, views, components, and routing. |
 
-**Last generated:** 2026-04-08
+**Last generated:** 2026-04-11
 
 ```
 ###  Path: `/docs/agents/project-manifest/api-surface.md`
@@ -66,6 +66,7 @@ interface AppConfig {
     serverPort: number;       // default: 4200
     gitPollingIntervalSeconds: number; // default: 30
     gitCredentials?: Record<string, string>; // hostname → PAT/password; absent = public repos only
+    maxErrorLogEntries?: number;  // default: 500 — FIFO eviction cap for error log
 }
 ```
 
@@ -165,6 +166,70 @@ function fetchAndGetStatus(repoPath: string, timeoutMs?: number): Promise<GitSta
 
 ---
 
+## Error Log (`src/error-log/`)
+
+### Types (`error-log.types.ts`)
+
+```typescript
+type ErrorSeverity = 'error' | 'warning';
+
+interface ErrorLogContext {
+    ProjectId?: string;
+    WorkspaceId?: string;
+    RepositoryId?: string;
+}
+
+interface ErrorLogEntry {
+    Id: number;             // Auto-incremented unique numeric identifier
+    Timestamp: string;      // ISO 8601 UTC timestamp assigned by append()
+    Severity: ErrorSeverity;
+    Source: string;         // Subsystem or component that produced the entry
+    Operation: string;      // Operation being performed when the error occurred
+    Context: ErrorLogContext;
+    Message: string;
+    Details?: string;       // Optional structured detail (stack trace, raw output, etc.)
+}
+
+interface ErrorLogStore extends BaseStore {
+    Entries: ErrorLogEntry[];
+}
+
+const DEFAULT_MAX_ERROR_LOG_ENTRIES = 500;  // Default FIFO eviction cap — overridden by AppConfig.maxErrorLogEntries
+
+interface ErrorLogListOptions {
+    severity?: ErrorSeverity;   // Filter by severity; omit to return all
+    source?: string;            // Exact-match filter on Source; omit to return all
+    limit?: number;             // Max entries to return; omit to return all matching.
+                                // limit=0 or negative → empty entries, total unaffected.
+    offset?: number;            // Zero-based offset into filtered results (default: 0).
+                                // offset ≥ total → empty entries, total unaffected.
+                                // Negative offset treated as 0 (slice semantics).
+}
+
+interface ErrorLogListResult {
+    entries: ErrorLogEntry[];   // Paged entries (after filtering and pagination)
+    total: number;              // Total matching entries before pagination (post-filter)
+}
+```
+
+### Manager (`error-log.manager.ts`)
+
+```typescript
+class ErrorLogManager {
+    constructor(config: AppConfig)
+
+    append(entry: Omit<ErrorLogEntry, 'Id' | 'Timestamp'>): ErrorLogEntry
+    list(options?: ErrorLogListOptions): ErrorLogListResult
+    getById(id: number): ErrorLogEntry | undefined
+    sources(): string[]  // sorted distinct Source values
+    clear(): void
+}
+```
+
+> **No barrel index:** Import directly from the source files — `error-log.types.js` and `error-log.manager.js`. No `index.ts` exists for this module.
+
+---
+
 ## Models (`src/models/`)
 
 ### Repository
@@ -176,6 +241,7 @@ interface Repository {
     Id: string;
     Name: string;
     Url: string;
+    credentialsStripped?: boolean; // transient — set by add(), not persisted
 }
 
 interface RepositoryStore extends BaseStore {
@@ -514,7 +580,7 @@ Runs the interactive first-time configuration wizard. Guides the user through cr
 4. Prompts for `storageFolder` (default: `"data/storage"`, relative to tool root). Same creation-on-demand behaviour.
 5. Prompts for `cloneDepth` (integer ≥ 0, default: `50`).
 6. Prompts for `serverPort` (integer 1–65535, default: `4200`).
-7. Prompts for `gitPollingIntervalSeconds` (integer ≥ 1, default: `30`).
+7. Prompts for `gitPollingIntervalSeconds` (integer ≥ 1, default: `30`). Note: the REST API enforces a minimum of 10 s at runtime.
 8. Writes `config.json` with 4-space indentation.
 9. Calls `initializeStorage()` to create the storage directory structure.
 10. Prints a success summary with next steps.
@@ -627,6 +693,10 @@ class Router {
     put(pattern: string, handler: RouteHandler): this
     delete(pattern: string, handler: RouteHandler): this
     handle(req: IncomingMessage, res: ServerResponse): void
+    /** Attaches an ErrorLogManager. When set, unhandled handler rejections are
+     *  appended to the error log with source 'route-handler' and operation set
+     *  to the request URL. No additional error response is sent to the client. */
+    setErrorLogManager(manager: ErrorLogManager): void
 }
 ```
 
@@ -642,7 +712,13 @@ function serveStatic(req: IncomingMessage, res: ServerResponse, baseDir: string)
 type FetchStatusFn = (repoPath: string) => Promise<GitStatusInfo>
 
 class PollingManager {
-    constructor(config: AppConfig, projectManager: ProjectManager, workspaceManager: WorkspaceManager, fetchStatusFn?: FetchStatusFn)
+    constructor(
+        config: AppConfig,
+        projectManager: ProjectManager,
+        workspaceManager: WorkspaceManager,
+        fetchStatusFn?: FetchStatusFn,
+        errorLogManager?: ErrorLogManager,
+    )
 
     start(intervalSeconds: number): void
     stop(): void
@@ -650,6 +726,8 @@ class PollingManager {
     refreshWorkspace(projectId: string, workspaceId: string): Promise<void>
 }
 ```
+
+**`errorLogManager` (5th parameter, optional):** When provided, fetch failures inside `fetchWithStagger()` are logged at `warning` severity with `Source: 'polling'` and `Operation: 'status-poll'`. An in-memory dedup set (`failedPaths`) ensures at most one log entry per repo path per sweep-to-sweep cycle — repeated failures for the same path are not re-logged until the repo recovers (successful fetch clears the path from the set). When omitted, failures are silently swallowed and the manager behaves identically to prior behaviour.
 
 ### Request Utils (`requestUtils.ts`)
 
@@ -680,7 +758,7 @@ function registerBranchRoutes(router: Router, orchestrator: BranchOrchestrator, 
 function registerStatusRoutes(router: Router, pollingManager: PollingManager, projectManager: ProjectManager, workspaceManager: WorkspaceManager, config: AppConfig): void
 
 // config.ts
-function registerConfigRoutes(router: Router, appConfig: AppConfig): void
+function registerConfigRoutes(router: Router, appConfig: AppConfig, configPath?: string, pollingManager?: PollingManager): void
 ```
 
 ---
@@ -714,6 +792,23 @@ api.config.credentials.delete(host)
 > **Token masking:** The server applies `maskToken()` before every API response. The client never receives or stores a plaintext token. The `set()` form uses `<input type="password">` in the UI.
 
 > **Known edge case:** Hosts containing a colon (e.g. `gitlab.com:8080`) may be undeletable via the UI. `encodeURIComponent()` encodes the colon in the DELETE URL, but the server's `extractParams()` does not call `decodeURIComponent()` before the credential lookup. Tracked as a low-severity improvement for a follow-up.
+
+### `api.config.polling`
+
+Read and update the server-side git polling interval. Changes take effect immediately (the background `PollingManager` is restarted).
+
+```js
+// Return the current polling interval.
+// Returns: Promise<{ gitPollingIntervalSeconds: number }>
+api.config.polling.get()
+
+// Update the polling interval.
+// seconds: number — must be a finite integer >= 10
+// Returns: Promise<{ gitPollingIntervalSeconds: number }>
+api.config.polling.set(seconds)
+```
+
+**Validation:** `set()` rejects with HTTP 400 when `seconds` is non-numeric, fractional, infinite, NaN, or below 10. On success the new interval is persisted to `config.json` and the live polling loop is restarted immediately.
 
 ```
 ###  Path: `/docs/agents/project-manifest/constraints.md`
@@ -781,7 +876,7 @@ Both `storageFolder` and `projectsFolder` in `config.json` accept relative or ab
 - **Test runner:** Node.js built-in test runner (`node --test`).
 - **Cleanup:** All tests creating temporary files must register a `process.on('exit')` handler for synchronous cleanup, in addition to `afterAll`. The `'exit'` event fires on `SIGINT` or crash.
 - **Network tests:** Tests requiring outbound internet set `SKIP_NETWORK_TESTS=1` to self-skip.
-- **Fake-git binary pattern:** To test CLI argument construction (e.g., verifying credential-injected URLs are passed correctly to `cloneRepository()`), use a fake git binary stub rather than module mocking or network calls. The stub is a shell script placed in a uniquely-prefixed temp directory that is prepended to `process.env.PATH` for the test duration; it writes all received arguments to a capture file and exits with a non-zero code. The original PATH is always restored in a `finally` block. This approach is necessary because modern git (2.x/libcurl) strips embedded credentials from its own error messages, making the injected-URL string unavailable in `stderr`. See `src/tests/workspace-orchestrator.test.ts` and `src/tests/repository-orchestrator.test.ts` for the reference implementation (`setupFakeGit()`). **Note:** PATH mutation is not concurrency-safe — this pattern is safe only because the test runner executes test files sequentially.
+- **Fake-git binary pattern:** To test CLI argument construction (e.g., verifying credential-injected URLs are passed correctly to `cloneRepository()`), use a fake git binary stub rather than module mocking or network calls. The stub is a shell script placed in a uniquely-prefixed temp directory that is prepended to `process.env.PATH` for the test duration; it writes all received arguments to a capture file and exits with a non-zero code. The original PATH is always restored in a `finally` block. This approach is necessary because modern git (2.x/libcurl) strips embedded credentials from its own error messages, making the injected-URL string unavailable in `stderr`. The shared implementation lives in `src/tests/test-helpers.ts` (`setupFakeGit()`). **Note:** PATH mutation is not concurrency-safe — this pattern is safe only because the test runner executes test files sequentially.
 
 ## GUI Frontend Conventions
 
@@ -840,6 +935,7 @@ index.ts (entry point)
        RepositoryManager(config)
        ProjectManager(config, repoManager)
        WorkspaceManager(projectManager)
+       ErrorLogManager(config)
   └→ Instantiate orchestrators:
        WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager)
        ProjectOrchestrator(config, projectManager, workspaceOrch)
@@ -852,7 +948,7 @@ index.ts (entry point)
 
 ```
 startServer(serverConfig)
-  └→ Instantiate managers (same as CLI)
+  └→ Instantiate managers (same as CLI, including ErrorLogManager(config))
   └→ Instantiate Router
   └→ Register all REST routes via register*Routes() helpers
   └→ PollingManager.start(intervalSeconds)    # Begin periodic git status polling
@@ -1052,13 +1148,14 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 | `#/` | `dashboard.js` | Project listing with creation form. |
 | `#/repositories` | `repositories.js` | Repository CRUD table. |
 | `#/projects/:id` | `project-detail.js` | Project metadata, tabbed repo/workspace/danger-zone management. |
-| `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with 10s polling. |
+| `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with countdown-based polling and manual refresh. |
 | `#/projects/:id/workspaces/:wid/branch-switch` | `branch-switch.js` | 3-step branch switch wizard. |
-| `#/settings` | `settings.js` | Git credentials management (add/delete per-host tokens). |
+| `#/settings` | `settings.js` | Settings view with two sections: **Git Credentials** (add/delete per-host PATs) and **Repositories Refresh Delay** (configurable `gitPollingIntervalSeconds`). |
+| `#/error-log` | `error-log.js` | Paginated, filterable error log table with expandable detail rows and "Clear All" action. |
 
 ## API Client
 
-`api.js` exports a namespaced `api` object with five groups:
+`api.js` exports a namespaced `api` object with six groups:
 
 - `api.repositories` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `delete(id)`
 - `api.projects` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `rename(id, newId)`, `delete(id)`, `addRepository(pid, rid)`, `removeRepository(pid, rid)`
@@ -1066,6 +1163,43 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 - `api.branches` — `list(pid, wid)`, `switch(pid, wid, assignments)`
 - `api.status` — `get(pid, wid)`, `refresh(pid, wid)`
 - `api.config.credentials` — `list()`, `set(data)`, `delete(host)`
+- `api.config.polling` — `get()`, `set(seconds)`
+- `api.errorLog` — `list(params?)`, `get(id)`, `clear()`, `count()`
+
+### `api.errorLog` Reference
+
+| Method | HTTP | Description |
+|---|---|---|
+| `list(params?)` | `GET /api/error-log[?...]` | Fetch error log entries with optional filtering and pagination. |
+| `get(id)` | `GET /api/error-log/:id` | Fetch a single entry by numeric ID. |
+| `clear()` | `DELETE /api/error-log` | Delete all entries. Resolves with `undefined` on HTTP 204. |
+| `count()` | `GET /api/error-log?limit=0` | Fetch only the total count (no entries payload). Useful for badges. |
+
+**`list()` params shape:**
+
+```js
+api.errorLog.list({
+    severity: 'error',   // optional — 'error' | 'warning'
+    source:   'clone',   // optional — exact-match on Source field
+    limit:    10,        // optional — max entries to return (default 100 server-side)
+    offset:   0,         // optional — zero-based page offset
+})
+```
+
+All params are optional. Omitting `params` entirely (or passing `undefined`) sends a bare `GET /api/error-log`.
+
+**`clear()` 204 contract:** The underlying `request()` helper resolves with `undefined` when the server returns HTTP 204 (no body). Callers should not try to read a response value from `clear()`.
+
+**`count()` pattern:** Sends `GET /api/error-log?limit=0`. The server returns `{ entries: [], total: N }`. Read `response.total` for the count. This is the recommended approach for polling a badge counter without transferring entry data.
+
+### `api.config.polling` Reference
+
+| Method | HTTP | Description |
+|---|---|---|
+| `get()` | `GET /api/config/polling` | Fetch the current polling interval. Resolves with `{ gitPollingIntervalSeconds: number }`. |
+| `set(seconds)` | `PUT /api/config/polling` | Update the polling interval. `seconds` must be a finite integer ≥ 10. Resolves with `{ gitPollingIntervalSeconds: number }`. |
+
+**Used by:** `settings.js` (`buildRefreshDelaySection()`) to populate the number input on mount and to persist the updated value on save.
 
 ## Reusable Components
 
@@ -1081,7 +1215,7 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 
 | Utility | File | Export | Purpose |
 |---|---|---|---|
-| Normalise | `utils/normalise.js` | `normaliseRepo()`, `normaliseProject()`, `normaliseWorkspace()` | Maps PascalCase backend keys to camelCase frontend keys. |
+| Normalise | `utils/normalise.js` | `normaliseRepo()`, `normaliseProject()`, `normaliseWorkspace()` | Maps PascalCase backend keys to camelCase frontend keys. `normaliseWorkspace` now includes `folderPath` (from `FolderPath` in the API response). |
 
 ## Theme Switching
 
@@ -1104,11 +1238,43 @@ Views using router injection: `dashboard.js`, `project-detail.js`, `workspace-de
 
 Views with side-effects (e.g. `setInterval` polling) return a synchronous cleanup function from their entry point. The router calls it before rendering the next view. The cleanup must be returned **before** any async operations, so the router can register it immediately.
 
-Views returning cleanup: `workspace-detail.js` (clears 10-second polling interval).
+Views returning cleanup: `workspace-detail.js` (clears 1-second countdown interval).
+
+### Workspace Detail View (`workspace-detail.js`)
+
+The workspace detail view (`#/projects/:id/workspaces/:wid`) renders live git status for all repositories in a workspace.
+
+**Key behaviours:**
+
+- **Initial load:** Calls `api.status.refresh()` (force-refresh via live git-fetch) instead of `api.status.get()` (cached), ensuring fresh data even when the polling cache is empty.
+- **Refresh toolbar:** A `.workspace-refresh-toolbar` row between the header and the status table displays a countdown label ("Next refresh in Xs") and a "Refresh Now" button. The countdown ticks every second; when it reaches 0, an automatic poll is triggered via `api.status.get()`. The "Refresh Now" button triggers a force-refresh via `api.status.refresh()` and resets the countdown.
+- **Countdown-based polling:** Replaces the previous `setInterval(fn, 10000)` approach. A 1-second `setInterval` decrements a counter. At zero it triggers `doPoll()` (cached). A `refreshInProgress` flag prevents race conditions between manual and automatic refreshes.
+- **Reactive missing-repos row:** After each poll or manual refresh, the "X repositories have no data" message is re-evaluated. When all repos have status data, the row is removed. When the count changes, the text updates.
+- **Setup button in-place update:** After a successful workspace setup, the setup button is removed from the DOM and `workspace.initialized` is set to `true` in the local variable. An immediate force-refresh is triggered and the countdown is started — no router re-render needed.
+- **Retry Setup:** The retry button also triggers `doRefresh()` after a successful re-setup instead of reloading the page.
+- **Cleanup contract:** The returned cleanup function clears the 1-second countdown interval.
 
 ### Tabbed Navigation (Project Detail)
 
 The project detail view organises content into three tabs: **Repositories**, **Workspaces**, and **Danger Zone**. Tabs are implemented with `.tab-nav` / `.tab-btn` / `.tab-panel` CSS classes and ARIA `role="tablist"` / `role="tab"` / `role="tabpanel"` attributes. Switching is handled by a single delegated click listener on the tab nav container. Only one panel is visible at a time (`.tab-panel.active`).
+
+### Error Log View (`error-log.js`)
+
+The error log view (`#/error-log`) renders a paginated, filterable table of error log entries fetched from `GET /api/error-log`.
+
+**Key behaviours:**
+
+- **Filter bar:** Severity (`all` / `error` / `warning`) and Source dropdowns re-fetch entries on change via `api.errorLog.list()`. Source options are **fetched dynamically** from `GET /api/error-log/sources` (`api.errorLog.sources()`) on view mount and after "Clear All" — no hardcoded list. The filter bar is rebuilt after each sources fetch via `rebuildFilterBar()`.
+- **Expandable detail rows:** Each data row (`<tr class="error-log-entry-row">`) is keyboard-accessible (`role="button"`, `tabindex="0"`, `aria-expanded`). Clicking or pressing Enter/Space toggles a hidden `<tr class="error-log-detail-row">` below it containing a `<pre class="error-log-detail-pre">` with the entry's `details` field.
+- **Severity badges:** Rendered via `buildSeverityBadge()` using `.severity-badge .severity-error` or `.severity-badge .severity-warning` CSS classes.
+- **Timestamps:** Displayed as relative time (e.g. "3 min ago") with the full ISO timestamp in the `title` tooltip. Falls back to the raw string on parse failure.
+- **Clear All:** Prompts a `showConfirm()` dialog before calling `api.errorLog.clear()` (HTTP DELETE). Resets filters and reloads on success.
+- **XSS safety:** All dynamic text is set via `textContent`, never `innerHTML`.
+- **No router injection:** `error-log.js` does not export `setRouter()` — it never needs to navigate away programmatically.
+- **No cleanup function:** `renderErrorLog` returns no cleanup — there is no polling or other side-effect to tear down.
+- **Shared time utility:** `relativeTime()` is imported from `utils/time.js` (shared with `status-badge.js`'s `formatLastActivity()`).
+
+**Nav badge:** The `#error-log-badge` span inside the "Error Log" nav link displays a live error count. `nav-badge.js` polls `api.errorLog.count()` every 30 seconds and hides the badge when the count is 0. The error-log view calls `refreshNavBadge()` after "Clear All".
 
 ```
 ###  Path: `/docs/agents/project-manifest/rest-api.md`
@@ -1151,8 +1317,8 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 
 | Method | Path | Success | Error Codes | Description |
 |---|---|---|---|---|
-| `GET` | `/api/projects/:id/workspaces` | 200 | 404 | List workspaces in a project. Response includes `Initialized` boolean. |
-| `GET` | `/api/projects/:id/workspaces/:wid` | 200 | 404 | Get a single workspace. Response includes `Initialized` boolean. |
+| `GET` | `/api/projects/:id/workspaces` | 200 | 404 | List workspaces in a project. Response includes `Initialized` boolean and `FolderPath` string. |
+| `GET` | `/api/projects/:id/workspaces/:wid` | 200 | 404 | Get a single workspace. Response includes `Initialized` boolean and `FolderPath` string. |
 | `POST` | `/api/projects/:id/workspaces` | 201 | 400, 404 | Create workspace. Body: `{ id, description? }`. |
 | `PUT` | `/api/projects/:id/workspaces/:wid` | 200 | 400, 404 | Update workspace. Body: `{ Description? }`. |
 | `PUT` | `/api/projects/:id/workspaces/:wid/rename` | 200 | 400, 404 | Rename workspace. Body: `{ newId }`. |
@@ -1218,6 +1384,71 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 
 ---
 
+## Error Log
+
+Four endpoints for reading and managing the runtime error log. The log is backed by `{storageFolder}/error-log.json` and capped at `AppConfig.maxErrorLogEntries` entries (default: 500, FIFO eviction).
+
+| Method | Path | Success | Error Codes | Description |
+|---|---|---|---|---|
+| `GET` | `/api/error-log` | 200 | — | List error log entries, newest first. Supports filtering and pagination via query params. |
+| `GET` | `/api/error-log/sources` | 200 | — | Return sorted distinct `Source` values in the store. |
+| `GET` | `/api/error-log/:id` | 200 | 400, 404 | Get a single entry by numeric ID. |
+| `DELETE` | `/api/error-log` | 204 | — | Clear all entries. |
+
+> **Route ordering note:** `/api/error-log/sources` is registered **before** `/api/error-log/:id` so the literal segment `"sources"` is not captured as an `:id` parameter.
+
+### `GET /api/error-log` — Query Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `severity` | `"error" \| "warning"` | — | Filter by severity. Any other value is silently treated as no filter. |
+| `source` | `string` | — | Exact-match filter on the `Source` field. No length cap or allowlist — treat as internal-use only. |
+| `limit` | `integer ≥ 0` | `100` | Maximum entries to return. `limit=0` returns an empty `entries` array but `total` is still populated. Negative values are clamped to 0. |
+| `offset` | `integer ≥ 0` | `0` | Zero-based offset into the filtered result set. Negative values are treated as 0. |
+
+> **Note on `limit=0`:** Passing `limit=0` returns `{ entries: [], total: N }`. This is intentional — it is useful for polling the current count without fetching entries. It does **not** mean "return all entries"; omit the parameter entirely to get the default 100.
+
+### `GET /api/error-log` Response Shape
+
+```json
+{
+    "entries": [
+        {
+            "Id": 42,
+            "Timestamp": "2026-04-11T09:00:00.000Z",
+            "Severity": "error",
+            "Source": "clone",
+            "Operation": "cloneRepository",
+            "Context": { "RepositoryId": "my-repo" },
+            "Message": "git clone failed",
+            "Details": "fatal: repository not found"
+        }
+    ],
+    "total": 1
+}
+```
+
+`total` is the post-filter, pre-pagination count (i.e. how many entries match the filters before `limit`/`offset` are applied).
+
+### `GET /api/error-log/:id` — ID Validation
+
+The `:id` segment must be a **positive integer** (digits only). The following return `400`:
+
+| Input | Reason |
+|---|---|
+| `abc` | Non-numeric |
+| `12abc` | Mixed alphanumeric |
+| `1.5` | Float |
+| `0` | ID 0 is invalid; IDs start at 1 |
+
+### `DELETE /api/error-log` — Security Note
+
+> ⚠️ **No authentication or authorisation guard.** Any caller that can reach the HTTP server can permanently clear all diagnostic data.
+>
+> This is acceptable because the server is scoped to `localhost` only. **Do not expose this server beyond localhost without adding an authentication layer** (e.g. a reverse-proxy ACL or an API-key header guard) in front of the DELETE endpoint.
+
+---
+
 ## Credentials (`/api/config/credentials`)
 
 Manage per-host git credentials stored in `gitCredentials` within `config.json`. Changes take effect immediately (no server restart required) and are persisted to disk.
@@ -1266,6 +1497,41 @@ An empty object `{}` is returned when no credentials are configured.
 ```json
 {}
 ```
+
+---
+
+## Polling (`/api/config/polling`)
+
+Read and update the git polling interval at runtime, without a server restart. Changes take effect immediately (the polling manager is restarted with the new interval) and are persisted to `config.json`.
+
+| Method | Path | Success | Error Codes | Description |
+|---|---|---|---|---|
+| `GET` | `/api/config/polling` | 200 | — | Return the current polling interval. |
+| `PUT` | `/api/config/polling` | 200 | 400 | Update the polling interval. Body: `{ seconds }`. |
+
+### Validation (PUT)
+
+- `seconds`: must be a finite integer **≥ 10**. Fractional values, strings, `null`, `Infinity`, and `NaN` all return `400`.
+
+### `GET /api/config/polling` Response
+
+```json
+{ "gitPollingIntervalSeconds": 30 }
+```
+
+### `PUT /api/config/polling` Request / Response
+
+**Request body:**
+```json
+{ "seconds": 60 }
+```
+
+**Response** (updated value):
+```json
+{ "gitPollingIntervalSeconds": 60 }
+```
+
+> **Note:** No upper bound is currently enforced. Values up to `Number.MAX_SAFE_INTEGER` pass validation and would effectively disable polling for the process lifetime. A practical maximum of 86 400 seconds (24 hours) is planned as a follow-up improvement.
 
 ```
 ###  Path: `/docs/agents/project-manifest/tech-stack.md`
@@ -1317,14 +1583,15 @@ The backend follows a strict layered architecture, bottom to top:
 
 1. **Storage** (`src/storage/`) — JSON file I/O primitives.
 2. **Models** (`src/models/`) — Stateless CRUD managers (Repository, Project, Workspace). Each re-reads from disk on every call.
-3. **Git** (`src/git/`) — Stateless functions wrapping Git CLI subprocess calls.
-4. **Orchestration** (`src/orchestration/`) — Composes models + git for high-level multi-step operations (clone, branch switch, workspace creation).
-5. **Server** (`src/server/`) — HTTP server with a custom `Router`, REST API route handlers, static file serving, and a `PollingManager` for periodic git status polling.
-6. **CLI** (`src/index.ts`) — Interactive menu entry point.
+3. **Error Log** (`src/error-log/`) — Stateless, bounded error log manager (`ErrorLogManager`). Persists runtime faults and warnings to `error-log.json` with FIFO eviction at 500 entries.
+4. **Git** (`src/git/`) — Stateless functions wrapping Git CLI subprocess calls.
+5. **Orchestration** (`src/orchestration/`) — Composes models + git for high-level multi-step operations (clone, branch switch, workspace creation).
+6. **Server** (`src/server/`) — HTTP server with a custom `Router`, REST API route handlers, static file serving, and a `PollingManager` for periodic git status polling.
+7. **CLI** (`src/index.ts`) — Interactive menu entry point.
 
 ### Stateless Managers
 
-All model managers (`RepositoryManager`, `ProjectManager`, `WorkspaceManager`) are **stateless** — they re-read their backing JSON files from disk on every public method call. This ensures concurrent writes from other processes are always reflected.
+All managers (`RepositoryManager`, `ProjectManager`, `WorkspaceManager`, `ErrorLogManager`) are **stateless** — they re-read their backing JSON files from disk on every public method call. This ensures concurrent writes from other processes are always reflected.
 
 ### Dependency Injection
 
@@ -1393,6 +1660,6 @@ Both scripts `cd` to their own directory before invoking `node dist/index.js men
 ```
 ---
 **File Statistics**
-- **Size**: 57.06 KB
-- **Lines**: 1400
+- **Size**: 70.54 KB
+- **Lines**: 1622
 File: `project-manifest.md`

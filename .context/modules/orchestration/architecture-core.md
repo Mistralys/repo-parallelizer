@@ -30,6 +30,7 @@ import {
 import type { BranchInfo } from '../git/git.types.js';
 import { FETCH_TIMEOUT_MS } from './orchestration.types.js';
 import type { BranchSwitchResult } from './orchestration.types.js';
+import type { ErrorLogManager } from '../error-log/error-log.manager.js';
 
 /**
  * High-level orchestrator for branch operations across all repositories in a
@@ -40,6 +41,7 @@ export class BranchOrchestrator {
         private readonly config: AppConfig,
         private readonly projectManager: ProjectManager,
         private readonly workspaceManager: WorkspaceManager,
+        private readonly errorLogManager?: ErrorLogManager,
     ) {}
 
     // -------------------------------------------------------------------------
@@ -150,6 +152,11 @@ export class BranchOrchestrator {
      *   or workspace existence before iterating `branchAssignments`. Any error
      *   surfaces only when `workspaceManager.update()` is called at the very
      *   end — after all per-repository operations have already completed.
+     * @remarks If `errorLogManager` is injected and `errorLogManager.append()`
+     *   itself throws (e.g. disk full when writing `error-log.json`), that
+     *   exception propagates out of the `Promise.all` callback and converts a
+     *   per-repository branch-switch failure into a full rejection of this
+     *   method. Logging exceptions are **not** swallowed.
      */
     async switchBranches(
         projectId: string,
@@ -179,17 +186,33 @@ export class BranchOrchestrator {
                         const hasConflict =
                             /conflict/i.test(combinedOutput) ||
                             /overwritten by (checkout|switch)/i.test(combinedOutput);
+                        const errorMessage = gitResult.stderr.trim() || `git exited with code ${gitResult.exitCode}`;
+                        this.errorLogManager?.append({
+                            Severity: 'error',
+                            Source: 'branch-switch',
+                            Operation: 'branch-switch',
+                            Context: { ProjectId: projectId, WorkspaceId: workspaceId, RepositoryId: repoId },
+                            Message: errorMessage,
+                        });
                         results[repoId] = {
                             success: false,
                             conflict: hasConflict,
-                            error: gitResult.stderr.trim() || `git exited with code ${gitResult.exitCode}`,
+                            error: errorMessage,
                         };
                     }
                 } catch (err) {
+                    const errorMessage = (err as Error).message;
+                    this.errorLogManager?.append({
+                        Severity: 'error',
+                        Source: 'branch-switch',
+                        Operation: 'branch-switch',
+                        Context: { ProjectId: projectId, WorkspaceId: workspaceId, RepositoryId: repoId },
+                        Message: errorMessage,
+                    });
                     results[repoId] = {
                         success: false,
                         conflict: false,
-                        error: (err as Error).message,
+                        error: errorMessage,
                     };
                 }
             }),
@@ -524,6 +547,7 @@ import {
 } from './vscode-workspace.js';
 import { CLONE_TIMEOUT_MS } from './orchestration.types.js';
 import type { AddRepositoryResult, WorkspaceCloneResult } from './orchestration.types.js';
+import type { ErrorLogManager } from '../error-log/error-log.manager.js';
 
 /**
  * High-level orchestrator for repository lifecycle operations within projects.
@@ -551,6 +575,7 @@ export class RepositoryOrchestrator {
         private readonly config: AppConfig,
         private readonly projectManager: ProjectManager,
         private readonly repositoryManager: RepositoryManager,
+        private readonly errorLogManager?: ErrorLogManager,
     ) {}
 
     // -------------------------------------------------------------------------
@@ -595,6 +620,11 @@ export class RepositoryOrchestrator {
      * @throws {Error} If the repository does not exist in the global store.
      * @throws {Error} If the project does not exist.
      * @throws {Error} If the repository is already listed in the project.
+     * @remarks If `errorLogManager` is injected and `errorLogManager.append()`
+     *   itself throws (e.g. disk full when writing `error-log.json`), that
+     *   exception propagates out of the `Promise.all` callback and converts a
+     *   per-workspace clone failure into a full rejection of this method.
+     *   Logging exceptions are **not** swallowed.
      */
     async addRepositoryToProject(
         projectId: string,
@@ -635,10 +665,18 @@ export class RepositoryOrchestrator {
                 });
 
                 if (gitResult.exitCode !== 0) {
+                    const errorMessage = stripEmbeddedCredentials(gitResult.stderr) || `git clone exited with code ${gitResult.exitCode}`;
+                    this.errorLogManager?.append({
+                        Severity: 'error',
+                        Source: 'clone',
+                        Operation: 'add-repository',
+                        Context: { ProjectId: projectId, WorkspaceId: workspaceId, RepositoryId: repositoryId },
+                        Message: errorMessage,
+                    });
                     return {
                         workspaceId,
                         success: false,
-                        error: stripEmbeddedCredentials(gitResult.stderr) || `git clone exited with code ${gitResult.exitCode}`,
+                        error: errorMessage,
                     };
                 }
 
@@ -864,6 +902,7 @@ import { STABLE_WORKSPACE_ID } from '../models/workspace/workspace.types.js';
 import { isValidWorkspaceId } from '../utils/slug.js';
 import { CLONE_TIMEOUT_MS } from './orchestration.types.js';
 import type { OrchestrationResult, OrchestrationRepoResult } from './orchestration.types.js';
+import type { ErrorLogManager } from '../error-log/error-log.manager.js';
 
 /**
  * High-level orchestrator for workspace lifecycle operations.
@@ -892,6 +931,7 @@ export class WorkspaceOrchestrator {
         private readonly projectManager: ProjectManager,
         private readonly workspaceManager: WorkspaceManager,
         private readonly repositoryManager: RepositoryManager,
+        private readonly errorLogManager?: ErrorLogManager,
     ) {}
 
     // -------------------------------------------------------------------------
@@ -926,6 +966,11 @@ export class WorkspaceOrchestrator {
      * caller via `WorkspaceManager.create()` before invoking this method).
      *
      * @throws {Error} If the project does not exist.
+     * @remarks If `errorLogManager` is injected and `errorLogManager.append()`
+     *   itself throws (e.g. disk full when writing `error-log.json`), that
+     *   exception propagates out of the `Promise.all` callback and converts a
+     *   per-repository clone failure into a full rejection of this method.
+     *   Logging exceptions are **not** swallowed.
      */
     async createWorkspace(projectId: string, workspaceId: string): Promise<OrchestrationResult> {
         const project = this.projectManager.getById(projectId);
@@ -982,10 +1027,18 @@ export class WorkspaceOrchestrator {
                 });
 
                 if (gitResult.exitCode !== 0) {
+                    const errorMessage = stripEmbeddedCredentials(gitResult.stderr) || `git clone exited with code ${gitResult.exitCode}`;
+                    this.errorLogManager?.append({
+                        Severity: 'error',
+                        Source: 'clone',
+                        Operation: 'workspace-setup',
+                        Context: { ProjectId: projectId, WorkspaceId: workspaceId, RepositoryId: repoId },
+                        Message: errorMessage,
+                    });
                     return {
                         repositoryId: repoId,
                         success: false,
-                        error: stripEmbeddedCredentials(gitResult.stderr) || `git clone exited with code ${gitResult.exitCode}`,
+                        error: errorMessage,
                     };
                 }
 
@@ -1148,6 +1201,6 @@ export class WorkspaceOrchestrator {
 ```
 ---
 **File Statistics**
-- **Size**: 45.09 KB
-- **Lines**: 1154
+- **Size**: 48.25 KB
+- **Lines**: 1207
 File: `modules/orchestration/architecture-core.md`
