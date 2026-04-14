@@ -10,6 +10,7 @@ index.ts (entry point)
        RepositoryManager(config)
        ProjectManager(config, repoManager)
        WorkspaceManager(projectManager)
+       ErrorLogManager(config)
   └→ Instantiate orchestrators:
        WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager)
        ProjectOrchestrator(config, projectManager, workspaceOrch)
@@ -22,7 +23,7 @@ index.ts (entry point)
 
 ```
 startServer(serverConfig)
-  └→ Instantiate managers (same as CLI)
+  └→ Instantiate managers (same as CLI, including ErrorLogManager(config))
   └→ Instantiate Router
   └→ Register all REST routes via register*Routes() helpers
   └→ PollingManager.start(intervalSeconds)    # Begin periodic git status polling

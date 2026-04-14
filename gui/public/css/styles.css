@@ -186,7 +186,6 @@ code, pre {
 .nav-links {
     display: flex;
     gap: 8px;
-    flex: 1;
 }
 
 #theme-toggle-container {
@@ -333,6 +332,7 @@ main {
     align-items: center;
     justify-content: center;
     gap: 6px;
+    margin: 0;
     padding: 8px 16px;
     font-family: var(--font-family);
     font-size: var(--font-size-sm);
@@ -609,6 +609,138 @@ td.mono {
     display: inline-flex;
     align-items: center;
     gap: 4px;
+}
+
+/* --------------------------------------------------------------------------
+   Error Log — Severity Badges
+   -------------------------------------------------------------------------- */
+
+/**
+ * Base severity badge — mirrors the pill shape of .status-badge but scoped
+ * to the error-log view's severity column.
+ */
+.severity-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    font-size: var(--font-size-xs);
+    font-weight: 500;
+    border-radius: 9999px;
+    white-space: nowrap;
+}
+
+.severity-error {
+    color: var(--badge-error);
+    background: var(--badge-error-bg);
+}
+
+.severity-warning {
+    color: var(--color-warning);
+    background: var(--color-warning-light);
+}
+
+/* --------------------------------------------------------------------------
+   Error Log — Filter Bar
+   -------------------------------------------------------------------------- */
+
+.error-log-filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+}
+
+.error-log-filter-bar .filter-label {
+    font-size: var(--font-size-sm);
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+}
+
+.error-log-filter-bar .form-select {
+    width: auto;
+    min-width: 140px;
+}
+
+.error-log-filter-bar .btn {
+    margin-left: auto;
+}
+
+.error-log-summary {
+    font-size: var(--font-size-sm);
+    margin-bottom: 12px;
+}
+
+/* --------------------------------------------------------------------------
+   Error Log — Table Row Styles
+   -------------------------------------------------------------------------- */
+
+/**
+ * Clickable data rows indicate interactivity via a pointer cursor and a subtle
+ * left-border accent when expanded.
+ */
+.error-log-entry-row {
+    cursor: pointer;
+}
+
+.error-log-entry-row:focus {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -2px;
+}
+
+.error-log-entry-row.is-expanded {
+    background: var(--color-primary-light);
+}
+
+/* --------------------------------------------------------------------------
+   Error Log — Expandable Detail Panel
+   -------------------------------------------------------------------------- */
+
+.error-log-detail-row {
+    background: var(--color-bg);
+}
+
+.error-log-detail-row td {
+    padding: 0;
+    border-bottom: 1px solid var(--color-border-light);
+}
+
+.error-log-detail-pre {
+    margin: 0;
+    padding: 12px 16px;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    color: var(--color-text-secondary);
+    background: var(--color-bg);
+    white-space: pre-wrap;
+    word-break: break-word;
+    border-left: 3px solid var(--color-danger);
+    overflow-x: auto;
+}
+
+/* --------------------------------------------------------------------------
+   Nav Badge (error count on nav link — optional v1 feature)
+   -------------------------------------------------------------------------- */
+
+/**
+ * .nav-badge — small pill counter displayed inside a nav link, e.g.:
+ *   <a href="#/error-log" class="nav-link">Error Log <span class="nav-badge">3</span></a>
+ */
+.nav-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    margin-left: 6px;
+    font-size: var(--font-size-xs);
+    font-weight: 600;
+    line-height: 1;
+    color: var(--color-btn-text);
+    background: var(--badge-error);
+    border-radius: 9999px;
 }
 
 /* --------------------------------------------------------------------------
@@ -1046,6 +1178,49 @@ td.mono {
     margin-bottom: 20px;
 }
 
+/* Refresh toolbar — progress bar + "Refresh Now" button */
+.workspace-refresh-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.refresh-progress-track {
+    flex: 1;
+    height: 4px;
+    min-width: 80px;
+    max-width: 160px;
+    background: var(--color-border-light);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.refresh-progress-bar {
+    height: 100%;
+    width: 0%;
+    background: var(--color-primary);
+    border-radius: 2px;
+    transition: width 1s linear;
+}
+
+.refresh-progress-bar.refreshing {
+    width: 100% !important;
+    animation: refresh-indeterminate 1.2s ease-in-out infinite;
+    background: linear-gradient(
+        90deg,
+        var(--color-primary) 0%,
+        var(--color-primary-light) 50%,
+        var(--color-primary) 100%
+    );
+    background-size: 200% 100%;
+}
+
+@keyframes refresh-indeterminate {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
 @media (max-width: 768px) {
     .tab-nav {
         overflow-x: auto;
@@ -1055,4 +1230,39 @@ td.mono {
         padding: 8px 14px;
         font-size: var(--font-size-xs);
     }
+
+    .refresh-delay-input-row {
+        flex-wrap: wrap;
+    }
+}
+
+/* Settings view — sections */
+.settings-section {
+    padding: 2rem 0;
+    border-top: 1px solid var(--color-border);
+}
+
+.settings-section:first-of-type {
+    border-top: none;
+    padding-top: 0;
+}
+
+/* Settings view — form footer */
+.settings-footer {
+    display: flex;
+    justify-content: flex-end;
+    padding: 1.5rem 0;
+    border-top: 1px solid var(--color-border);
+    margin-top: 0.5rem;
+}
+
+/* Settings view — refresh delay input row */
+.refresh-delay-input-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+input.refresh-delay-input {
+    width: 5rem;
 }

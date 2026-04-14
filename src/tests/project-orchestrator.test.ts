@@ -101,7 +101,7 @@ test('createProject clones the repository into the STABLE workspace', async () =
 test('createProject generates a VS Code workspace file for STABLE', async () => {
     const { config, orchestrator } = makeFixture(makeTempDir());
     await orchestrator.createProject('My Project', ['test-repo'], undefined, 'my-project');
-    const wsFile = path.join(config.projectsFolder, 'my-project-STABLE.code-workspace');
+    const wsFile = path.join(config.projectsFolder, 'my-project', 'my-project-STABLE.code-workspace');
     assert.ok(fs.existsSync(wsFile), 'STABLE VS Code workspace file should exist');
 });
 
@@ -157,7 +157,7 @@ test('deleteProject removes all workspace subfolders (cascading)', async () => {
 test('deleteProject removes the STABLE VS Code workspace file', async () => {
     const { config, orchestrator } = makeFixture(makeTempDir());
     await orchestrator.createProject('My Project', ['test-repo'], undefined, 'my-project');
-    const wsFile = path.join(config.projectsFolder, 'my-project-STABLE.code-workspace');
+    const wsFile = path.join(config.projectsFolder, 'my-project', 'my-project-STABLE.code-workspace');
     assert.ok(fs.existsSync(wsFile), 'precondition: STABLE VS Code file should exist');
 
     orchestrator.deleteProject('my-project');
@@ -168,8 +168,10 @@ test('deleteProject removes VS Code workspace files for all workspaces', async (
     const { config, orchestrator, workspaceManager } = makeFixture(makeTempDir());
     await orchestrator.createProject('My Project', ['test-repo'], undefined, 'my-project');
     workspaceManager.create('my-project', 'DEV');
-    // Manually create a DEV .code-workspace file to simulate
-    const devWsFile = path.join(config.projectsFolder, 'my-project-DEV.code-workspace');
+    // Manually create a DEV .code-workspace file at the nested location to simulate
+    const devWsDir = path.join(config.projectsFolder, 'my-project');
+    fs.mkdirSync(devWsDir, { recursive: true });
+    const devWsFile = path.join(devWsDir, 'my-project-DEV.code-workspace');
     fs.writeFileSync(devWsFile, '{}', 'utf8');
     assert.ok(fs.existsSync(devWsFile), 'precondition: DEV VS Code file should exist');
 
@@ -227,14 +229,14 @@ test('renameProject generates the new VS Code workspace file', async () => {
 
     orchestrator.renameProject('old-project', 'new-project');
 
-    const newFile = path.join(config.projectsFolder, 'new-project-STABLE.code-workspace');
+    const newFile = path.join(config.projectsFolder, 'new-project', 'new-project-STABLE.code-workspace');
     assert.ok(fs.existsSync(newFile), 'new VS Code workspace file should exist after rename');
 });
 
 test('renameProject removes the old VS Code workspace file', async () => {
     const { config, orchestrator } = makeFixture(makeTempDir());
     await orchestrator.createProject('My Project', ['test-repo'], undefined, 'old-project');
-    const oldFile = path.join(config.projectsFolder, 'old-project-STABLE.code-workspace');
+    const oldFile = path.join(config.projectsFolder, 'old-project', 'old-project-STABLE.code-workspace');
     assert.ok(fs.existsSync(oldFile), 'precondition: old VS Code file should exist');
 
     orchestrator.renameProject('old-project', 'new-project');
@@ -248,7 +250,7 @@ test('renameProject updates folder paths in the VS Code workspace file', async (
 
     orchestrator.renameProject('old-project', 'new-project');
 
-    const newFile = path.join(config.projectsFolder, 'new-project-STABLE.code-workspace');
+    const newFile = path.join(config.projectsFolder, 'new-project', 'new-project-STABLE.code-workspace');
     const parsed = JSON.parse(fs.readFileSync(newFile, 'utf8'));
     const expectedRepoPath = path.join(config.projectsFolder, 'new-project', 'STABLE', 'test-repo');
     assert.strictEqual(parsed.folders[0].path, expectedRepoPath, 'folder path should reference new project directory');
@@ -277,14 +279,16 @@ test('renameProject handles all workspaces (cascading VS Code file regeneration)
 
     // Add a second workspace to verify renaming handles multiple workspaces
     workspaceManager.create('old-project', 'DEV');
-    const oldDevFile = path.join(config.projectsFolder, 'old-project-DEV.code-workspace');
-    // Simulate the DEV workspace file existing
+    const oldDevDir = path.join(config.projectsFolder, 'old-project');
+    fs.mkdirSync(oldDevDir, { recursive: true });
+    const oldDevFile = path.join(oldDevDir, 'old-project-DEV.code-workspace');
+    // Simulate the DEV workspace file existing at the nested location
     fs.writeFileSync(oldDevFile, JSON.stringify({ folders: [], settings: {} }, null, 4) + '\n', 'utf8');
 
     orchestrator.renameProject('old-project', 'new-project');
 
     assert.ok(!fs.existsSync(oldDevFile), 'old DEV VS Code file should be removed after rename');
-    const newDevFile = path.join(config.projectsFolder, 'new-project-DEV.code-workspace');
+    const newDevFile = path.join(config.projectsFolder, 'new-project', 'new-project-DEV.code-workspace');
     assert.ok(fs.existsSync(newDevFile), 'new DEV VS Code file should be created after rename');
 });
 

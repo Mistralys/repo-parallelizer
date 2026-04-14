@@ -42,10 +42,10 @@ export function registerWorkspaceRoutes(
         return path.join(appConfig.projectsFolder, projectId, workspaceId);
     }
 
-    // Helper: augment a WorkspaceInfo with an `Initialized` boolean.
-    function withInitialized<T extends { ProjectID: string; WorkspaceID: string }>(ws: T): T & { Initialized: boolean } {
+    // Helper: augment a WorkspaceInfo with an `Initialized` boolean and `FolderPath` string.
+    function withInitialized<T extends { ProjectID: string; WorkspaceID: string }>(ws: T): T & { Initialized: boolean; FolderPath: string } {
         const wsFolder = workspaceFolder(ws.ProjectID, ws.WorkspaceID);
-        return { ...ws, Initialized: fs.existsSync(wsFolder) };
+        return { ...ws, Initialized: fs.existsSync(wsFolder), FolderPath: wsFolder };
     }
 
     // ------------------------------------------------------------------

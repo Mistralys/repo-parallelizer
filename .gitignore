@@ -148,3 +148,4 @@ vite.config.ts.timestamp-*
 /docs/agents/**/dependency-analysis.md
 /docs/agents/**/work-packages-draft.md
 /docs/agents/**/pipeline-configuration.md
+/data/storage/

@@ -87,14 +87,14 @@ test('createWorkspace creates the workspace folder', async () => {
 test('createWorkspace generates the VS Code workspace file', async () => {
     const { config, orchestrator, projectId } = makeFixture(makeTempDir());
     await orchestrator.createWorkspace(projectId, 'DEV');
-    const wsFile = path.join(config.projectsFolder, `${projectId}-DEV.code-workspace`);
+    const wsFile = path.join(config.projectsFolder, projectId, `${projectId}-DEV.code-workspace`);
     assert.ok(fs.existsSync(wsFile), 'VS Code workspace file should exist');
 });
 
 test('createWorkspace generates a valid workspace file with correct folder paths', async () => {
     const { config, orchestrator, projectId, repoId } = makeFixture(makeTempDir());
     await orchestrator.createWorkspace(projectId, 'DEV');
-    const wsFile = path.join(config.projectsFolder, `${projectId}-DEV.code-workspace`);
+    const wsFile = path.join(config.projectsFolder, projectId, `${projectId}-DEV.code-workspace`);
     const parsed = JSON.parse(fs.readFileSync(wsFile, 'utf8'));
     assert.ok(Array.isArray(parsed.folders), 'folders should be an array');
     assert.strictEqual(parsed.folders.length, 1, 'expected one folder entry');
@@ -144,7 +144,7 @@ test('createWorkspace returns failure for unreachable repo without aborting work
 
     // Workspace folder and VS Code file are still created despite partial failure.
     assert.ok(fs.existsSync(path.join(config.projectsFolder, 'mixed-project', 'DEV')), 'workspace folder should exist despite partial failure');
-    assert.ok(fs.existsSync(path.join(config.projectsFolder, 'mixed-project-DEV.code-workspace')), 'VS Code workspace file should exist despite partial failure');
+    assert.ok(fs.existsSync(path.join(config.projectsFolder, 'mixed-project', 'mixed-project-DEV.code-workspace')), 'VS Code workspace file should exist despite partial failure');
 });
 
 test('createWorkspace throws when project does not exist', async () => {
@@ -211,7 +211,7 @@ test('deleteWorkspace removes the VS Code workspace file', async () => {
     const { config, orchestrator, workspaceManager, projectId } = makeFixture(makeTempDir());
     workspaceManager.create(projectId, 'DEV');
     await orchestrator.createWorkspace(projectId, 'DEV');
-    const wsFile = path.join(config.projectsFolder, `${projectId}-DEV.code-workspace`);
+    const wsFile = path.join(config.projectsFolder, projectId, `${projectId}-DEV.code-workspace`);
     assert.ok(fs.existsSync(wsFile), 'VS Code workspace file should exist before delete');
 
     orchestrator.deleteWorkspace(projectId, 'DEV');
@@ -286,7 +286,7 @@ test('renameWorkspace creates the new VS Code workspace file', async () => {
 
     orchestrator.renameWorkspace(projectId, 'DEV', 'FEAT');
 
-    const newFile = path.join(config.projectsFolder, `${projectId}-FEAT.code-workspace`);
+    const newFile = path.join(config.projectsFolder, projectId, `${projectId}-FEAT.code-workspace`);
     assert.ok(fs.existsSync(newFile), 'new VS Code workspace file should exist after rename');
 });
 
@@ -294,7 +294,7 @@ test('renameWorkspace removes the old VS Code workspace file', async () => {
     const { config, orchestrator, workspaceManager, projectId } = makeFixture(makeTempDir());
     workspaceManager.create(projectId, 'DEV');
     await orchestrator.createWorkspace(projectId, 'DEV');
-    const oldFile = path.join(config.projectsFolder, `${projectId}-DEV.code-workspace`);
+    const oldFile = path.join(config.projectsFolder, projectId, `${projectId}-DEV.code-workspace`);
     assert.ok(fs.existsSync(oldFile), 'old VS Code workspace file should exist before rename');
 
     orchestrator.renameWorkspace(projectId, 'DEV', 'FEAT');
@@ -309,7 +309,7 @@ test('renameWorkspace updates folder paths in the VS Code workspace file content
 
     orchestrator.renameWorkspace(projectId, 'DEV', 'FEAT');
 
-    const newFile = path.join(config.projectsFolder, `${projectId}-FEAT.code-workspace`);
+    const newFile = path.join(config.projectsFolder, projectId, `${projectId}-FEAT.code-workspace`);
     const parsed = JSON.parse(fs.readFileSync(newFile, 'utf8'));
     const expectedPath = path.join(config.projectsFolder, projectId, 'FEAT', repoId);
 

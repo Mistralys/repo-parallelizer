@@ -10,6 +10,7 @@ project:
 
 import:
   - path: "src/*/module-context.yaml"
+  - path: "gui/module-context.yaml"
 
 documents:
   - description: 'Project - Folder Structure'

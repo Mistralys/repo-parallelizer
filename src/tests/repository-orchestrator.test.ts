@@ -119,7 +119,7 @@ test('addRepositoryToProject updates VS Code workspace file to include new repo'
     const { config, orchestrator, projectId } = await makeFixture(makeTempDir());
     await orchestrator.addRepositoryToProject(projectId, 'repo-b');
 
-    const wsFile = path.join(config.projectsFolder, `${projectId}-STABLE.code-workspace`);
+    const wsFile = path.join(config.projectsFolder, projectId, `${projectId}-STABLE.code-workspace`);
     const parsed = JSON.parse(fs.readFileSync(wsFile, 'utf8'));
     const repoPaths = parsed.folders.map((f: { path: string }) => f.path);
 
@@ -272,7 +272,7 @@ test('removeRepositoryFromProject updates VS Code workspace files to exclude the
 
     orchestrator.removeRepositoryFromProject(projectId, 'repo-a');
 
-    const wsFile = path.join(config.projectsFolder, `${projectId}-STABLE.code-workspace`);
+    const wsFile = path.join(config.projectsFolder, projectId, `${projectId}-STABLE.code-workspace`);
     const parsed = JSON.parse(fs.readFileSync(wsFile, 'utf8'));
     const repoPaths = parsed.folders.map((f: { path: string }) => f.path);
 

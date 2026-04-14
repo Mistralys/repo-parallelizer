@@ -422,6 +422,72 @@ const status = {
 };
 
 /**
+ * Error Log endpoints.
+ *
+ * @namespace api.errorLog
+ */
+const errorLog = {
+    /**
+     * List error log entries, with optional filters.
+     *
+     * @param {{ severity?: string, source?: string, limit?: number, offset?: number }} [params]
+     * @returns {Promise<Object>} Paginated result containing `entries` and `total`.
+     */
+    list(params) {
+        let url = '/api/error-log';
+        if (params && Object.keys(params).length > 0) {
+            const qs = new URLSearchParams();
+            if (params.severity !== undefined) qs.set('severity', params.severity);
+            if (params.source   !== undefined) qs.set('source',   params.source);
+            if (params.limit    !== undefined) qs.set('limit',    String(params.limit));
+            if (params.offset   !== undefined) qs.set('offset',   String(params.offset));
+            const qsString = qs.toString();
+            if (qsString) url += '?' + qsString;
+        }
+        return request('GET', url);
+    },
+
+    /**
+     * Get a single error log entry by ID.
+     *
+     * @param {number} id
+     * @returns {Promise<Object>}
+     */
+    get(id) {
+        return request('GET', `/api/error-log/${encodeURIComponent(id)}`);
+    },
+
+    /**
+     * Clear all error log entries.
+     *
+     * @returns {Promise<void>} Resolves with `undefined` on HTTP 204.
+     */
+    clear() {
+        return request('DELETE', '/api/error-log');
+    },
+
+    /**
+     * Return the distinct Source values present in the error log, sorted
+     * alphabetically. Useful for populating filter dropdowns dynamically.
+     *
+     * @returns {Promise<{ sources: string[] }>}
+     */
+    sources() {
+        return request('GET', '/api/error-log/sources');
+    },
+
+    /**
+     * Return only the total count of error log entries (no entry payload).
+     * Useful for badge/counter display.
+     *
+     * @returns {Promise<Object>} Object containing at least a `total` field.
+     */
+    count() {
+        return request('GET', '/api/error-log?limit=0');
+    },
+};
+
+/**
  * Config / credentials endpoints.
  *
  * @namespace api.config
@@ -457,6 +523,27 @@ const config = {
             return request('DELETE', `/api/config/credentials/${encodeURIComponent(host)}`);
         },
     },
+
+    polling: {
+        /**
+         * Get the current polling configuration.
+         *
+         * @returns {Promise<{ gitPollingIntervalSeconds: number }>}
+         */
+        get() {
+            return request('GET', '/api/config/polling');
+        },
+
+        /**
+         * Update the git polling interval.
+         *
+         * @param {number} seconds - New interval in seconds (minimum 10).
+         * @returns {Promise<{ gitPollingIntervalSeconds: number }>}
+         */
+        set(seconds) {
+            return request('PUT', '/api/config/polling', { seconds });
+        },
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -472,7 +559,8 @@ const config = {
  *   workspaces:   typeof workspaces,
  *   branches:     typeof branches,
  *   status:       typeof status,
- *   config:       typeof config
+ *   config:       typeof config,
+ *   errorLog:     typeof errorLog,
  * }}
  */
 export const api = {
@@ -482,4 +570,5 @@ export const api = {
     branches,
     status,
     config,
+    errorLog,
 };

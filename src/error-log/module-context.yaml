@@ -1,0 +1,33 @@
+moduleMetaData:
+  id: "error-log"
+  label: "Error Log Module"
+  description: "Persistent, bounded error log. Provides append, query, and clear operations over a JSON-backed store with FIFO eviction at 500 entries."
+  keywords:
+    - ErrorLogManager
+    - ErrorLogEntry
+    - ErrorLogStore
+    - ErrorSeverity
+    - ErrorLogContext
+    - ErrorLogListOptions
+    - ErrorLogListResult
+    - DEFAULT_MAX_ERROR_LOG_ENTRIES
+    - FIFO eviction
+  relatedModules:
+    - config
+    - storage
+
+documents:
+  - description: 'Error Log - Overview'
+    outputPath: 'modules/error-log/overview.md'
+    sources:
+      - type: file
+        sourcePaths: [ ./ ]
+        filePattern: "README.md"
+
+  - description: 'Error Log - Architecture'
+    outputPath: 'modules/error-log/architecture-core.md'
+    sources:
+      - type: file
+        description: 'Error log types and manager implementation'
+        sourcePaths: [ ./ ]
+        filePattern: "*.ts"

@@ -35,8 +35,8 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 
 | Method | Path | Success | Error Codes | Description |
 |---|---|---|---|---|
-| `GET` | `/api/projects/:id/workspaces` | 200 | 404 | List workspaces in a project. Response includes `Initialized` boolean. |
-| `GET` | `/api/projects/:id/workspaces/:wid` | 200 | 404 | Get a single workspace. Response includes `Initialized` boolean. |
+| `GET` | `/api/projects/:id/workspaces` | 200 | 404 | List workspaces in a project. Response includes `Initialized` boolean and `FolderPath` string. |
+| `GET` | `/api/projects/:id/workspaces/:wid` | 200 | 404 | Get a single workspace. Response includes `Initialized` boolean and `FolderPath` string. |
 | `POST` | `/api/projects/:id/workspaces` | 201 | 400, 404 | Create workspace. Body: `{ id, description? }`. |
 | `PUT` | `/api/projects/:id/workspaces/:wid` | 200 | 400, 404 | Update workspace. Body: `{ Description? }`. |
 | `PUT` | `/api/projects/:id/workspaces/:wid/rename` | 200 | 400, 404 | Rename workspace. Body: `{ newId }`. |
@@ -102,6 +102,71 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 
 ---
 
+## Error Log
+
+Four endpoints for reading and managing the runtime error log. The log is backed by `{storageFolder}/error-log.json` and capped at `AppConfig.maxErrorLogEntries` entries (default: 500, FIFO eviction).
+
+| Method | Path | Success | Error Codes | Description |
+|---|---|---|---|---|
+| `GET` | `/api/error-log` | 200 | — | List error log entries, newest first. Supports filtering and pagination via query params. |
+| `GET` | `/api/error-log/sources` | 200 | — | Return sorted distinct `Source` values in the store. |
+| `GET` | `/api/error-log/:id` | 200 | 400, 404 | Get a single entry by numeric ID. |
+| `DELETE` | `/api/error-log` | 204 | — | Clear all entries. |
+
+> **Route ordering note:** `/api/error-log/sources` is registered **before** `/api/error-log/:id` so the literal segment `"sources"` is not captured as an `:id` parameter.
+
+### `GET /api/error-log` — Query Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `severity` | `"error" \| "warning"` | — | Filter by severity. Any other value is silently treated as no filter. |
+| `source` | `string` | — | Exact-match filter on the `Source` field. No length cap or allowlist — treat as internal-use only. |
+| `limit` | `integer ≥ 0` | `100` | Maximum entries to return. `limit=0` returns an empty `entries` array but `total` is still populated. Negative values are clamped to 0. |
+| `offset` | `integer ≥ 0` | `0` | Zero-based offset into the filtered result set. Negative values are treated as 0. |
+
+> **Note on `limit=0`:** Passing `limit=0` returns `{ entries: [], total: N }`. This is intentional — it is useful for polling the current count without fetching entries. It does **not** mean "return all entries"; omit the parameter entirely to get the default 100.
+
+### `GET /api/error-log` Response Shape
+
+```json
+{
+    "entries": [
+        {
+            "Id": 42,
+            "Timestamp": "2026-04-11T09:00:00.000Z",
+            "Severity": "error",
+            "Source": "clone",
+            "Operation": "cloneRepository",
+            "Context": { "RepositoryId": "my-repo" },
+            "Message": "git clone failed",
+            "Details": "fatal: repository not found"
+        }
+    ],
+    "total": 1
+}
+```
+
+`total` is the post-filter, pre-pagination count (i.e. how many entries match the filters before `limit`/`offset` are applied).
+
+### `GET /api/error-log/:id` — ID Validation
+
+The `:id` segment must be a **positive integer** (digits only). The following return `400`:
+
+| Input | Reason |
+|---|---|
+| `abc` | Non-numeric |
+| `12abc` | Mixed alphanumeric |
+| `1.5` | Float |
+| `0` | ID 0 is invalid; IDs start at 1 |
+
+### `DELETE /api/error-log` — Security Note
+
+> ⚠️ **No authentication or authorisation guard.** Any caller that can reach the HTTP server can permanently clear all diagnostic data.
+>
+> This is acceptable because the server is scoped to `localhost` only. **Do not expose this server beyond localhost without adding an authentication layer** (e.g. a reverse-proxy ACL or an API-key header guard) in front of the DELETE endpoint.
+
+---
+
 ## Credentials (`/api/config/credentials`)
 
 Manage per-host git credentials stored in `gitCredentials` within `config.json`. Changes take effect immediately (no server restart required) and are persisted to disk.
@@ -150,3 +215,38 @@ An empty object `{}` is returned when no credentials are configured.
 ```json
 {}
 ```
+
+---
+
+## Polling (`/api/config/polling`)
+
+Read and update the git polling interval at runtime, without a server restart. Changes take effect immediately (the polling manager is restarted with the new interval) and are persisted to `config.json`.
+
+| Method | Path | Success | Error Codes | Description |
+|---|---|---|---|---|
+| `GET` | `/api/config/polling` | 200 | — | Return the current polling interval. |
+| `PUT` | `/api/config/polling` | 200 | 400 | Update the polling interval. Body: `{ seconds }`. |
+
+### Validation (PUT)
+
+- `seconds`: must be a finite integer **≥ 10**. Fractional values, strings, `null`, `Infinity`, and `NaN` all return `400`.
+
+### `GET /api/config/polling` Response
+
+```json
+{ "gitPollingIntervalSeconds": 30 }
+```
+
+### `PUT /api/config/polling` Request / Response
+
+**Request body:**
+```json
+{ "seconds": 60 }
+```
+
+**Response** (updated value):
+```json
+{ "gitPollingIntervalSeconds": 60 }
+```
+
+> **Note:** No upper bound is currently enforced. Values up to `Number.MAX_SAFE_INTEGER` pass validation and would effectively disable polling for the process lifetime. A practical maximum of 86 400 seconds (24 hours) is planned as a follow-up improvement.

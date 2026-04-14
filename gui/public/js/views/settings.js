@@ -1,10 +1,10 @@
 /**
  * Settings View — Repo Parallelizer GUI.
  *
- * Renders the credentials management page:
- *   - Table listing all configured per-host git credentials (host + masked token).
- *   - Delete per row with a confirmation dialog.
- *   - "Add / Update Credential" inline form (host + token).
+ * Renders two settings sections:
+ *   1. **Git Credentials** — table of per-host PATs with add/delete controls.
+ *   2. **Repositories Refresh Delay** — number input for `gitPollingIntervalSeconds`
+ *      with client-side validation (min 10) and save/feedback.
  *
  * This view has no side-effects (no polling), so it returns no cleanup function.
  *
@@ -275,6 +275,116 @@ function buildAddCredentialForm(tableContainer) {
 }
 
 // ---------------------------------------------------------------------------
+// Repositories Refresh Delay section
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the "Repositories Refresh Delay" section.
+ *
+ * Fetches the current server-side `gitPollingIntervalSeconds` value on mount,
+ * populates a number input, and exposes a `save()` function for the shared
+ * settings footer button.
+ *
+ * @returns {{ element: HTMLElement, save: () => Promise<boolean> }}
+ */
+function buildRefreshDelaySection() {
+    const section = document.createElement('section');
+    section.className = 'settings-section refresh-delay-section';
+
+    const heading = document.createElement('h2');
+    heading.textContent = 'Repositories Refresh Delay';
+    section.appendChild(heading);
+
+    const description = document.createElement('p');
+    description.textContent =
+        'How often (in seconds) the server polls remote repositories for new commits. ' +
+        'Changes take effect immediately — the current polling cycle is restarted with the new interval. ' +
+        'Minimum value is 10 seconds.';
+    section.appendChild(description);
+
+    // ---- Input row ----
+    const inputRow = document.createElement('div');
+    inputRow.className = 'refresh-delay-input-row';
+
+    const label = document.createElement('label');
+    label.htmlFor = 'refresh-delay-input';
+    label.textContent = 'Interval';
+    label.className = 'refresh-delay-label';
+
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.id = 'refresh-delay-input';
+    input.name = 'refreshDelay';
+    input.className = 'form-input refresh-delay-input';
+    input.min = '10';
+    // Maximum matches server-side MAX_POLLING_INTERVAL_SECONDS in src/config/config.constants.ts
+    input.max = '86400';
+    input.step = '1';
+    input.placeholder = '30';
+    input.setAttribute('aria-label', 'Polling interval in seconds');
+
+    const unitLabel = document.createElement('span');
+    unitLabel.className = 'refresh-delay-unit';
+    unitLabel.textContent = 'seconds';
+
+    inputRow.appendChild(label);
+    inputRow.appendChild(input);
+    inputRow.appendChild(unitLabel);
+    section.appendChild(inputRow);
+
+    // ---- Inline error message ----
+    const errorMsg = document.createElement('p');
+    errorMsg.className = 'error-message';
+    errorMsg.setAttribute('role', 'alert');
+    errorMsg.hidden = true;
+    section.appendChild(errorMsg);
+
+    // ---- Populate current value on mount ----
+    (async () => {
+        try {
+            const cfg = await api.config.polling.get();
+            if (cfg && typeof cfg.gitPollingIntervalSeconds === 'number') {
+                input.value = String(cfg.gitPollingIntervalSeconds);
+            }
+        } catch {
+            // Non-fatal — leave the placeholder in place.
+        }
+    })();
+
+    // ---- Save function (called by the shared footer button) ----
+    async function save() {
+        const raw   = input.value.trim();
+        const value = Number(raw);
+
+        if (!raw || !Number.isFinite(value) || !Number.isInteger(value) || value < 10) {
+            errorMsg.textContent = 'Please enter a whole number of 10 or more.';
+            errorMsg.hidden = false;
+            input.focus();
+            return false;
+        }
+
+        if (value > 86400) {
+            errorMsg.textContent = 'Please enter a value of 86400 or less (24 hours maximum).';
+            errorMsg.hidden = false;
+            input.focus();
+            return false;
+        }
+
+        errorMsg.hidden = true;
+
+        try {
+            await api.config.polling.set(value);
+            return true;
+        } catch (err) {
+            showToast(err.message || 'Failed to save refresh delay.', 'error');
+            return false;
+        }
+    }
+
+    return { element: section, save };
+}
+
+// ---------------------------------------------------------------------------
 // View entry point
 // ---------------------------------------------------------------------------
 
@@ -299,21 +409,58 @@ export function renderSettings(container, _params) {
     container.appendChild(heading);
 
     // Credentials section
+    const credSection = document.createElement('section');
+    credSection.className = 'settings-section';
+
     const credHeading = document.createElement('h2');
     credHeading.textContent = 'Git Credentials';
-    container.appendChild(credHeading);
+    credSection.appendChild(credHeading);
 
     const credDescription = document.createElement('p');
     credDescription.textContent =
         'Manage per-host personal access tokens used for authenticating with private repositories. Tokens are stored masked — only the last 4 characters are visible.';
-    container.appendChild(credDescription);
+    credSection.appendChild(credDescription);
 
     const tableContainer = document.createElement('div');
     tableContainer.className = 'credentials-table-container';
-    container.appendChild(tableContainer);
+    credSection.appendChild(tableContainer);
 
-    container.appendChild(buildAddCredentialForm(tableContainer));
+    credSection.appendChild(buildAddCredentialForm(tableContainer));
+    container.appendChild(credSection);
 
     // Initial data load
     renderCredentialsTable(tableContainer);
+
+    // ---- Remaining sections ----
+    const refreshDelay = buildRefreshDelaySection();
+    container.appendChild(refreshDelay.element);
+
+    // ---- Form footer ----
+    const footer = document.createElement('footer');
+    footer.className = 'settings-footer';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'btn btn-primary';
+    saveBtn.textContent = 'Save Settings';
+    footer.appendChild(saveBtn);
+    container.appendChild(footer);
+
+    saveBtn.addEventListener('click', async () => {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving…';
+
+        try {
+            const results = await Promise.all([
+                refreshDelay.save(),
+            ]);
+
+            if (results.every(Boolean)) {
+                showToast('Settings saved.', 'success');
+            }
+        } finally {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save Settings';
+        }
+    });
 }

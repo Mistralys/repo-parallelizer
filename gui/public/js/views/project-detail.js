@@ -374,16 +374,17 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
 /**
  * Build the Workspaces section for a project.
  *
- * Lists workspaces with ID, description, creation date, a link to the
- * workspace detail view, and a Delete button (disabled for STABLE).
+ * Lists workspaces with ID, description, creation date, current branches,
+ * a link to the workspace detail view, and a Delete button (disabled for STABLE).
  * Includes an "Add Workspace" form.
  *
  * @param {string}   projectId  - Current project ID.
  * @param {Array<{ id: string, description: string, createdAt: string, initialized: boolean }>} workspaces
+ * @param {Record<string, Record<string, Object>|null>} wsStatusMap - Keyed by workspace ID; values are status maps (repoId → GitStatusInfo) or null.
  * @param {function(): Promise<void>} onRefresh - Re-renders the entire view.
  * @returns {HTMLElement}
  */
-function buildWorkspacesSection(projectId, workspaces, onRefresh) {
+function buildWorkspacesSection(projectId, workspaces, wsStatusMap, onRefresh) {
     const section = document.createElement('section');
     section.className = 'project-workspaces-section';
 
@@ -399,7 +400,7 @@ function buildWorkspacesSection(projectId, workspaces, onRefresh) {
 
         const thead = document.createElement('thead');
         const htr   = document.createElement('tr');
-        ['ID', 'Description', 'Created', 'Actions'].forEach((label) => {
+        ['ID', 'Description', 'Created', 'Branches', 'Actions'].forEach((label) => {
             const th = document.createElement('th');
             th.textContent = label;
             htr.appendChild(th);
@@ -448,6 +449,21 @@ function buildWorkspacesSection(projectId, workspaces, onRefresh) {
                 createdCell.textContent = '—';
             }
             tr.appendChild(createdCell);
+
+            // Branches cell — aggregated current branches across all repos in this workspace
+            const branchesCell = document.createElement('td');
+            branchesCell.className = 'workspace-branches-cell font-mono text-muted';
+            const repoStatuses = wsStatusMap[ws.id];
+            if (repoStatuses && typeof repoStatuses === 'object') {
+                const branches = Object.values(repoStatuses)
+                    .map((s) => s && s.currentBranch)
+                    .filter(Boolean);
+                const unique = [...new Set(branches)];
+                branchesCell.textContent = unique.length > 0 ? unique.join(', ') : '—';
+            } else {
+                branchesCell.textContent = '—';
+            }
+            tr.appendChild(branchesCell);
 
             // Actions cell
             const actCell = document.createElement('td');
@@ -865,6 +881,23 @@ export async function renderProjectDetail(container, params) {
         : [];
 
     // -----------------------------------------------------------------------
+    // Fetch workspace statuses for the branches column (best-effort)
+    // -----------------------------------------------------------------------
+    /** @type {Record<string, Record<string, Object>|null>} */
+    const wsStatusMap = {};
+    const initializedWs = normWorkspaces.filter((ws) => ws.initialized);
+    if (initializedWs.length > 0) {
+        const statusResults = await Promise.allSettled(
+            initializedWs.map((ws) => api.status.get(projectId, ws.id)),
+        );
+        initializedWs.forEach((ws, i) => {
+            wsStatusMap[ws.id] = statusResults[i].status === 'fulfilled'
+                ? statusResults[i].value
+                : null;
+        });
+    }
+
+    // -----------------------------------------------------------------------
     // Re-render helper — re-fetches all data and re-renders the view
     // -----------------------------------------------------------------------
     async function refresh() {
@@ -955,7 +988,7 @@ export async function renderProjectDetail(container, params) {
 
     // ---- Workspaces panel ----
     panels.workspaces.appendChild(
-        buildWorkspacesSection(normProject.id, normWorkspaces, refresh),
+        buildWorkspacesSection(normProject.id, normWorkspaces, wsStatusMap, refresh),
     );
     container.appendChild(panels.workspaces);
 

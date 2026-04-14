@@ -7,6 +7,7 @@ import {
     generateWorkspaceFile,
     removeWorkspaceFile,
     getWorkspaceFilePath,
+    migrateWorkspaceFiles,
 } from '../orchestration/vscode-workspace.js';
 
 const _tempDirs: string[] = [];
@@ -26,12 +27,12 @@ function makeTempDir(): string {
 
 test('getWorkspaceFilePath returns the correct format', () => {
     const result = getWorkspaceFilePath('/projects', 'my-project', 'STABLE');
-    assert.strictEqual(result, path.join('/projects', 'my-project-STABLE.code-workspace'));
+    assert.strictEqual(result, path.join('/projects', 'my-project', 'my-project-STABLE.code-workspace'));
 });
 
 test('getWorkspaceFilePath works with nested projectsFolder', () => {
     const result = getWorkspaceFilePath('/base/projects', 'alpha', 'DEV');
-    assert.strictEqual(result, path.join('/base/projects', 'alpha-DEV.code-workspace'));
+    assert.strictEqual(result, path.join('/base/projects', 'alpha', 'alpha-DEV.code-workspace'));
 });
 
 // ─── generateWorkspaceFile — new file ────────────────────────────────────────
@@ -180,4 +181,76 @@ test('removeWorkspaceFile does not throw when the file does not exist', () => {
     const dir = makeTempDir();
     const filePath = path.join(dir, 'nonexistent.code-workspace');
     assert.doesNotThrow(() => removeWorkspaceFile(filePath));
+});
+
+// ─── migrateWorkspaceFiles ────────────────────────────────────────────────────
+
+test('migrateWorkspaceFiles moves matching files from flat root into project subdirectory', () => {
+    const projectsFolder = makeTempDir();
+    const slug = 'my-app';
+
+    // Create flat-layout files to be migrated.
+    fs.writeFileSync(path.join(projectsFolder, 'my-app-STABLE.code-workspace'), '{}', 'utf8');
+    fs.writeFileSync(path.join(projectsFolder, 'my-app-DEV.code-workspace'), '{}', 'utf8');
+
+    const moved = migrateWorkspaceFiles(projectsFolder, [slug]);
+
+    assert.strictEqual(moved, 2, 'should report 2 files moved');
+    assert.ok(
+        fs.existsSync(path.join(projectsFolder, slug, 'my-app-STABLE.code-workspace')),
+        'STABLE file should be at nested location',
+    );
+    assert.ok(
+        fs.existsSync(path.join(projectsFolder, slug, 'my-app-DEV.code-workspace')),
+        'DEV file should be at nested location',
+    );
+    assert.ok(
+        !fs.existsSync(path.join(projectsFolder, 'my-app-STABLE.code-workspace')),
+        'STABLE file should no longer exist at flat location',
+    );
+    assert.ok(
+        !fs.existsSync(path.join(projectsFolder, 'my-app-DEV.code-workspace')),
+        'DEV file should no longer exist at flat location',
+    );
+});
+
+test('migrateWorkspaceFiles is idempotent — re-running after migration produces no errors and no duplicate files', () => {
+    const projectsFolder = makeTempDir();
+    const slug = 'alpha';
+
+    // Simulate already-migrated state: file only exists at nested location.
+    const nestedDir = path.join(projectsFolder, slug);
+    fs.mkdirSync(nestedDir, { recursive: true });
+    fs.writeFileSync(path.join(nestedDir, 'alpha-STABLE.code-workspace'), '{}', 'utf8');
+
+    // Running migration with no flat-layout files should be a no-op.
+    assert.doesNotThrow(() => {
+        const moved = migrateWorkspaceFiles(projectsFolder, [slug]);
+        assert.strictEqual(moved, 0, 'should report 0 files moved when already in-place');
+    });
+
+    // The nested file should still be intact.
+    assert.ok(
+        fs.existsSync(path.join(nestedDir, 'alpha-STABLE.code-workspace')),
+        'nested file should still exist after idempotent run',
+    );
+});
+
+test('migrateWorkspaceFiles returns 0 when no matching source files exist', () => {
+    const projectsFolder = makeTempDir();
+    const moved = migrateWorkspaceFiles(projectsFolder, ['some-project']);
+    assert.strictEqual(moved, 0, 'should return 0 when no matching files exist');
+});
+
+test('migrateWorkspaceFiles leaves unrecognized .code-workspace files untouched', () => {
+    const projectsFolder = makeTempDir();
+
+    // A .code-workspace file that does not match any known slug.
+    const unknownFile = path.join(projectsFolder, 'unknown-project-STABLE.code-workspace');
+    fs.writeFileSync(unknownFile, '{}', 'utf8');
+
+    const moved = migrateWorkspaceFiles(projectsFolder, ['my-app']);
+
+    assert.strictEqual(moved, 0, 'should report 0 files moved');
+    assert.ok(fs.existsSync(unknownFile), 'unrecognized file should remain at original location');
 });

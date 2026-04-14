@@ -44,14 +44,15 @@ The backend follows a strict layered architecture, bottom to top:
 
 1. **Storage** (`src/storage/`) — JSON file I/O primitives.
 2. **Models** (`src/models/`) — Stateless CRUD managers (Repository, Project, Workspace). Each re-reads from disk on every call.
-3. **Git** (`src/git/`) — Stateless functions wrapping Git CLI subprocess calls.
-4. **Orchestration** (`src/orchestration/`) — Composes models + git for high-level multi-step operations (clone, branch switch, workspace creation).
-5. **Server** (`src/server/`) — HTTP server with a custom `Router`, REST API route handlers, static file serving, and a `PollingManager` for periodic git status polling.
-6. **CLI** (`src/index.ts`) — Interactive menu entry point.
+3. **Error Log** (`src/error-log/`) — Stateless, bounded error log manager (`ErrorLogManager`). Persists runtime faults and warnings to `error-log.json` with FIFO eviction at 500 entries.
+4. **Git** (`src/git/`) — Stateless functions wrapping Git CLI subprocess calls.
+5. **Orchestration** (`src/orchestration/`) — Composes models + git for high-level multi-step operations (clone, branch switch, workspace creation).
+6. **Server** (`src/server/`) — HTTP server with a custom `Router`, REST API route handlers, static file serving, and a `PollingManager` for periodic git status polling.
+7. **CLI** (`src/index.ts`) — Interactive menu entry point.
 
 ### Stateless Managers
 
-All model managers (`RepositoryManager`, `ProjectManager`, `WorkspaceManager`) are **stateless** — they re-read their backing JSON files from disk on every public method call. This ensures concurrent writes from other processes are always reflected.
+All managers (`RepositoryManager`, `ProjectManager`, `WorkspaceManager`, `ErrorLogManager`) are **stateless** — they re-read their backing JSON files from disk on every public method call. This ensures concurrent writes from other processes are always reflected.
 
 ### Dependency Injection
 

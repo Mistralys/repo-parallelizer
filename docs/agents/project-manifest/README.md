@@ -12,4 +12,4 @@
 | REST API | [rest-api.md](rest-api.md) | HTTP endpoints served by the built-in server. |
 | GUI Frontend | [gui-frontend.md](gui-frontend.md) | SPA architecture, views, components, and routing. |
 
-**Last generated:** 2026-04-08
+**Last generated:** 2026-04-11

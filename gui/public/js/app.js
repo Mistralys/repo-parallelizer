@@ -11,6 +11,7 @@
  *   #/projects/:id/workspaces/:wid               → Workspace Detail (WP-016)
  *   #/projects/:id/workspaces/:wid/branch-switch → Branch Switch    (WP-017)
  *   #/settings                                   → Settings         (WP-009)
+ *   #/error-log                                  → Error Log        (WP-011)
  */
 
 import { Router }                                        from './router.js';
@@ -20,8 +21,10 @@ import { renderProjectDetail, setRouter as setProjectDetailRouter } from './view
 import { renderWorkspaceDetail, setRouter as setWorkspaceDetailRouter } from './views/workspace-detail.js';
 import { renderBranchSwitch, setRouter as setBranchSwitchRouter } from './views/branch-switch.js';
 import { renderSettings }                                from './views/settings.js';
+import { renderErrorLog }                                from './views/error-log.js';
 import { createThemeToggle }                             from './components/theme-toggle.js';
 import { initNavHighlight }                              from './utils/nav-highlight.js';
+import { initNavBadge }                                  from './components/nav-badge.js';
 
 // ---------------------------------------------------------------------------
 // Router instantiation & route registration
@@ -53,6 +56,9 @@ router.register('#/projects/:id/workspaces/:wid/branch-switch', renderBranchSwit
 // Settings (WP-009)
 router.register('#/settings', renderSettings);
 
+// Error Log (WP-011)
+router.register('#/error-log', renderErrorLog);
+
 // ---------------------------------------------------------------------------
 // Theme toggle — apply saved theme before first render to avoid flash
 // ---------------------------------------------------------------------------
@@ -73,3 +79,9 @@ router.start();
 // ---------------------------------------------------------------------------
 
 initNavHighlight();
+
+// ---------------------------------------------------------------------------
+// Error log nav badge — poll for error count and update the badge
+// ---------------------------------------------------------------------------
+
+initNavBadge();

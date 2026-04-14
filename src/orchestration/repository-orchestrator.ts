@@ -11,6 +11,7 @@ import {
 } from './vscode-workspace.js';
 import { CLONE_TIMEOUT_MS } from './orchestration.types.js';
 import type { AddRepositoryResult, WorkspaceCloneResult } from './orchestration.types.js';
+import type { ErrorLogManager } from '../error-log/error-log.manager.js';
 
 /**
  * High-level orchestrator for repository lifecycle operations within projects.
@@ -38,6 +39,7 @@ export class RepositoryOrchestrator {
         private readonly config: AppConfig,
         private readonly projectManager: ProjectManager,
         private readonly repositoryManager: RepositoryManager,
+        private readonly errorLogManager?: ErrorLogManager,
     ) {}
 
     // -------------------------------------------------------------------------
@@ -82,6 +84,11 @@ export class RepositoryOrchestrator {
      * @throws {Error} If the repository does not exist in the global store.
      * @throws {Error} If the project does not exist.
      * @throws {Error} If the repository is already listed in the project.
+     * @remarks If `errorLogManager` is injected and `errorLogManager.append()`
+     *   itself throws (e.g. disk full when writing `error-log.json`), that
+     *   exception propagates out of the `Promise.all` callback and converts a
+     *   per-workspace clone failure into a full rejection of this method.
+     *   Logging exceptions are **not** swallowed.
      */
     async addRepositoryToProject(
         projectId: string,
@@ -122,10 +129,18 @@ export class RepositoryOrchestrator {
                 });
 
                 if (gitResult.exitCode !== 0) {
+                    const errorMessage = stripEmbeddedCredentials(gitResult.stderr) || `git clone exited with code ${gitResult.exitCode}`;
+                    this.errorLogManager?.append({
+                        Severity: 'error',
+                        Source: 'clone',
+                        Operation: 'add-repository',
+                        Context: { ProjectId: projectId, WorkspaceId: workspaceId, RepositoryId: repositoryId },
+                        Message: errorMessage,
+                    });
                     return {
                         workspaceId,
                         success: false,
-                        error: stripEmbeddedCredentials(gitResult.stderr) || `git clone exited with code ${gitResult.exitCode}`,
+                        error: errorMessage,
                     };
                 }
 

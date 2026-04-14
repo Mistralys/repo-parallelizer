@@ -46,4 +46,11 @@ export interface AppConfig {
      * Omit the field or leave the object empty for public repositories.
      */
     gitCredentials?: Record<string, string>;
+
+    /**
+     * Maximum number of entries retained in the error log. Oldest entries are
+     * evicted once this limit is exceeded.
+     * @default 500
+     */
+    maxErrorLogEntries?: number;
 }

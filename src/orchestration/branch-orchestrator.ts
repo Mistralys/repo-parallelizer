@@ -12,6 +12,7 @@ import {
 import type { BranchInfo } from '../git/git.types.js';
 import { FETCH_TIMEOUT_MS } from './orchestration.types.js';
 import type { BranchSwitchResult } from './orchestration.types.js';
+import type { ErrorLogManager } from '../error-log/error-log.manager.js';
 
 /**
  * High-level orchestrator for branch operations across all repositories in a
@@ -22,6 +23,7 @@ export class BranchOrchestrator {
         private readonly config: AppConfig,
         private readonly projectManager: ProjectManager,
         private readonly workspaceManager: WorkspaceManager,
+        private readonly errorLogManager?: ErrorLogManager,
     ) {}
 
     // -------------------------------------------------------------------------
@@ -132,6 +134,11 @@ export class BranchOrchestrator {
      *   or workspace existence before iterating `branchAssignments`. Any error
      *   surfaces only when `workspaceManager.update()` is called at the very
      *   end — after all per-repository operations have already completed.
+     * @remarks If `errorLogManager` is injected and `errorLogManager.append()`
+     *   itself throws (e.g. disk full when writing `error-log.json`), that
+     *   exception propagates out of the `Promise.all` callback and converts a
+     *   per-repository branch-switch failure into a full rejection of this
+     *   method. Logging exceptions are **not** swallowed.
      */
     async switchBranches(
         projectId: string,
@@ -161,17 +168,33 @@ export class BranchOrchestrator {
                         const hasConflict =
                             /conflict/i.test(combinedOutput) ||
                             /overwritten by (checkout|switch)/i.test(combinedOutput);
+                        const errorMessage = gitResult.stderr.trim() || `git exited with code ${gitResult.exitCode}`;
+                        this.errorLogManager?.append({
+                            Severity: 'error',
+                            Source: 'branch-switch',
+                            Operation: 'branch-switch',
+                            Context: { ProjectId: projectId, WorkspaceId: workspaceId, RepositoryId: repoId },
+                            Message: errorMessage,
+                        });
                         results[repoId] = {
                             success: false,
                             conflict: hasConflict,
-                            error: gitResult.stderr.trim() || `git exited with code ${gitResult.exitCode}`,
+                            error: errorMessage,
                         };
                     }
                 } catch (err) {
+                    const errorMessage = (err as Error).message;
+                    this.errorLogManager?.append({
+                        Severity: 'error',
+                        Source: 'branch-switch',
+                        Operation: 'branch-switch',
+                        Context: { ProjectId: projectId, WorkspaceId: workspaceId, RepositoryId: repoId },
+                        Message: errorMessage,
+                    });
                     results[repoId] = {
                         success: false,
                         conflict: false,
-                        error: (err as Error).message,
+                        error: errorMessage,
                     };
                 }
             }),

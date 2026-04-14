@@ -393,3 +393,92 @@ test('start: calling start twice keeps only one interval', async () => {
     assert.ok(callCount.n < 5,
         `Too many sweeps (${callCount.n}): double-start may have created two intervals`);
 });
+
+// ---------------------------------------------------------------------------
+// restart
+// ---------------------------------------------------------------------------
+
+test('restart: calling restart when not running still starts polling', async () => {
+    const project = {
+        Id: 'proj',
+        Repositories: ['repo'],
+        Workspaces: { STABLE: {} },
+    };
+    const pm = makeProjectManager([project]);
+    const wm = makeDefaultWorkspaceManager();
+    const callCount = { n: 0 };
+    const fetchFn = async (_: string) => { callCount.n++; return makeStatus(); };
+
+    const mgr = new PollingManager(BASE_CONFIG, pm, wm, fetchFn);
+    mgr.restart(0.05); // not previously started
+
+    await withTimeout(
+        new Promise<void>((resolve) => {
+            const check = setInterval(() => {
+                if (callCount.n >= 1) { clearInterval(check); resolve(); }
+            }, 5);
+        }),
+        300,
+    );
+
+    mgr.stop();
+    assert.ok(callCount.n >= 1, `Expected ≥1 sweep after restart(), got ${callCount.n}`);
+});
+
+test('restart: stops the old interval and starts a new one', async () => {
+    const project = {
+        Id: 'proj',
+        Repositories: ['repo'],
+        Workspaces: { STABLE: {} },
+    };
+    const pm = makeProjectManager([project]);
+    const wm = makeDefaultWorkspaceManager();
+    const callCount = { n: 0 };
+    const fetchFn = async (_: string) => { callCount.n++; return makeStatus(); };
+
+    const mgr = new PollingManager(BASE_CONFIG, pm, wm, fetchFn);
+    mgr.start(10); // very long interval — should never fire in the test window
+
+    const countBefore = callCount.n;
+    assert.strictEqual(countBefore, 0, 'No sweeps expected with a 10 s interval');
+
+    // Restart with a much shorter interval.
+    mgr.restart(0.05); // 50 ms
+
+    await withTimeout(
+        new Promise<void>((resolve) => {
+            const check = setInterval(() => {
+                if (callCount.n >= 1) { clearInterval(check); resolve(); }
+            }, 5);
+        }),
+        500,
+    );
+
+    mgr.stop();
+    assert.ok(callCount.n >= 1,
+        `Expected ≥1 sweep after restart() with fast interval, got ${callCount.n}`);
+});
+
+test('restart: only one interval is active after restart', async () => {
+    const project = {
+        Id: 'proj',
+        Repositories: ['repo'],
+        Workspaces: { STABLE: {} },
+    };
+    const pm = makeProjectManager([project]);
+    const wm = makeDefaultWorkspaceManager();
+    const callCount = { n: 0 };
+    const fetchFn = async (_: string) => { callCount.n++; return makeStatus(); };
+
+    const mgr = new PollingManager(BASE_CONFIG, pm, wm, fetchFn);
+    mgr.start(0.05);
+    mgr.restart(0.05); // replaces the original interval
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 120));
+    mgr.stop();
+
+    // With one 50 ms interval ≈ 2 sweeps in 120 ms.  Two live intervals would
+    // double that, so assert < 5.
+    assert.ok(callCount.n < 5,
+        `Too many sweeps (${callCount.n}): restart may have left a stale interval running`);
+});

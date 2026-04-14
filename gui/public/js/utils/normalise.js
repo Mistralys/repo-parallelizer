@@ -55,5 +55,41 @@ export function normaliseWorkspace(ws) {
         description: ws.Description || ws.description || '',
         createdAt:   ws.DateCreated || ws.CreatedAt || ws.createdAt || ws.created_at || '',
         initialized: ws.Initialized != null ? ws.Initialized : (ws.initialized != null ? ws.initialized : true),
+        folderPath:  ws.FolderPath  || ws.folderPath  || '',
+    };
+}
+
+/**
+ * Normalise an error log entry from the backend.
+ *
+ * The Go backend serialises struct fields with capitalised keys (`Id`,
+ * `Severity`, `Source`, `Message`, `Details`, `Timestamp`, `Project`,
+ * `Workspace`, `Repository`). This helper accepts either casing and returns
+ * a consistently camelCase-keyed object for use in view code.
+ *
+ * @param {Object} entry
+ * @returns {{
+ *   id:         number,
+ *   severity:   string,
+ *   source:     string,
+ *   message:    string,
+ *   details:    string,
+ *   timestamp:  string,
+ *   project:    string,
+ *   workspace:  string,
+ *   repository: string
+ * }}
+ */
+export function normaliseErrorEntry(entry) {
+    return {
+        id:         entry.Id         ?? entry.id         ?? 0,
+        severity:   entry.Severity   || entry.severity   || '',
+        source:     entry.Source     || entry.source     || '',
+        message:    entry.Message    || entry.message    || '',
+        details:    entry.Details    || entry.details    || '',
+        timestamp:  entry.Timestamp  || entry.timestamp  || '',
+        project:    entry.Project    || entry.project    || '',
+        workspace:  entry.Workspace  || entry.workspace  || '',
+        repository: entry.Repository || entry.repository || '',
     };
 }

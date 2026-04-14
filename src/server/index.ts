@@ -6,6 +6,7 @@ import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import { WorkspaceOrchestrator } from '../orchestration/workspace-orchestrator.js';
 import { BranchOrchestrator } from '../orchestration/branch-orchestrator.js';
+import { ErrorLogManager } from '../error-log/error-log.manager.js';
 import { PollingManager } from './pollingManager.js';
 import { Router } from './router.js';
 import { serveStatic } from './staticServer.js';
@@ -16,6 +17,8 @@ import { registerWorkspaceRoutes } from './routes/workspaces.js';
 import { registerBranchRoutes } from './routes/branches.js';
 import { registerStatusRoutes } from './routes/status.js';
 import { registerConfigRoutes } from './routes/config.js';
+import { registerErrorLogRoutes } from './routes/error-log.js';
+import { migrateWorkspaceFiles } from '../orchestration/vscode-workspace.js';
 
 // ---------------------------------------------------------------------------
 // Public configuration type
@@ -69,6 +72,10 @@ let _pollingManager: PollingManager | null = null;
  *
  * Calling `startServer()` while a server is already running throws
  * synchronously.
+ *
+ * Internally creates an `ErrorLogManager` shared across all subsystems
+ * (WorkspaceOrchestrator, BranchOrchestrator, PollingManager, and Router);
+ * no external reference is returned.
  */
 export function startServer(config: ServerConfig): Promise<void> {
     if (_server !== null) {
@@ -84,33 +91,52 @@ export function startServer(config: ServerConfig): Promise<void> {
     const repoManager = new RepositoryManager(config.appConfig);
     const projectManager = new ProjectManager(config.appConfig, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
+    const errorLogManager = new ErrorLogManager(config.appConfig);
     const workspaceOrchestrator = new WorkspaceOrchestrator(
         config.appConfig,
         projectManager,
         workspaceManager,
         repoManager,
+        errorLogManager,
     );
     const branchOrchestrator = new BranchOrchestrator(
         config.appConfig,
         projectManager,
         workspaceManager,
+        errorLogManager,
     );
     const pollingManager = new PollingManager(
         config.appConfig,
         projectManager,
         workspaceManager,
+        undefined,       // fetchStatusFn — use the default real git layer
+        errorLogManager,
     );
+
+    // ------------------------------------------------------------------
+    // One-time migration: move .code-workspace files from flat layout to
+    // per-project subdirectory layout (idempotent, safe to run every startup).
+    // ------------------------------------------------------------------
+    const projectSlugs = projectManager.list().map((p) => p.Id);
+    const migratedCount = migrateWorkspaceFiles(config.appConfig.projectsFolder, projectSlugs);
+    if (migratedCount > 0) {
+        process.stdout.write(
+            `[repo-parallelizer] Migrated ${migratedCount} workspace file(s) to per-project subdirectories.\n`,
+        );
+    }
 
     // ------------------------------------------------------------------
     // Build the router and register all route groups
     // ------------------------------------------------------------------
     const router = new Router();
+    router.setErrorLogManager(errorLogManager);
     registerRepositoryRoutes(router, repoManager);
     registerProjectRoutes(router, projectManager);
     registerWorkspaceRoutes(router, workspaceManager, workspaceOrchestrator, config.appConfig);
     registerBranchRoutes(router, branchOrchestrator, workspaceManager);
     registerStatusRoutes(router, pollingManager, projectManager, workspaceManager, config.appConfig);
-    registerConfigRoutes(router, config.appConfig);
+    registerConfigRoutes({ router, appConfig: config.appConfig, pollingManager });
+    registerErrorLogRoutes(router, errorLogManager);
 
     // ------------------------------------------------------------------
     // Create HTTP server with the static-first request pipeline

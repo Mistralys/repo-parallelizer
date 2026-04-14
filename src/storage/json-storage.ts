@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import type { AppConfig } from '../config/config.types.js';
 import type { RepositoryStore } from '../models/repository/repository.types.js';
 import type { ProjectIndex } from '../models/project/project.types.js';
+import type { ErrorLogStore } from '../error-log/error-log.types.js';
 
 /**
  * Thrown by `readJsonFile` when the specified file does not exist.
@@ -86,19 +87,34 @@ export function ensureDirectory(dirPath: string): void {
  * - `{projectsFolder}/`
  * - `{storageFolder}/repositories.json` (empty store with SchemaVersion: 1)
  * - `{storageFolder}/projects-index.json` (empty index with SchemaVersion: 1)
+ * - `{storageFolder}/error-log.json` (empty error log with SchemaVersion: 1)
  */
 export function initializeStorage(config: AppConfig): void {
     ensureDirectory(config.storageFolder);
     ensureDirectory(path.join(config.storageFolder, 'projects'));
     ensureDirectory(config.projectsFolder);
 
-    const repositoriesPath = path.join(config.storageFolder, 'repositories.json');
-    if (!fs.existsSync(repositoriesPath)) {
-        writeJsonFile<RepositoryStore>(repositoriesPath, { Repositories: [], SchemaVersion: 1 });
-    }
+    seedJsonFile<RepositoryStore>(
+        path.join(config.storageFolder, 'repositories.json'),
+        { Repositories: [], SchemaVersion: 1 },
+    );
 
-    const projectsIndexPath = path.join(config.storageFolder, 'projects-index.json');
-    if (!fs.existsSync(projectsIndexPath)) {
-        writeJsonFile<ProjectIndex>(projectsIndexPath, { Projects: [], SchemaVersion: 1 });
+    seedJsonFile<ProjectIndex>(
+        path.join(config.storageFolder, 'projects-index.json'),
+        { Projects: [], SchemaVersion: 1 },
+    );
+
+    seedJsonFile<ErrorLogStore>(
+        path.join(config.storageFolder, 'error-log.json'),
+        { Entries: [], SchemaVersion: 1 },
+    );
+}
+
+/**
+ * Writes a JSON file with the given default data only if it does not already exist.
+ */
+function seedJsonFile<T>(filePath: string, defaultData: T): void {
+    if (!fs.existsSync(filePath)) {
+        writeJsonFile<T>(filePath, defaultData);
     }
 }

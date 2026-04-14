@@ -26,6 +26,7 @@ interface AppConfig {
     serverPort: number;       // default: 4200
     gitPollingIntervalSeconds: number; // default: 30
     gitCredentials?: Record<string, string>; // hostname → PAT/password; absent = public repos only
+    maxErrorLogEntries?: number;  // default: 500 — FIFO eviction cap for error log
 }
 ```
 
@@ -122,6 +123,70 @@ function fetchRemote(repoPath: string, remote?: string, timeoutMs?: number): Pro
 function getGitStatus(repoPath: string): Promise<GitStatusInfo>
 function fetchAndGetStatus(repoPath: string, timeoutMs?: number): Promise<GitStatusInfo>
 ```
+
+---
+
+## Error Log (`src/error-log/`)
+
+### Types (`error-log.types.ts`)
+
+```typescript
+type ErrorSeverity = 'error' | 'warning';
+
+interface ErrorLogContext {
+    ProjectId?: string;
+    WorkspaceId?: string;
+    RepositoryId?: string;
+}
+
+interface ErrorLogEntry {
+    Id: number;             // Auto-incremented unique numeric identifier
+    Timestamp: string;      // ISO 8601 UTC timestamp assigned by append()
+    Severity: ErrorSeverity;
+    Source: string;         // Subsystem or component that produced the entry
+    Operation: string;      // Operation being performed when the error occurred
+    Context: ErrorLogContext;
+    Message: string;
+    Details?: string;       // Optional structured detail (stack trace, raw output, etc.)
+}
+
+interface ErrorLogStore extends BaseStore {
+    Entries: ErrorLogEntry[];
+}
+
+const DEFAULT_MAX_ERROR_LOG_ENTRIES = 500;  // Default FIFO eviction cap — overridden by AppConfig.maxErrorLogEntries
+
+interface ErrorLogListOptions {
+    severity?: ErrorSeverity;   // Filter by severity; omit to return all
+    source?: string;            // Exact-match filter on Source; omit to return all
+    limit?: number;             // Max entries to return; omit to return all matching.
+                                // limit=0 or negative → empty entries, total unaffected.
+    offset?: number;            // Zero-based offset into filtered results (default: 0).
+                                // offset ≥ total → empty entries, total unaffected.
+                                // Negative offset treated as 0 (slice semantics).
+}
+
+interface ErrorLogListResult {
+    entries: ErrorLogEntry[];   // Paged entries (after filtering and pagination)
+    total: number;              // Total matching entries before pagination (post-filter)
+}
+```
+
+### Manager (`error-log.manager.ts`)
+
+```typescript
+class ErrorLogManager {
+    constructor(config: AppConfig)
+
+    append(entry: Omit<ErrorLogEntry, 'Id' | 'Timestamp'>): ErrorLogEntry
+    list(options?: ErrorLogListOptions): ErrorLogListResult
+    getById(id: number): ErrorLogEntry | undefined
+    sources(): string[]  // sorted distinct Source values
+    clear(): void
+}
+```
+
+> **No barrel index:** Import directly from the source files — `error-log.types.js` and `error-log.manager.js`. No `index.ts` exists for this module.
 
 ---
 
@@ -475,7 +540,7 @@ Runs the interactive first-time configuration wizard. Guides the user through cr
 4. Prompts for `storageFolder` (default: `"data/storage"`, relative to tool root). Same creation-on-demand behaviour.
 5. Prompts for `cloneDepth` (integer ≥ 0, default: `50`).
 6. Prompts for `serverPort` (integer 1–65535, default: `4200`).
-7. Prompts for `gitPollingIntervalSeconds` (integer ≥ 1, default: `30`).
+7. Prompts for `gitPollingIntervalSeconds` (integer ≥ 1, default: `30`). Note: the REST API enforces a minimum of 10 s at runtime.
 8. Writes `config.json` with 4-space indentation.
 9. Calls `initializeStorage()` to create the storage directory structure.
 10. Prints a success summary with next steps.
@@ -588,6 +653,10 @@ class Router {
     put(pattern: string, handler: RouteHandler): this
     delete(pattern: string, handler: RouteHandler): this
     handle(req: IncomingMessage, res: ServerResponse): void
+    /** Attaches an ErrorLogManager. When set, unhandled handler rejections are
+     *  appended to the error log with source 'route-handler' and operation set
+     *  to the request URL. No additional error response is sent to the client. */
+    setErrorLogManager(manager: ErrorLogManager): void
 }
 ```
 
@@ -603,7 +672,13 @@ function serveStatic(req: IncomingMessage, res: ServerResponse, baseDir: string)
 type FetchStatusFn = (repoPath: string) => Promise<GitStatusInfo>
 
 class PollingManager {
-    constructor(config: AppConfig, projectManager: ProjectManager, workspaceManager: WorkspaceManager, fetchStatusFn?: FetchStatusFn)
+    constructor(
+        config: AppConfig,
+        projectManager: ProjectManager,
+        workspaceManager: WorkspaceManager,
+        fetchStatusFn?: FetchStatusFn,
+        errorLogManager?: ErrorLogManager,
+    )
 
     start(intervalSeconds: number): void
     stop(): void
@@ -611,6 +686,8 @@ class PollingManager {
     refreshWorkspace(projectId: string, workspaceId: string): Promise<void>
 }
 ```
+
+**`errorLogManager` (5th parameter, optional):** When provided, fetch failures inside `fetchWithStagger()` are logged at `warning` severity with `Source: 'polling'` and `Operation: 'status-poll'`. An in-memory dedup set (`failedPaths`) ensures at most one log entry per repo path per sweep-to-sweep cycle — repeated failures for the same path are not re-logged until the repo recovers (successful fetch clears the path from the set). When omitted, failures are silently swallowed and the manager behaves identically to prior behaviour.
 
 ### Request Utils (`requestUtils.ts`)
 
@@ -641,7 +718,7 @@ function registerBranchRoutes(router: Router, orchestrator: BranchOrchestrator, 
 function registerStatusRoutes(router: Router, pollingManager: PollingManager, projectManager: ProjectManager, workspaceManager: WorkspaceManager, config: AppConfig): void
 
 // config.ts
-function registerConfigRoutes(router: Router, appConfig: AppConfig): void
+function registerConfigRoutes(router: Router, appConfig: AppConfig, configPath?: string, pollingManager?: PollingManager): void
 ```
 
 ---
@@ -675,3 +752,20 @@ api.config.credentials.delete(host)
 > **Token masking:** The server applies `maskToken()` before every API response. The client never receives or stores a plaintext token. The `set()` form uses `<input type="password">` in the UI.
 
 > **Known edge case:** Hosts containing a colon (e.g. `gitlab.com:8080`) may be undeletable via the UI. `encodeURIComponent()` encodes the colon in the DELETE URL, but the server's `extractParams()` does not call `decodeURIComponent()` before the credential lookup. Tracked as a low-severity improvement for a follow-up.
+
+### `api.config.polling`
+
+Read and update the server-side git polling interval. Changes take effect immediately (the background `PollingManager` is restarted).
+
+```js
+// Return the current polling interval.
+// Returns: Promise<{ gitPollingIntervalSeconds: number }>
+api.config.polling.get()
+
+// Update the polling interval.
+// seconds: number — must be a finite integer >= 10
+// Returns: Promise<{ gitPollingIntervalSeconds: number }>
+api.config.polling.set(seconds)
+```
+
+**Validation:** `set()` rejects with HTTP 400 when `seconds` is non-numeric, fractional, infinite, NaN, or below 10. On success the new interval is persisted to `config.json` and the live polling loop is restarted immediately.

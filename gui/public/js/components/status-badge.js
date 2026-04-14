@@ -19,37 +19,11 @@
  * @property {boolean}      hasConflicts      - True when merge conflicts exist.
  */
 
+import { formatLastActivity } from '../utils/time.js';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Format an ISO timestamp into a human-readable relative or absolute string.
- * Returns an empty string when the input is falsy.
- *
- * @param {string|null} isoTimestamp
- * @returns {string}
- */
-function formatLastActivity(isoTimestamp) {
-    if (!isoTimestamp) return '';
-
-    const date = new Date(isoTimestamp);
-    if (isNaN(date.getTime())) return isoTimestamp; // pass through if unparseable
-
-    const now = Date.now();
-    const diffMs = now - date.getTime();
-    const diffMinutes = Math.floor(diffMs / 60_000);
-    const diffHours = Math.floor(diffMinutes / 60);
-    const diffDays = Math.floor(diffHours / 24);
-
-    if (diffMinutes < 1)  return 'just now';
-    if (diffMinutes < 60) return `${diffMinutes}m ago`;
-    if (diffHours < 24)   return `${diffHours}h ago`;
-    if (diffDays < 7)     return `${diffDays}d ago`;
-
-    // Fall back to locale date string for older commits.
-    return date.toLocaleDateString();
-}
 
 /**
  * Determine the primary CSS modifier class for the badge based on status

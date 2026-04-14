@@ -300,6 +300,10 @@ test('Router: Allow header does not contain duplicate methods', () => {
 // ---------------------------------------------------------------------------
 // Method normalisation
 // ---------------------------------------------------------------------------
+// NOTE: ErrorLogManager integration (setErrorLogManager / rejection logging)
+// is not covered in this suite. Those behaviours are verified by a dedicated
+// edge-case harness (WP-003 QA) that runs independently from this regression
+// suite to avoid test interdependencies.
 
 test('Router: method matching is case-insensitive for incoming request', () => {
     const router = new Router();

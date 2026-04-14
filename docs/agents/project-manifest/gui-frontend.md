@@ -27,13 +27,14 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 | `#/` | `dashboard.js` | Project listing with creation form. |
 | `#/repositories` | `repositories.js` | Repository CRUD table. |
 | `#/projects/:id` | `project-detail.js` | Project metadata, tabbed repo/workspace/danger-zone management. |
-| `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with 10s polling. |
+| `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with countdown-based polling and manual refresh. |
 | `#/projects/:id/workspaces/:wid/branch-switch` | `branch-switch.js` | 3-step branch switch wizard. |
-| `#/settings` | `settings.js` | Git credentials management (add/delete per-host tokens). |
+| `#/settings` | `settings.js` | Settings view with two sections: **Git Credentials** (add/delete per-host PATs) and **Repositories Refresh Delay** (configurable `gitPollingIntervalSeconds`). |
+| `#/error-log` | `error-log.js` | Paginated, filterable error log table with expandable detail rows and "Clear All" action. |
 
 ## API Client
 
-`api.js` exports a namespaced `api` object with five groups:
+`api.js` exports a namespaced `api` object with six groups:
 
 - `api.repositories` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `delete(id)`
 - `api.projects` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `rename(id, newId)`, `delete(id)`, `addRepository(pid, rid)`, `removeRepository(pid, rid)`
@@ -41,6 +42,43 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 - `api.branches` — `list(pid, wid)`, `switch(pid, wid, assignments)`
 - `api.status` — `get(pid, wid)`, `refresh(pid, wid)`
 - `api.config.credentials` — `list()`, `set(data)`, `delete(host)`
+- `api.config.polling` — `get()`, `set(seconds)`
+- `api.errorLog` — `list(params?)`, `get(id)`, `clear()`, `count()`
+
+### `api.errorLog` Reference
+
+| Method | HTTP | Description |
+|---|---|---|
+| `list(params?)` | `GET /api/error-log[?...]` | Fetch error log entries with optional filtering and pagination. |
+| `get(id)` | `GET /api/error-log/:id` | Fetch a single entry by numeric ID. |
+| `clear()` | `DELETE /api/error-log` | Delete all entries. Resolves with `undefined` on HTTP 204. |
+| `count()` | `GET /api/error-log?limit=0` | Fetch only the total count (no entries payload). Useful for badges. |
+
+**`list()` params shape:**
+
+```js
+api.errorLog.list({
+    severity: 'error',   // optional — 'error' | 'warning'
+    source:   'clone',   // optional — exact-match on Source field
+    limit:    10,        // optional — max entries to return (default 100 server-side)
+    offset:   0,         // optional — zero-based page offset
+})
+```
+
+All params are optional. Omitting `params` entirely (or passing `undefined`) sends a bare `GET /api/error-log`.
+
+**`clear()` 204 contract:** The underlying `request()` helper resolves with `undefined` when the server returns HTTP 204 (no body). Callers should not try to read a response value from `clear()`.
+
+**`count()` pattern:** Sends `GET /api/error-log?limit=0`. The server returns `{ entries: [], total: N }`. Read `response.total` for the count. This is the recommended approach for polling a badge counter without transferring entry data.
+
+### `api.config.polling` Reference
+
+| Method | HTTP | Description |
+|---|---|---|
+| `get()` | `GET /api/config/polling` | Fetch the current polling interval. Resolves with `{ gitPollingIntervalSeconds: number }`. |
+| `set(seconds)` | `PUT /api/config/polling` | Update the polling interval. `seconds` must be a finite integer ≥ 10. Resolves with `{ gitPollingIntervalSeconds: number }`. |
+
+**Used by:** `settings.js` (`buildRefreshDelaySection()`) to populate the number input on mount and to persist the updated value on save.
 
 ## Reusable Components
 
@@ -56,7 +94,7 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 
 | Utility | File | Export | Purpose |
 |---|---|---|---|
-| Normalise | `utils/normalise.js` | `normaliseRepo()`, `normaliseProject()`, `normaliseWorkspace()` | Maps PascalCase backend keys to camelCase frontend keys. |
+| Normalise | `utils/normalise.js` | `normaliseRepo()`, `normaliseProject()`, `normaliseWorkspace()` | Maps PascalCase backend keys to camelCase frontend keys. `normaliseWorkspace` now includes `folderPath` (from `FolderPath` in the API response). |
 
 ## Theme Switching
 
@@ -79,8 +117,40 @@ Views using router injection: `dashboard.js`, `project-detail.js`, `workspace-de
 
 Views with side-effects (e.g. `setInterval` polling) return a synchronous cleanup function from their entry point. The router calls it before rendering the next view. The cleanup must be returned **before** any async operations, so the router can register it immediately.
 
-Views returning cleanup: `workspace-detail.js` (clears 10-second polling interval).
+Views returning cleanup: `workspace-detail.js` (clears 1-second countdown interval).
+
+### Workspace Detail View (`workspace-detail.js`)
+
+The workspace detail view (`#/projects/:id/workspaces/:wid`) renders live git status for all repositories in a workspace.
+
+**Key behaviours:**
+
+- **Initial load:** Calls `api.status.refresh()` (force-refresh via live git-fetch) instead of `api.status.get()` (cached), ensuring fresh data even when the polling cache is empty.
+- **Refresh toolbar:** A `.workspace-refresh-toolbar` row between the header and the status table displays a countdown label ("Next refresh in Xs") and a "Refresh Now" button. The countdown ticks every second; when it reaches 0, an automatic poll is triggered via `api.status.get()`. The "Refresh Now" button triggers a force-refresh via `api.status.refresh()` and resets the countdown.
+- **Countdown-based polling:** Replaces the previous `setInterval(fn, 10000)` approach. A 1-second `setInterval` decrements a counter. At zero it triggers `doPoll()` (cached). A `refreshInProgress` flag prevents race conditions between manual and automatic refreshes.
+- **Reactive missing-repos row:** After each poll or manual refresh, the "X repositories have no data" message is re-evaluated. When all repos have status data, the row is removed. When the count changes, the text updates.
+- **Setup button in-place update:** After a successful workspace setup, the setup button is removed from the DOM and `workspace.initialized` is set to `true` in the local variable. An immediate force-refresh is triggered and the countdown is started — no router re-render needed.
+- **Retry Setup:** The retry button also triggers `doRefresh()` after a successful re-setup instead of reloading the page.
+- **Cleanup contract:** The returned cleanup function clears the 1-second countdown interval.
 
 ### Tabbed Navigation (Project Detail)
 
 The project detail view organises content into three tabs: **Repositories**, **Workspaces**, and **Danger Zone**. Tabs are implemented with `.tab-nav` / `.tab-btn` / `.tab-panel` CSS classes and ARIA `role="tablist"` / `role="tab"` / `role="tabpanel"` attributes. Switching is handled by a single delegated click listener on the tab nav container. Only one panel is visible at a time (`.tab-panel.active`).
+
+### Error Log View (`error-log.js`)
+
+The error log view (`#/error-log`) renders a paginated, filterable table of error log entries fetched from `GET /api/error-log`.
+
+**Key behaviours:**
+
+- **Filter bar:** Severity (`all` / `error` / `warning`) and Source dropdowns re-fetch entries on change via `api.errorLog.list()`. Source options are **fetched dynamically** from `GET /api/error-log/sources` (`api.errorLog.sources()`) on view mount and after "Clear All" — no hardcoded list. The filter bar is rebuilt after each sources fetch via `rebuildFilterBar()`.
+- **Expandable detail rows:** Each data row (`<tr class="error-log-entry-row">`) is keyboard-accessible (`role="button"`, `tabindex="0"`, `aria-expanded`). Clicking or pressing Enter/Space toggles a hidden `<tr class="error-log-detail-row">` below it containing a `<pre class="error-log-detail-pre">` with the entry's `details` field.
+- **Severity badges:** Rendered via `buildSeverityBadge()` using `.severity-badge .severity-error` or `.severity-badge .severity-warning` CSS classes.
+- **Timestamps:** Displayed as relative time (e.g. "3 min ago") with the full ISO timestamp in the `title` tooltip. Falls back to the raw string on parse failure.
+- **Clear All:** Prompts a `showConfirm()` dialog before calling `api.errorLog.clear()` (HTTP DELETE). Resets filters and reloads on success.
+- **XSS safety:** All dynamic text is set via `textContent`, never `innerHTML`.
+- **No router injection:** `error-log.js` does not export `setRouter()` — it never needs to navigate away programmatically.
+- **No cleanup function:** `renderErrorLog` returns no cleanup — there is no polling or other side-effect to tear down.
+- **Shared time utility:** `relativeTime()` is imported from `utils/time.js` (shared with `status-badge.js`'s `formatLastActivity()`).
+
+**Nav badge:** The `#error-log-badge` span inside the "Error Log" nav link displays a live error count. `nav-badge.js` polls `api.errorLog.count()` every 30 seconds and hides the badge when the count is 0. The error-log view calls `refreshNavBadge()` after "Clear All".

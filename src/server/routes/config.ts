@@ -1,8 +1,15 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Router } from '../router.js';
 import type { AppConfig } from '../../config/config.types.js';
+import type { PollingManager } from '../pollingManager.js';
 import { saveConfigField } from '../../config/config.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
+
+// Polling-interval bounds — shared with settings UI (gui/public/js/views/settings.js).
+import {
+    MIN_POLLING_INTERVAL_SECONDS,
+    MAX_POLLING_INTERVAL_SECONDS,
+} from '../../config/config.constants.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,8 +42,24 @@ function buildMaskedCredentials(
 // Route registration
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Named-options interface
+// ---------------------------------------------------------------------------
+
+export interface ConfigRoutesOptions {
+    router: Router;
+    appConfig: AppConfig;
+    /** Optional absolute path to `config.json`. Defaults to the tool-root `config.json`. */
+    configPath?: string;
+    /** Optional `PollingManager`. When provided, PUT /api/config/polling restarts the loop. */
+    pollingManager?: PollingManager;
+}
+
 /**
- * Registers REST endpoints for managing `gitCredentials` in `config.json`.
+ * Registers REST endpoints for managing application configuration in
+ * `config.json`.
+ *
+ * **Credentials endpoints:**
  *
  * | Method | Path                              | Description               |
  * |--------|-----------------------------------|---------------------------|
@@ -44,21 +67,25 @@ function buildMaskedCredentials(
  * | PUT    | /api/config/credentials           | Add / update an entry     |
  * | DELETE | /api/config/credentials/:host     | Remove an entry           |
  *
+ * **Polling endpoints:**
+ *
+ * | Method | Path                    | Description                                          |
+ * |--------|-------------------------|------------------------------------------------------|
+ * | GET    | /api/config/polling     | Return current `gitPollingIntervalSeconds`           |
+ * | PUT    | /api/config/polling     | Update the polling interval (min 10 s, max 86400 s)  |
+ *
  * Changes take effect immediately (the in-memory `appConfig` is mutated) and
  * are persisted to `config.json` via `saveConfigField()`.
  *
  * **Security:** tokens are never returned in full — only the last 4 characters
  * are exposed. The `host` field is validated against an injection-safe pattern.
  *
- * @param configPath - Optional absolute path to `config.json`. Defaults to the
- *   tool-root `config.json`. Pass a custom path in tests to avoid touching the
- *   real config file.
+ * @param options - Named-options bag: `router`, `appConfig`, optional
+ *   `configPath` (defaults to tool-root `config.json`), optional
+ *   `pollingManager` (restarts polling loop when present).
  */
-export function registerConfigRoutes(
-    router: Router,
-    appConfig: AppConfig,
-    configPath?: string,
-): void {
+export function registerConfigRoutes(options: ConfigRoutesOptions): void {
+    const { router, appConfig, configPath, pollingManager } = options;
     // ------------------------------------------------------------------
     // GET /api/config/credentials — list all (tokens masked)
     // ------------------------------------------------------------------
@@ -166,5 +193,84 @@ export function registerConfigRoutes(
         saveConfigField('gitCredentials', appConfig.gitCredentials, configPath);
 
         sendJson(res, 200, buildMaskedCredentials(appConfig.gitCredentials));
+    });
+
+    // ------------------------------------------------------------------
+    // GET /api/config/polling — return the current polling interval
+    // ------------------------------------------------------------------
+    router.get('/api/config/polling', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): void => {
+        sendJson(res, 200, {
+            gitPollingIntervalSeconds: appConfig.gitPollingIntervalSeconds,
+        });
+    });
+
+    // ------------------------------------------------------------------
+    // PUT /api/config/polling — update the polling interval
+    // Validates: must be a finite integer >= 10.
+    // ------------------------------------------------------------------
+    router.put('/api/config/polling', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): Promise<void> => {
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { seconds } = body as { seconds?: unknown };
+
+        if (typeof seconds !== 'number') {
+            sendError(res, 400, 'Missing or invalid field "seconds": must be a number.');
+            return;
+        }
+
+        if (!Number.isFinite(seconds) || !Number.isInteger(seconds)) {
+            sendError(res, 400, 'Field "seconds" must be a finite integer.');
+            return;
+        }
+
+        if (seconds < MIN_POLLING_INTERVAL_SECONDS) {
+            sendError(
+                res,
+                400,
+                `Field "seconds" must be at least ${MIN_POLLING_INTERVAL_SECONDS}. Received: ${seconds}.`,
+            );
+            return;
+        }
+
+        if (seconds > MAX_POLLING_INTERVAL_SECONDS) {
+            sendError(
+                res,
+                400,
+                `Field "seconds" must be at most ${MAX_POLLING_INTERVAL_SECONDS} (24 hours). Received: ${seconds}.`,
+            );
+            return;
+        }
+
+        // Update in-memory config.
+        appConfig.gitPollingIntervalSeconds = seconds;
+
+        // Persist to disk.
+        saveConfigField('gitPollingIntervalSeconds', seconds, configPath);
+
+        // Restart the polling loop with the new interval (if a manager was provided).
+        if (pollingManager !== undefined) {
+            pollingManager.restart(seconds);
+        }
+
+        sendJson(res, 200, { gitPollingIntervalSeconds: appConfig.gitPollingIntervalSeconds });
     });
 }

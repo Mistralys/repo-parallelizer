@@ -4,6 +4,8 @@ import type { ProjectManager } from '../models/project/project.manager.js';
 import type { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import type { GitStatusInfo } from '../git/git.types.js';
 import { fetchAndGetStatus } from '../git/git-status.js';
+import type { ErrorLogManager } from '../error-log/error-log.manager.js';
+import type { ErrorLogContext } from '../error-log/error-log.types.js';
 
 /**
  * Signature of the function used to fetch live status for a single repo path.
@@ -27,7 +29,13 @@ const STAGGER_MS = 150;
  * ## Lifecycle
  *
  * ```
- * const mgr = new PollingManager(config, projectManager, workspaceManager);
+ * const mgr = new PollingManager(
+ *     config,
+ *     projectManager,
+ *     workspaceManager,
+ *     undefined,          // fetchStatusFn — omit to use the real git layer
+ *     errorLogManager,    // optional; omit to run without error logging
+ * );
  * mgr.start(30);            // poll every 30 seconds
  * mgr.getStatus('/path');   // O(1) cache read
  * await mgr.refreshWorkspace('my-project', 'STABLE');  // on-demand refresh
@@ -45,6 +53,12 @@ const STAGGER_MS = 150;
  *
  * `fetchStatusFn` defaults to the real `fetchAndGetStatus` from the git layer.
  * Tests may pass a mock to avoid real git I/O.
+ *
+ * `errorLogManager` is an optional `ErrorLogManager` instance.  When provided,
+ * fetch failures are logged at warning severity with source `'polling'` and
+ * operation `'status-poll'`.  Deduplication ensures at most one log entry per
+ * repo path per sweep-to-sweep cycle; entries are cleared when the repo
+ * recovers so subsequent failures still produce a log entry.
  */
 export class PollingManager {
     /** In-memory cache: absolute repo path → latest status snapshot. */
@@ -56,11 +70,22 @@ export class PollingManager {
     /** True while a poll sweep is already running (prevents overlap). */
     private sweepInProgress = false;
 
+    /**
+     * Tracks repo paths that have already produced an error log entry in the
+     * current or most recent sweep cycle.  Prevents flooding the log with
+     * repeated entries for persistently unreachable repositories.
+     *
+     * A path is removed when the repo recovers (successful fetch), so the
+     * next failure will produce a fresh log entry.
+     */
+    private readonly failedPaths = new Set<string>();
+
     constructor(
         private readonly config: AppConfig,
         private readonly projectManager: ProjectManager,
         private readonly workspaceManager: WorkspaceManager,
         private readonly fetchStatusFn: FetchStatusFn = fetchAndGetStatus,
+        private readonly errorLogManager?: ErrorLogManager,
     ) {}
 
     // -------------------------------------------------------------------------
@@ -111,6 +136,20 @@ export class PollingManager {
     }
 
     /**
+     * Restarts the background polling loop with a new interval.
+     *
+     * Stops the current loop (if running) and immediately starts a new one with
+     * `intervalSeconds`.  This is the correct way to apply a live interval change
+     * without creating a new `PollingManager` instance.
+     *
+     * @param intervalSeconds  The new polling interval in seconds.
+     */
+    restart(intervalSeconds: number): void {
+        this.stop();
+        this.start(intervalSeconds);
+    }
+
+    /**
      * Returns the most recently cached `GitStatusInfo` for the given absolute
      * repo path, or `null` if the repo has not been polled yet.
      */
@@ -124,8 +163,9 @@ export class PollingManager {
      * fetches have completed.
      *
      * Fetches are staggered by `STAGGER_MS` to avoid hammering the network.
-     * Individual fetch failures are silently swallowed so that a single
-     * unreachable repository does not prevent the others from being updated.
+     * Individual fetch failures are swallowed so that a single unreachable
+     * repository does not prevent the others from being updated.  When an
+     * `ErrorLogManager` is configured, failures are logged (with deduplication).
      *
      * @throws {Error} If the project or workspace does not exist (propagated
      *   from `WorkspaceManager`).
@@ -191,8 +231,11 @@ export class PollingManager {
 
     /**
      * Fetches status for each repo path sequentially with a `STAGGER_MS` delay
-     * between calls.  Errors from individual fetches are caught and ignored so
-     * that one failing repo does not abort the rest.
+     * between calls.  Errors from individual fetches are caught and, when an
+     * `ErrorLogManager` is configured, logged at warning severity with
+     * deduplication — at most one log entry per repo path per sweep-to-sweep
+     * cycle.  A previously failing repo that recovers is removed from the dedup
+     * set so that a future failure can produce a new entry.
      */
     private async fetchWithStagger(repoPaths: string[]): Promise<void> {
         for (let i = 0; i < repoPaths.length; i++) {
@@ -203,8 +246,23 @@ export class PollingManager {
             try {
                 const status = await this.fetchStatusFn(repoPath);
                 this.cache.set(repoPath, status);
-            } catch {
-                // Silently ignore errors for individual repos (e.g. unreachable)
+                // Recovery: clear the dedup flag so the next failure is logged.
+                this.failedPaths.delete(repoPath);
+            } catch (err) {
+                // Log at most one warning per repo path per sweep cycle.
+                if (this.errorLogManager && !this.failedPaths.has(repoPath)) {
+                    const context = extractContext(repoPath, this.config.projectsFolder);
+                    const message = err instanceof Error ? err.message : String(err);
+                    this.errorLogManager.append({
+                        Severity: 'warning',
+                        Source: 'polling',
+                        Operation: 'status-poll',
+                        Context: context,
+                        Message: `Failed to fetch status for repository: ${message}`,
+                        Details: `Repository path: ${repoPath}`,
+                    });
+                    this.failedPaths.add(repoPath);
+                }
             }
         }
     }
@@ -225,4 +283,32 @@ export class PollingManager {
 
 function delay(ms: number): Promise<void> {
     return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Extracts `ProjectId`, `WorkspaceId`, and `RepositoryId` from an absolute
+ * repo path by resolving it relative to `projectsFolder` and splitting on the
+ * OS path separator.
+ *
+ * Assumes the convention:
+ *   `{projectsFolder}/{projectId}/{workspaceId}/{repoId}`
+ *
+ * Returns an empty `ErrorLogContext` object if the path cannot be parsed
+ * (e.g. the path is not under `projectsFolder`, or has fewer than 3 segments).
+ */
+function extractContext(
+    repoPath: string,
+    projectsFolder: string,
+): ErrorLogContext {
+    const relative = path.relative(projectsFolder, repoPath);
+    const segments = relative.split(path.sep).filter(Boolean);
+    if (segments.length < 3) {
+        return {};
+    }
+    const [projectId, workspaceId, repositoryId] = segments;
+    return {
+        ProjectId: projectId,
+        WorkspaceId: workspaceId,
+        RepositoryId: repositoryId,
+    };
 }

@@ -134,3 +134,41 @@ test('initializeStorage does not modify seed file content on repeated calls', ()
     assert.strictEqual(fs.readFileSync(repoPath, 'utf8'), repoBefore);
     assert.strictEqual(fs.readFileSync(indexPath, 'utf8'), indexBefore);
 });
+
+// --- error-log.json seed ---
+
+test('initializeStorage creates error-log.json with correct JSON structure', () => {
+    const base = makeTempDir();
+    const config = makeConfig(base);
+    initializeStorage(config);
+    const errorLogPath = path.join(config.storageFolder, 'error-log.json');
+    assert.ok(fs.existsSync(errorLogPath), 'error-log.json should exist');
+    const content = JSON.parse(fs.readFileSync(errorLogPath, 'utf8'));
+    assert.deepStrictEqual(content, { Entries: [], SchemaVersion: 1 });
+});
+
+test('second initializeStorage() call does not overwrite non-empty error-log.json', () => {
+    const base = makeTempDir();
+    const config = makeConfig(base);
+    initializeStorage(config);
+    const errorLogPath = path.join(config.storageFolder, 'error-log.json');
+    const modified = { Entries: [{ Id: 1, Timestamp: '2026-01-01T00:00:00.000Z', Severity: 'error', Source: 'test', Operation: 'test', Context: {}, Message: 'test error' }], SchemaVersion: 1 };
+    fs.writeFileSync(errorLogPath, JSON.stringify(modified, null, 4) + '\n', 'utf8');
+    initializeStorage(config);
+    const content = JSON.parse(fs.readFileSync(errorLogPath, 'utf8'));
+    assert.deepStrictEqual(content, modified);
+});
+
+test('initializeStorage creates error-log.json when directories already exist', () => {
+    const base = makeTempDir();
+    const config = makeConfig(base);
+    // Pre-create directories without any seed files
+    fs.mkdirSync(config.storageFolder, { recursive: true });
+    fs.mkdirSync(path.join(config.storageFolder, 'projects'), { recursive: true });
+    fs.mkdirSync(config.projectsFolder, { recursive: true });
+    initializeStorage(config);
+    assert.ok(
+        fs.existsSync(path.join(config.storageFolder, 'error-log.json')),
+        'error-log.json should be created even when directories pre-exist',
+    );
+});

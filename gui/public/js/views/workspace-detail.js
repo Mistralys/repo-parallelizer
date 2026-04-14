@@ -6,9 +6,11 @@
  *   - Repository status table: one row per repository, showing current branch,
  *     a color-coded Git status badge, and an error/loading indicator for repos
  *     with no status data yet.
- *   - Live polling: status badges refresh in-place every 10 seconds via
- *     `setInterval`. The interval is cleared via the cleanup function returned
- *     from `renderWorkspaceDetail`, which the router calls before navigating
+ *   - Live polling: status badges refresh in-place via a 1-second countdown
+ *     interval that triggers a poll every 10 seconds. A visible countdown
+ *     label and a "Refresh Now" button provide user control. The interval
+ *     is cleared via the cleanup function returned from
+ *     `renderWorkspaceDetail`, which the router calls before navigating
  *     away.
  *   - Actions: "Switch Branches" navigation button, "Rename Workspace" (disabled
  *     for STABLE), "Delete Workspace" (disabled for STABLE).
@@ -57,8 +59,8 @@ export function setRouter(router) {
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Polling interval in milliseconds. */
-const POLL_INTERVAL_MS = 10_000;
+/** Default polling interval in milliseconds (fallback when config fetch fails). */
+const DEFAULT_POLL_INTERVAL_MS = 10_000;
 
 /** The workspace ID that cannot be renamed or deleted. */
 const STABLE_WS_ID = 'STABLE';
@@ -104,12 +106,46 @@ function extractRepoName(repo) {
  * @param {string} [label]
  */
 function showLoading(el, label = 'Loading…') {
-    el.innerHTML = `
-        <div class="loading-indicator" aria-live="polite">
-            <span class="spinner" aria-hidden="true"></span>
-            <span>${label}</span>
-        </div>
-    `;
+    el.innerHTML = '';
+    const wrapper = document.createElement('div');
+    wrapper.className = 'loading-indicator';
+    wrapper.setAttribute('aria-live', 'polite');
+
+    const spinner = document.createElement('span');
+    spinner.className = 'spinner';
+    spinner.setAttribute('aria-hidden', 'true');
+    wrapper.appendChild(spinner);
+
+    const labelEl = document.createElement('span');
+    labelEl.textContent = label;
+    wrapper.appendChild(labelEl);
+
+    el.appendChild(wrapper);
+}
+
+// ---------------------------------------------------------------------------
+// Setup helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Run workspace setup and show appropriate toast notification.
+ *
+ * @param {string} projectId
+ * @param {string} workspaceId
+ * @param {string} successMessage - Toast message shown when all repos succeed.
+ * @returns {Promise<Object>} The setup result from the API.
+ * @throws {Error} Re-throws API errors for the caller to handle.
+ */
+async function runSetup(projectId, workspaceId, successMessage) {
+    const result = await api.workspaces.setup(projectId, workspaceId);
+    const failures = (result && result.results || []).filter((r) => !r.success);
+    if (failures.length > 0) {
+        const names = failures.map((f) => f.repositoryId).join(', ');
+        showToast(`Setup complete with errors. Failed to clone: ${names}`, 'warning', 8000);
+    } else {
+        showToast(successMessage, 'success');
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -204,15 +240,128 @@ function updateStatusTable(tableBody, statusMap) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Build the rename workspace inline form and wire up its event handlers.
+ *
+ * @param {string} projectId
+ * @param {{ id: string }} workspace
+ * @param {HTMLButtonElement} renameBtn - The "Rename" button that toggles form visibility.
+ * @returns {HTMLElement}
+ */
+function buildRenameForm(projectId, workspace, renameBtn) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'rename-workspace-form-wrapper card';
+    wrapper.hidden = true;
+
+    const formTitle = document.createElement('h4');
+    formTitle.className   = 'form-section-title';
+    formTitle.textContent = 'Rename Workspace';
+    wrapper.appendChild(formTitle);
+
+    const newIdField = createFormField('New Workspace ID', 'text', 'newWorkspaceId', {
+        required:    true,
+        placeholder: 'e.g. DEV or FEATURE',
+        hint:        'Must be 2–6 uppercase letters (A-Z only).',
+    });
+    wrapper.appendChild(newIdField);
+
+    const newIdInput   = newIdField.querySelector('[name="newWorkspaceId"]');
+    const newIdErrorEl = newIdField.querySelector('.field-error');
+
+    const formActions = document.createElement('div');
+    formActions.className = 'form-actions';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type      = 'button';
+    saveBtn.className = 'btn btn-primary btn-sm';
+    saveBtn.textContent = 'Save';
+
+    const cancelFormBtn = document.createElement('button');
+    cancelFormBtn.type      = 'button';
+    cancelFormBtn.className = 'btn btn-secondary btn-sm';
+    cancelFormBtn.textContent = 'Cancel';
+
+    formActions.appendChild(saveBtn);
+    formActions.appendChild(cancelFormBtn);
+    wrapper.appendChild(formActions);
+
+    // Behaviour
+    renameBtn.addEventListener('click', () => {
+        wrapper.hidden = false;
+        if (newIdInput) newIdInput.focus();
+    });
+
+    cancelFormBtn.addEventListener('click', () => {
+        wrapper.hidden = true;
+        if (newIdInput) newIdInput.value = '';
+        if (newIdErrorEl) newIdErrorEl.hidden = true;
+    });
+
+    saveBtn.addEventListener('click', async () => {
+        if (newIdErrorEl) newIdErrorEl.hidden = true;
+        if (newIdInput) {
+            newIdInput.classList.remove('error');
+            newIdInput.removeAttribute('aria-invalid');
+        }
+
+        if (!validateRequired(wrapper, ['newWorkspaceId'])) return;
+
+        const newId = newIdInput ? newIdInput.value.trim() : '';
+
+        if (!WORKSPACE_ID_PATTERN.test(newId)) {
+            if (newIdErrorEl) {
+                newIdErrorEl.textContent = 'Must be 2–6 uppercase letters (A-Z only).';
+                newIdErrorEl.hidden      = false;
+            }
+            if (newIdInput) {
+                newIdInput.classList.add('error');
+                newIdInput.setAttribute('aria-invalid', 'true');
+                newIdInput.focus();
+            }
+            return;
+        }
+
+        try {
+            await showConfirm(
+                'Rename Workspace',
+                `Rename workspace "${workspace.id}" to "${newId}"? The page will navigate to the new workspace URL.`,
+            );
+        } catch {
+            return;
+        }
+
+        saveBtn.disabled    = true;
+        saveBtn.textContent = 'Saving…';
+
+        try {
+            await api.workspaces.rename(projectId, workspace.id, newId);
+            showToast(`Workspace renamed to "${newId}".`, 'success');
+            const target = `#/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(newId)}`;
+            if (_router) {
+                _router.navigate(target);
+            } else {
+                location.hash = target;
+            }
+        } catch (err) {
+            showToast(err.message || 'Failed to rename workspace.', 'error');
+            saveBtn.disabled    = false;
+            saveBtn.textContent = 'Save';
+        }
+    });
+
+    return wrapper;
+}
+
+/**
  * Build the workspace header section — compact layout with breadcrumb,
  * workspace name, and a meta card for description + management actions.
  *
  * @param {string} projectId
- * @param {{ id: string, description: string, initialized: boolean }} workspace
+ * @param {{ id: string, description: string, initialized: boolean, folderPath: string }} workspace
  * @param {boolean} isStable
+ * @param {function(): void} [onSetupSuccess] - Called after a successful setup to trigger refresh.
  * @returns {HTMLElement}
  */
-function buildHeaderSection(projectId, workspace, isStable) {
+function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
     const wrapper = document.createElement('div');
     wrapper.className = 'workspace-detail-header';
 
@@ -253,6 +402,24 @@ function buildHeaderSection(projectId, workspace, isStable) {
 
     wrapper.appendChild(titleRow);
 
+    // Folder path row (shown when path is available)
+    if (workspace.folderPath) {
+        const pathRow = document.createElement('div');
+        pathRow.className = 'workspace-folder-path-row';
+
+        const pathLabel = document.createElement('span');
+        pathLabel.className = 'text-muted';
+        pathLabel.textContent = 'Path: ';
+
+        const pathValue = document.createElement('code');
+        pathValue.className = 'workspace-folder-path font-mono';
+        pathValue.textContent = workspace.folderPath;
+
+        pathRow.appendChild(pathLabel);
+        pathRow.appendChild(pathValue);
+        wrapper.appendChild(pathRow);
+    }
+
     // Management row: rename, delete, setup
     const mgmtRow = document.createElement('div');
     mgmtRow.className = 'workspace-mgmt-row';
@@ -270,24 +437,13 @@ function buildHeaderSection(projectId, workspace, isStable) {
             setupBtn.textContent = 'Setting up…';
 
             try {
-                const result = await api.workspaces.setup(projectId, workspace.id);
+                await runSetup(projectId, workspace.id,
+                    `Workspace "${workspace.id}" set up successfully.`);
 
-                // Report per-repo clone results
-                const failures = (result && result.results || []).filter((r) => !r.success);
-                if (failures.length > 0) {
-                    const names = failures.map((f) => f.repositoryId).join(', ');
-                    showToast(`Setup complete with errors. Failed to clone: ${names}`, 'warning', 8000);
-                } else {
-                    showToast(`Workspace "${workspace.id}" set up successfully.`, 'success');
-                }
-
-                // Re-render by navigating to the same page
-                const target = `#/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspace.id)}`;
-                if (_router) {
-                    _router.navigate(target);
-                } else {
-                    location.hash = target;
-                }
+                // Update DOM in-place — remove setup button and notify caller
+                setupBtn.remove();
+                workspace.initialized = true;
+                if (onSetupSuccess) onSetupSuccess();
             } catch (err) {
                 showToast(err.message || 'Failed to set up workspace.', 'error');
                 setupBtn.disabled = false;
@@ -323,108 +479,9 @@ function buildHeaderSection(projectId, workspace, isStable) {
 
     wrapper.appendChild(mgmtRow);
 
-    // Rename inline form (hidden initially)
-    const renameFormWrapper = document.createElement('div');
-    renameFormWrapper.className = 'rename-workspace-form-wrapper card';
-    renameFormWrapper.hidden = true;
-    wrapper.appendChild(renameFormWrapper);
-
+    // Rename inline form + delete handler (non-STABLE only)
     if (!isStable) {
-        const formTitle = document.createElement('h4');
-        formTitle.className   = 'form-section-title';
-        formTitle.textContent = 'Rename Workspace';
-        renameFormWrapper.appendChild(formTitle);
-
-        const newIdField = createFormField('New Workspace ID', 'text', 'newWorkspaceId', {
-            required:    true,
-            placeholder: 'e.g. DEV or FEATURE',
-            hint:        'Must be 2–6 uppercase letters (A-Z only).',
-        });
-        renameFormWrapper.appendChild(newIdField);
-
-        const newIdInput   = newIdField.querySelector('[name="newWorkspaceId"]');
-        const newIdErrorEl = newIdField.querySelector('.field-error');
-
-        const formActions = document.createElement('div');
-        formActions.className = 'form-actions';
-
-        const saveBtn = document.createElement('button');
-        saveBtn.type      = 'button';
-        saveBtn.className = 'btn btn-primary btn-sm';
-        saveBtn.textContent = 'Save';
-
-        const cancelFormBtn = document.createElement('button');
-        cancelFormBtn.type      = 'button';
-        cancelFormBtn.className = 'btn btn-secondary btn-sm';
-        cancelFormBtn.textContent = 'Cancel';
-
-        formActions.appendChild(saveBtn);
-        formActions.appendChild(cancelFormBtn);
-        renameFormWrapper.appendChild(formActions);
-
-        // Behaviour
-        renameBtn.addEventListener('click', () => {
-            renameFormWrapper.hidden = false;
-            if (newIdInput) newIdInput.focus();
-        });
-
-        cancelFormBtn.addEventListener('click', () => {
-            renameFormWrapper.hidden = true;
-            if (newIdInput) newIdInput.value = '';
-            if (newIdErrorEl) newIdErrorEl.hidden = true;
-        });
-
-        saveBtn.addEventListener('click', async () => {
-            if (newIdErrorEl) newIdErrorEl.hidden = true;
-            if (newIdInput) {
-                newIdInput.classList.remove('error');
-                newIdInput.removeAttribute('aria-invalid');
-            }
-
-            if (!validateRequired(renameFormWrapper, ['newWorkspaceId'])) return;
-
-            const newId = newIdInput ? newIdInput.value.trim() : '';
-
-            if (!WORKSPACE_ID_PATTERN.test(newId)) {
-                if (newIdErrorEl) {
-                    newIdErrorEl.textContent = 'Must be 2–6 uppercase letters (A-Z only).';
-                    newIdErrorEl.hidden      = false;
-                }
-                if (newIdInput) {
-                    newIdInput.classList.add('error');
-                    newIdInput.setAttribute('aria-invalid', 'true');
-                    newIdInput.focus();
-                }
-                return;
-            }
-
-            try {
-                await showConfirm(
-                    'Rename Workspace',
-                    `Rename workspace "${workspace.id}" to "${newId}"? The page will navigate to the new workspace URL.`,
-                );
-            } catch {
-                return;
-            }
-
-            saveBtn.disabled    = true;
-            saveBtn.textContent = 'Saving…';
-
-            try {
-                await api.workspaces.rename(projectId, workspace.id, newId);
-                showToast(`Workspace renamed to "${newId}".`, 'success');
-                const target = `#/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(newId)}`;
-                if (_router) {
-                    _router.navigate(target);
-                } else {
-                    location.hash = target;
-                }
-            } catch (err) {
-                showToast(err.message || 'Failed to rename workspace.', 'error');
-                saveBtn.disabled    = false;
-                saveBtn.textContent = 'Save';
-            }
-        });
+        wrapper.appendChild(buildRenameForm(projectId, workspace, renameBtn));
 
         deleteBtn.addEventListener('click', async () => {
             try {
@@ -526,6 +583,31 @@ function buildSwitchBranchesButton(projectId, wid) {
     return switchBtn;
 }
 
+/**
+ * Build the refresh toolbar row with progress bar and "Refresh Now" button.
+ *
+ * @returns {HTMLElement}
+ */
+function buildRefreshToolbar() {
+    const toolbar = document.createElement('div');
+    toolbar.className = 'workspace-refresh-toolbar';
+
+    const btn = document.createElement('button');
+    btn.type      = 'button';
+    btn.className = 'btn btn-secondary btn-sm refresh-now-btn';
+    btn.textContent = 'Refresh Now';
+    toolbar.appendChild(btn);
+
+    const track = document.createElement('div');
+    track.className = 'refresh-progress-track';
+    const bar = document.createElement('div');
+    bar.className = 'refresh-progress-bar';
+    track.appendChild(bar);
+    toolbar.appendChild(track);
+
+    return toolbar;
+}
+
 // ---------------------------------------------------------------------------
 // Public view entry point
 // ---------------------------------------------------------------------------
@@ -533,9 +615,10 @@ function buildSwitchBranchesButton(projectId, wid) {
 /**
  * Render the workspace detail view.
  *
- * Fetches workspace metadata, project (for the repositories list), and
- * initial Git status in parallel. Then starts a polling interval that
- * updates badges in-place every {@link POLL_INTERVAL_MS} milliseconds.
+ * Fetches workspace metadata, project (for the repositories list), polling
+ * configuration, and initial Git status in parallel. Then starts a polling
+ * interval that updates badges in-place using the server-configured interval
+ * (falls back to {@link DEFAULT_POLL_INTERVAL_MS} if the config fetch fails).
  *
  * @param {HTMLElement} container - The `#app` DOM element provided by the router.
  * @param {{ id: string, wid: string }} params - Route parameters.
@@ -546,14 +629,14 @@ export function renderWorkspaceDetail(container, params) {
     const projectId = params.id;
     const wid       = params.wid;
 
-    let pollingInterval = null;
+    let countdownInterval = null;
 
     // Return the cleanup function immediately so the router can register it
     // even if the async bootstrap hasn't resolved yet.
     const cleanup = () => {
-        if (pollingInterval !== null) {
-            clearInterval(pollingInterval);
-            pollingInterval = null;
+        if (countdownInterval !== null) {
+            clearInterval(countdownInterval);
+            countdownInterval = null;
         }
     };
 
@@ -564,8 +647,10 @@ export function renderWorkspaceDetail(container, params) {
     Promise.all([
         api.workspaces.get(projectId, wid),
         api.projects.get(projectId),
-        api.status.get(projectId, wid),
-    ]).then(([rawWorkspace, rawProject, statusMap]) => {
+        api.status.refresh(projectId, wid),
+        api.config.polling.get().catch(() => null),
+    ]).then((results) => {
+        const [rawWorkspace, rawProject, statusMap, pollingConfig] = results;
         // Guard: if the container was cleared by navigation before we resolved,
         // do nothing and let the cleanup function handle the interval.
         if (!container.isConnected) return;
@@ -584,8 +669,142 @@ export function renderWorkspaceDetail(container, params) {
 
         const isStable = wid === STABLE_WS_ID;
 
-        container.appendChild(buildHeaderSection(projectId, workspace, isStable));
+        // Resolve the effective poll interval from server config, with fallback.
+        const pollIntervalMs = (
+            pollingConfig &&
+            typeof pollingConfig.gitPollingIntervalSeconds === 'number' &&
+            Number.isFinite(pollingConfig.gitPollingIntervalSeconds) &&
+            pollingConfig.gitPollingIntervalSeconds > 0
+        )
+            ? pollingConfig.gitPollingIntervalSeconds * 1000
+            : DEFAULT_POLL_INTERVAL_MS;
+
+        // Build status table first to obtain tbody reference for helpers.
         const { section: statusSection, tbody } = buildStatusTableSection(repos, statusMap || {});
+
+        // -------------------------------------------------------------------
+        // Refresh helpers (referenced by toolbar, polling, and setup)
+        // -------------------------------------------------------------------
+
+        let remainingSeconds = pollIntervalMs / 1000;
+        let refreshInProgress = false;
+
+        // Retry row reference — kept so polling can update/hide it.
+        let retryRow = null;
+        let retryHint = null;
+
+        // Toolbar elements — built now, wired after helpers are defined.
+        const toolbar = buildRefreshToolbar();
+        const progressBar = toolbar.querySelector('.refresh-progress-bar');
+        const refreshNowBtn = toolbar.querySelector('.refresh-now-btn');
+
+        /**
+         * Re-evaluate missing repos after a status update and hide/update
+         * the retry row accordingly.
+         */
+        function updateMissingReposRow(freshStatusMap) {
+            const currentMissing = repos.filter((r) => !freshStatusMap[r.repoId]);
+            if (currentMissing.length === 0) {
+                if (retryRow) {
+                    retryRow.remove();
+                    retryRow = null;
+                    retryHint = null;
+                }
+            } else if (retryHint) {
+                retryHint.textContent = `${currentMissing.length} ${currentMissing.length === 1 ? 'repository has' : 'repositories have'} no data \u2014 clone may have failed.`;
+            }
+        }
+
+        /**
+         * Automatic poll — uses cached status endpoint.
+         */
+        async function doPoll() {
+            if (refreshInProgress) return;
+            refreshInProgress = true;
+            try {
+                const fresh = await api.status.get(projectId, wid);
+                if (container.isConnected && fresh) {
+                    updateStatusTable(tbody, fresh);
+                    updateMissingReposRow(fresh);
+                }
+            } catch {
+                // Silently ignore polling errors — stale badges remain.
+            } finally {
+                refreshInProgress = false;
+                remainingSeconds = pollIntervalMs / 1000;
+                progressBar.classList.remove('refreshing');
+                progressBar.style.width = '0%';
+            }
+        }
+
+        /**
+         * Manual force-refresh — calls the live git-fetch endpoint.
+         */
+        async function doRefresh() {
+            if (refreshInProgress) return;
+            refreshInProgress = true;
+            refreshNowBtn.disabled = true;
+            progressBar.classList.add('refreshing');
+            try {
+                const fresh = await api.status.refresh(projectId, wid);
+                if (container.isConnected && fresh) {
+                    updateStatusTable(tbody, fresh);
+                    updateMissingReposRow(fresh);
+                }
+            } catch {
+                // Silently ignore — stale badges remain.
+            } finally {
+                refreshInProgress = false;
+                refreshNowBtn.disabled = false;
+                remainingSeconds = pollIntervalMs / 1000;
+                progressBar.classList.remove('refreshing');
+                progressBar.style.width = '0%';
+            }
+        }
+
+        /**
+         * Start the 1-second countdown interval.
+         */
+        function startCountdown() {
+            if (countdownInterval) return;
+            countdownInterval = setInterval(() => {
+                if (!container.isConnected) {
+                    cleanup();
+                    return;
+                }
+                remainingSeconds--;
+                if (remainingSeconds <= 0) {
+                    progressBar.classList.add('refreshing');
+                    doPoll();
+                } else {
+                    const totalSeconds = pollIntervalMs / 1000;
+                    const pct = ((totalSeconds - remainingSeconds) / totalSeconds) * 100;
+                    progressBar.style.width = `${pct}%`;
+                }
+            }, 1000);
+        }
+
+        refreshNowBtn.addEventListener('click', doRefresh);
+
+        // Setup success callback — hides setup button, triggers refresh.
+        const onSetupSuccess = () => {
+            doRefresh();
+            if (!countdownInterval && tbody && repos.length > 0) {
+                startCountdown();
+            }
+        };
+
+        // -------------------------------------------------------------------
+        // Assemble DOM
+        // -------------------------------------------------------------------
+
+        container.appendChild(buildHeaderSection(projectId, workspace, isStable, onSetupSuccess));
+
+        // Refresh toolbar (between header and status table)
+        if (repos.length > 0) {
+            container.appendChild(toolbar);
+        }
+
         container.appendChild(statusSection);
 
         // Show "Retry Setup" when workspace is initialized but some repos
@@ -593,12 +812,12 @@ export function renderWorkspaceDetail(container, params) {
         const safeStatusMap = statusMap || {};
         const missingRepos = repos.filter((r) => !safeStatusMap[r.repoId]);
         if (workspace.initialized && missingRepos.length > 0) {
-            const retryRow = document.createElement('div');
+            retryRow = document.createElement('div');
             retryRow.className = 'workspace-mgmt-row';
 
-            const retryHint = document.createElement('span');
+            retryHint = document.createElement('span');
             retryHint.className = 'text-secondary text-sm';
-            retryHint.textContent = `${missingRepos.length} ${missingRepos.length === 1 ? 'repository has' : 'repositories have'} no data — clone may have failed.`;
+            retryHint.textContent = `${missingRepos.length} ${missingRepos.length === 1 ? 'repository has' : 'repositories have'} no data \u2014 clone may have failed.`;
             retryRow.appendChild(retryHint);
 
             const retryBtn = document.createElement('button');
@@ -609,26 +828,14 @@ export function renderWorkspaceDetail(container, params) {
 
             retryBtn.addEventListener('click', async () => {
                 retryBtn.disabled = true;
-                retryBtn.textContent = 'Setting up…';
+                retryBtn.textContent = 'Setting up\u2026';
 
                 try {
-                    const result = await api.workspaces.setup(projectId, workspace.id);
+                    await runSetup(projectId, workspace.id,
+                        'All repositories cloned successfully.');
 
-                    const failures = (result && result.results || []).filter((r) => !r.success);
-                    if (failures.length > 0) {
-                        const names = failures.map((f) => f.repositoryId).join(', ');
-                        showToast(`Setup complete with errors. Failed to clone: ${names}`, 'warning', 8000);
-                    } else {
-                        showToast('All repositories cloned successfully.', 'success');
-                    }
-
-                    // Re-render
-                    const target = `#/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspace.id)}`;
-                    if (_router) {
-                        _router.navigate(target);
-                    } else {
-                        location.hash = target;
-                    }
+                    // Trigger immediate refresh to update the status table.
+                    doRefresh();
                 } catch (err) {
                     showToast(err.message || 'Failed to set up workspace.', 'error');
                     retryBtn.disabled = false;
@@ -640,25 +847,13 @@ export function renderWorkspaceDetail(container, params) {
             container.appendChild(retryRow);
         }
 
-        container.appendChild(buildSwitchBranchesButton(projectId, wid));
+        if (!isStable) {
+            container.appendChild(buildSwitchBranchesButton(projectId, wid));
+        }
 
-        // Start polling only when there are repos to update.
+        // Start polling countdown when there are repos to update.
         if (tbody && repos.length > 0) {
-            pollingInterval = setInterval(async () => {
-                // Stop polling if the container is no longer in the DOM.
-                if (!container.isConnected) {
-                    cleanup();
-                    return;
-                }
-                try {
-                    const fresh = await api.status.get(projectId, wid);
-                    if (container.isConnected && fresh) {
-                        updateStatusTable(tbody, fresh);
-                    }
-                } catch {
-                    // Silently ignore polling errors — the stale badges remain.
-                }
-            }, POLL_INTERVAL_MS);
+            startCountdown();
         }
     }).catch((err) => {
         if (!container.isConnected) return;

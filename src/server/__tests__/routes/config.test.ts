@@ -8,6 +8,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Router } from '../../router.js';
 import { registerConfigRoutes } from '../../routes/config.js';
 import type { AppConfig } from '../../../config/config.types.js';
+import type { PollingManager } from '../../pollingManager.js';
 
 // ---------------------------------------------------------------------------
 // Temp dir (cleaned up on process exit)
@@ -108,9 +109,26 @@ function readConfigFile(configPath: string): Record<string, unknown> {
     return JSON.parse(fs.readFileSync(configPath, 'utf8'));
 }
 
-function buildSut(appConfig: AppConfig, configPath: string): Router {
+/**
+ * Creates a minimal PollingManager stub that records restart() calls.
+ */
+function makeMockPollingManager(): PollingManager & { restartCalls: number[]; } {
+    const stub = {
+        restartCalls: [] as number[],
+        restart(intervalSeconds: number): void {
+            stub.restartCalls.push(intervalSeconds);
+        },
+    };
+    return stub as unknown as PollingManager & { restartCalls: number[]; };
+}
+
+function buildSut(
+    appConfig: AppConfig,
+    configPath: string,
+    pollingManager?: PollingManager,
+): Router {
     const router = new Router();
-    registerConfigRoutes(router, appConfig, configPath);
+    registerConfigRoutes({ router, appConfig, configPath, pollingManager });
     return router;
 }
 
@@ -489,4 +507,279 @@ test('PUT /api/config/credentials: returns 400 when host is "prototype"', async 
     await new Promise<void>((resolve) => process.nextTick(resolve));
 
     assert.strictEqual(mock.statusCode, 400);
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/config/polling
+// ---------------------------------------------------------------------------
+
+test('GET /api/config/polling: returns 200 with default gitPollingIntervalSeconds of 30', () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig(); // defaults to gitPollingIntervalSeconds: 30
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('GET', '/api/config/polling');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { gitPollingIntervalSeconds: number };
+    assert.strictEqual(body.gitPollingIntervalSeconds, 30);
+});
+
+test('GET /api/config/polling: returns the current in-memory value when overridden', () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig({ gitPollingIntervalSeconds: 60 });
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('GET', '/api/config/polling');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { gitPollingIntervalSeconds: number };
+    assert.strictEqual(body.gitPollingIntervalSeconds, 60);
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/config/polling — success
+// ---------------------------------------------------------------------------
+
+test('PUT /api/config/polling: returns 200 with updated value on valid input', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/polling', { seconds: 60 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { gitPollingIntervalSeconds: number };
+    assert.strictEqual(body.gitPollingIntervalSeconds, 60);
+});
+
+test('PUT /api/config/polling: updates in-memory appConfig immediately', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/polling', { seconds: 60 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(appConfig.gitPollingIntervalSeconds, 60);
+});
+
+test('PUT /api/config/polling: persists the new value to config.json', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/polling', { seconds: 60 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    const saved = readConfigFile(configPath);
+    assert.strictEqual(saved['gitPollingIntervalSeconds'], 60);
+});
+
+test('PUT /api/config/polling: calls pollingManager.restart() with the new interval', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const pollingManager = makeMockPollingManager();
+    const router = buildSut(appConfig, configPath, pollingManager);
+
+    const req = mockRequest('PUT', '/api/config/polling', { seconds: 60 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.deepStrictEqual(pollingManager.restartCalls, [60]);
+});
+
+test('PUT /api/config/polling: accepts the minimum valid value of 10', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/polling', { seconds: 10 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.strictEqual(appConfig.gitPollingIntervalSeconds, 10);
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/config/polling — validation errors (HTTP 400)
+// ---------------------------------------------------------------------------
+
+test('PUT /api/config/polling: returns 400 when seconds is below minimum (5 < 10)', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/polling', { seconds: 5 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+    const body = JSON.parse(mock.body) as { error: string };
+    assert.ok(body.error.length > 0, 'error message must be non-empty');
+});
+
+test('PUT /api/config/polling: returns 400 for seconds = 0', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/polling', { seconds: 0 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+});
+
+test('PUT /api/config/polling: returns 400 for negative seconds', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/polling', { seconds: -1 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+});
+
+test('PUT /api/config/polling: returns 400 when seconds is a fractional number', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/polling', { seconds: 30.5 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+});
+
+test('PUT /api/config/polling: returns 400 when seconds is a string', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/polling', { seconds: '60' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+});
+
+test('PUT /api/config/polling: returns 400 when seconds field is missing', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/polling', { other: 60 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+});
+
+test('PUT /api/config/polling: returns 400 when body is not a JSON object', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/polling', [60]);
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+});
+
+// ---------------------------------------------------------------------------
+// Backward-compatibility — existing callers without pollingManager
+// ---------------------------------------------------------------------------
+
+test('registerConfigRoutes: works without pollingManager argument (backward-compatible)', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    // No pollingManager passed — existing caller pattern
+    const router = new Router();
+    registerConfigRoutes({ router, appConfig, configPath }); // must not throw
+
+    const req = mockRequest('PUT', '/api/config/polling', { seconds: 60 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    // Should still update config successfully; just won't restart a manager.
+    assert.strictEqual(mock.statusCode, 200);
+    assert.strictEqual(appConfig.gitPollingIntervalSeconds, 60);
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/config/polling — upper bound (max 86400)
+// ---------------------------------------------------------------------------
+
+test('PUT /api/config/polling: accepts maximum valid value of 86400', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/polling', { seconds: 86400 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { gitPollingIntervalSeconds: number };
+    assert.strictEqual(body.gitPollingIntervalSeconds, 86400);
+});
+
+test('PUT /api/config/polling: returns 400 when seconds exceeds 86400', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/polling', { seconds: 86401 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+    const body = JSON.parse(mock.body) as { error: string };
+    assert.ok(body.error.includes('86400'), 'error must mention max value');
+    assert.ok(body.error.includes('86401'), 'error must echo received value');
 });
