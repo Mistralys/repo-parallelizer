@@ -89,6 +89,16 @@ node --test gui/public/js/api.errorLog.test.mjs
 node --test gui/public/js/*.test.mjs
 ```
 
-> **Note:** Node may emit a `MODULE_TYPELESS_PACKAGE_JSON` warning during these runs. This is a pre-existing, non-fatal warning caused by the package not declaring `"type": "module"` — it does not affect test correctness.
-
 **Naming convention:** GUI test files are named `<module>.test.mjs` and placed alongside the module they test (e.g. `api.errorLog.test.mjs` next to `api.js`). They use a `mockFetch()` helper to stub `globalThis.fetch` and assert against the URL and options passed to it, without making real HTTP requests.
+
+## API Client Architecture Notes (`api.js`)
+
+### `api.workspaces` namespace growth
+
+The `api.workspaces` namespace has a nested `api.workspaces.launch` sub-namespace for external-application launchers, following the same pattern as `api.config.credentials` and `api.config.polling`. This keeps the top-level namespace from becoming unwieldy as more launcher types are added.
+
+**Convention:** All external-app launcher methods live under `api.workspaces.launch` — never as flat methods on `api.workspaces` directly. If future work packages add more launch-related endpoints (e.g. opening a terminal, launching a diff tool), add them as methods on `api.workspaces.launch`.
+
+**Current launch methods (`api.workspaces.launch`):**
+- `vscode(projectId, wid)` — opens VS Code with the workspace's `.code-workspace` file.
+- `githubDesktop(projectId, wid, repoId)` — opens GitHub Desktop for a specific repository clone.

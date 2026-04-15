@@ -6,6 +6,8 @@ import type { ProjectManager } from '../../models/project/project.manager.js';
 import type { WorkspaceManager } from '../../models/workspace/workspace.manager.js';
 import type { AppConfig } from '../../config/config.types.js';
 import type { GitStatusInfo } from '../../git/git.types.js';
+import type { ProjectData } from '../../models/project/project.types.js';
+import type { WorkspaceInfo } from '../../models/workspace/workspace.types.js';
 import { NotFoundError } from '../../errors.js';
 import { sendJson, sendError } from '../requestUtils.js';
 
@@ -46,6 +48,59 @@ export function registerStatusRoutes(
     workspaceManager: WorkspaceManager,
     config: AppConfig,
 ): void {
+    /**
+     * Look up a project by ID.
+     *
+     * Sends a `404` response and returns `undefined` when the project
+     * cannot be found.
+     *
+     * @param res       - The outgoing HTTP response (used to send the 404 error).
+     * @param projectId - The ID of the project to look up.
+     * @returns The matching `ProjectData` on success, or `undefined` when a 404
+     *          has already been written to `res`.
+     */
+    function resolveProject(
+        res: ServerResponse,
+        projectId: string,
+    ): ProjectData | undefined {
+        const project = projectManager.getById(projectId);
+        if (!project) {
+            sendError(res, 404, `Project with ID "${projectId}" not found.`);
+            return undefined;
+        }
+        return project;
+    }
+
+    /**
+     * Look up a workspace by project and workspace ID.
+     *
+     * Sends a `404` response and returns `undefined` when the workspace
+     * (or its parent project) cannot be found.
+     *
+     * @param res         - The outgoing HTTP response (used to send the 404 error).
+     * @param projectId   - The ID of the parent project.
+     * @param workspaceId - The ID of the workspace to look up.
+     * @returns The matching `WorkspaceInfo` on success, or `undefined` when a 404
+     *          has already been written to `res`.
+     */
+    function resolveWorkspace(
+        res: ServerResponse,
+        projectId: string,
+        workspaceId: string,
+    ): WorkspaceInfo | undefined {
+        try {
+            const ws = workspaceManager.getById(projectId, workspaceId);
+            if (ws === undefined) {
+                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
+                return undefined;
+            }
+            return ws;
+        } catch (err) {
+            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
+            return undefined;
+        }
+    }
+
     // ------------------------------------------------------------------
     // GET /api/projects/:id/workspaces/:wid/status
     //   Returns the cached GitStatusInfo for all repos in the workspace.
@@ -59,23 +114,11 @@ export function registerStatusRoutes(
         const { id: projectId, wid: workspaceId } = params;
 
         // Validate project exists
-        const project = projectManager.getById(projectId);
-        if (!project) {
-            sendError(res, 404, `Project with ID "${projectId}" not found.`);
-            return;
-        }
+        const project = resolveProject(res, projectId);
+        if (project === undefined) return;
 
         // Validate workspace exists
-        try {
-            const ws = workspaceManager.getById(projectId, workspaceId);
-            if (ws === undefined) {
-                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
-                return;
-            }
-        } catch (err) {
-            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
-            return;
-        }
+        if (resolveWorkspace(res, projectId, workspaceId) === undefined) return;
 
         // Build per-repo status map from cache — no git I/O.
         const statusMap: WorkspaceStatusResponse = {};
@@ -100,23 +143,11 @@ export function registerStatusRoutes(
         const { id: projectId, wid: workspaceId } = params;
 
         // Validate project exists before doing any I/O.
-        const project = projectManager.getById(projectId);
-        if (!project) {
-            sendError(res, 404, `Project with ID "${projectId}" not found.`);
-            return;
-        }
+        const project = resolveProject(res, projectId);
+        if (project === undefined) return;
 
         // Validate workspace exists.
-        try {
-            const ws = workspaceManager.getById(projectId, workspaceId);
-            if (ws === undefined) {
-                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
-                return;
-            }
-        } catch (err) {
-            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
-            return;
-        }
+        if (resolveWorkspace(res, projectId, workspaceId) === undefined) return;
 
         // Refresh: pollingManager updates its cache with fresh git status.
         try {

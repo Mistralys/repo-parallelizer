@@ -167,7 +167,8 @@ function buildSut(projectsFolder: string): {
     const pm = new MockProjectManager();
     const stubOrchestrator = {} as never;
     const appConfig = { projectsFolder } as never;
-    registerWorkspaceRoutes(router, wm as never, stubOrchestrator, appConfig, pm as never);
+    const stubErrorLogManager = {} as never;
+    registerWorkspaceRoutes(router, wm as never, stubOrchestrator, appConfig, pm as never, stubErrorLogManager);
     return { router, wm, pm };
 }
 

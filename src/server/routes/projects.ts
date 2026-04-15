@@ -3,6 +3,7 @@ import type { Router } from '../router.js';
 import type { ProjectManager } from '../../models/project/project.manager.js';
 import { NotFoundError } from '../../errors.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
+import type { ProjectData } from '../../models/project/project.types.js';
 
 // ---------------------------------------------------------------------------
 // Route registration
@@ -31,6 +32,29 @@ export function registerProjectRoutes(
     router: Router,
     projectManager: ProjectManager,
 ): void {
+    /**
+     * Look up a project by ID.
+     *
+     * Sends a `404` response and returns `undefined` when the project
+     * cannot be found.
+     *
+     * @param res       - The outgoing HTTP response (used to send the 404 error).
+     * @param projectId - The ID of the project to look up.
+     * @returns The matching `ProjectData` on success, or `undefined` when a 404
+     *          has already been written to `res`.
+     */
+    function resolveProject(
+        res: ServerResponse,
+        projectId: string,
+    ): ProjectData | undefined {
+        const project = projectManager.getById(projectId);
+        if (project === undefined) {
+            sendError(res, 404, `Project with ID "${projectId}" not found.`);
+            return undefined;
+        }
+        return project;
+    }
+
     // ------------------------------------------------------------------
     // GET /api/projects — list all
     // ------------------------------------------------------------------
@@ -51,11 +75,8 @@ export function registerProjectRoutes(
         res: ServerResponse,
         params: Record<string, string>,
     ): void => {
-        const project = projectManager.getById(params['id']);
-        if (project === undefined) {
-            sendError(res, 404, `Project with ID "${params['id']}" not found.`);
-            return;
-        }
+        const project = resolveProject(res, params['id']);
+        if (project === undefined) return;
         sendJson(res, 200, project);
     });
 

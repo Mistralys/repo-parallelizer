@@ -2,9 +2,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Router } from '../router.js';
 import type { BranchOrchestrator } from '../../orchestration/branch-orchestrator.js';
 import type { WorkspaceManager } from '../../models/workspace/workspace.manager.js';
+// NotFoundError is used in the orchestrator catch block (GET branches handler).
 import { NotFoundError } from '../../errors.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
 import type { BranchInfo } from '../../git/git.types.js';
+import type { WorkspaceInfo } from '../../models/workspace/workspace.types.js';
 
 // ---------------------------------------------------------------------------
 // Response shape for the GET branches endpoint
@@ -41,6 +43,36 @@ export function registerBranchRoutes(
     orchestrator: BranchOrchestrator,
     workspaceManager: WorkspaceManager,
 ): void {
+    /**
+     * Look up a workspace by project and workspace ID.
+     *
+     * Sends a `404` response and returns `undefined` when the workspace
+     * (or its parent project) cannot be found.
+     *
+     * @param res         - The outgoing HTTP response (used to send the 404 error).
+     * @param projectId   - The ID of the parent project.
+     * @param workspaceId - The ID of the workspace to look up.
+     * @returns The matching `WorkspaceInfo` on success, or `undefined` when a 404
+     *          has already been written to `res`.
+     */
+    function resolveWorkspace(
+        res: ServerResponse,
+        projectId: string,
+        workspaceId: string,
+    ): WorkspaceInfo | undefined {
+        try {
+            const ws = workspaceManager.getById(projectId, workspaceId);
+            if (ws === undefined) {
+                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
+                return undefined;
+            }
+            return ws;
+        } catch (err) {
+            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
+            return undefined;
+        }
+    }
+
     // ------------------------------------------------------------------
     // GET /api/projects/:id/workspaces/:wid/branches
     //   Returns available branches per repository + compiled suggestions.
@@ -53,17 +85,7 @@ export function registerBranchRoutes(
         const { id: projectId, wid: workspaceId } = params;
 
         // Validate workspace existence before issuing git operations.
-        try {
-            const ws = workspaceManager.getById(projectId, workspaceId);
-            if (ws === undefined) {
-                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
-                return;
-            }
-        } catch (err) {
-            // getById throws when the project does not exist.
-            sendError(res, 404, err instanceof Error ? err.message : 'Project not found.');
-            return;
-        }
+        if (resolveWorkspace(res, projectId, workspaceId) === undefined) return;
 
         try {
             const branchMap = await orchestrator.getAvailableBranches(projectId, workspaceId);
@@ -98,16 +120,7 @@ export function registerBranchRoutes(
         const { id: projectId, wid: workspaceId } = params;
 
         // Validate workspace existence before touching the filesystem.
-        try {
-            const ws = workspaceManager.getById(projectId, workspaceId);
-            if (ws === undefined) {
-                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
-                return;
-            }
-        } catch (err) {
-            sendError(res, 404, err instanceof Error ? err.message : 'Project not found.');
-            return;
-        }
+        if (resolveWorkspace(res, projectId, workspaceId) === undefined) return;
 
         let body: unknown;
         try {

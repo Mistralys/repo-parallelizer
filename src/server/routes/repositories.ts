@@ -3,6 +3,7 @@ import type { Router } from '../router.js';
 import type { RepositoryManager } from '../../models/repository/repository.manager.js';
 import { NotFoundError } from '../../errors.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
+import type { Repository } from '../../models/repository/repository.types.js';
 
 // ---------------------------------------------------------------------------
 // Route registration
@@ -27,6 +28,29 @@ export function registerRepositoryRoutes(
     router: Router,
     repoManager: RepositoryManager,
 ): void {
+    /**
+     * Look up a repository by ID.
+     *
+     * Sends a `404` response and returns `undefined` when the repository
+     * cannot be found.
+     *
+     * @param res          - The outgoing HTTP response (used to send the 404 error).
+     * @param repositoryId - The ID of the repository to look up.
+     * @returns The matching `Repository` on success, or `undefined` when a 404
+     *          has already been written to `res`.
+     */
+    function resolveRepository(
+        res: ServerResponse,
+        repositoryId: string,
+    ): Repository | undefined {
+        const repo = repoManager.getById(repositoryId);
+        if (repo === undefined) {
+            sendError(res, 404, `Repository with ID "${repositoryId}" not found.`);
+            return undefined;
+        }
+        return repo;
+    }
+
     // ------------------------------------------------------------------
     // GET /api/repositories — list all
     // ------------------------------------------------------------------
@@ -47,11 +71,8 @@ export function registerRepositoryRoutes(
         res: ServerResponse,
         params: Record<string, string>,
     ): void => {
-        const repo = repoManager.getById(params['id']);
-        if (repo === undefined) {
-            sendError(res, 404, `Repository with ID "${params['id']}" not found.`);
-            return;
-        }
+        const repo = resolveRepository(res, params['id']);
+        if (repo === undefined) return;
         sendJson(res, 200, repo);
     });
 

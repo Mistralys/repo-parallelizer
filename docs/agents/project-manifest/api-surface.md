@@ -666,6 +666,29 @@ function startServer(config: ServerConfig): Promise<void>
 function stopServer(): Promise<void>
 ```
 
+### Application Launcher (`app-launcher.ts`)
+
+> **Internal module** — not re-exported from `src/server/index.ts`. Import directly when needed:
+> `import { launchApplication } from './app-launcher.js'`
+
+```typescript
+function launchApplication(command: string, args: string[]): Promise<void>
+```
+
+Launches an external application as a detached, fire-and-forget child process. The spawned process runs independently of the Node.js parent (`detached: true`, `stdio: 'ignore'`, `child.unref()`).
+
+**Cross-platform behaviour:**
+- **Windows (`process.platform === 'win32'`):** `shell: true` — routes through `cmd.exe` so `.cmd`/`.bat` launchers (e.g. `code.cmd`) are found on PATH.
+- **All other platforms:** `shell: false` — direct process execution, no intermediate shell.
+
+**Throws:**
+- `Error('Failed to launch application: command must not be empty.')` — when `command` is empty or blank.
+- `Error('Failed to launch application "<command>": <os-error-message>')` — when the OS-level spawn fails (e.g. command not found on PATH).
+
+**Security note (Windows):** When `shell: true` is active, shell metacharacters in `command` or `args` elements can be interpreted by `cmd.exe`. Call sites **must** validate inputs against an allowlist of known application commands (e.g. `'code'`, `'github'`) before calling this function.
+
+---
+
 ### Router (`router.ts`)
 
 ```typescript
@@ -733,7 +756,15 @@ function registerRepositoryRoutes(router: Router, repoManager: RepositoryManager
 function registerProjectRoutes(router: Router, projectManager: ProjectManager): void
 
 // workspaces.ts
-function registerWorkspaceRoutes(router: Router, workspaceManager: WorkspaceManager, workspaceOrchestrator: WorkspaceOrchestrator, appConfig: AppConfig): void
+function registerWorkspaceRoutes(
+    router: Router,
+    workspaceManager: WorkspaceManager,
+    workspaceOrchestrator: WorkspaceOrchestrator,
+    appConfig: AppConfig,
+    projectManager: ProjectManager,
+    errorLogManager: ErrorLogManager,
+    launchFn?: (command: string, args: string[]) => Promise<void>,  // test-only; defaults to launchApplication
+): void
 
 // branches.ts
 function registerBranchRoutes(router: Router, orchestrator: BranchOrchestrator, workspaceManager: WorkspaceManager): void

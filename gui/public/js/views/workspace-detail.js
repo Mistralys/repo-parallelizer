@@ -4,16 +4,21 @@
  * Renders the full detail page for a single workspace inside a project:
  *   - Workspace header: ID, description, breadcrumb link back to the project.
  *   - Repository status table: one row per repository, showing current branch,
- *     a color-coded Git status badge, and an error/loading indicator for repos
- *     with no status data yet.
+ *     a color-coded Git status badge, an error/loading indicator for repos
+ *     with no status data yet, and an Actions column containing an "Open"
+ *     button that opens the repository in GitHub Desktop via
+ *     `api.workspaces.launch.githubDesktop(projectId, wid, repoId)`.
  *   - Live polling: status badges refresh in-place via a 1-second countdown
  *     interval that triggers a poll every 10 seconds. A visible countdown
  *     label and a "Refresh Now" button provide user control. The interval
  *     is cleared via the cleanup function returned from
  *     `renderWorkspaceDetail`, which the router calls before navigating
  *     away.
- *   - Actions: "Switch Branches" navigation button, "Rename Workspace" (disabled
- *     for STABLE), "Delete Workspace" (disabled for STABLE).
+ *   - Actions: "Open in VS Code" button (shown only when workspace is
+ *     initialised, dynamically added after a successful Setup — calls
+ *     `api.workspaces.launch.vscode`), "Switch Branches" navigation button,
+ *     "Rename Workspace" (disabled for STABLE), "Delete Workspace" (disabled
+ *     for STABLE).
  *
  * ## Router integration
  *
@@ -158,12 +163,20 @@ async function runSetup(projectId, workspaceId, successMessage) {
  * The row uses `data-repo-id` on the badge container so the polling update
  * can locate and replace badge contents in-place.
  *
- * @param {string} repoId
- * @param {string} repoName
- * @param {Object|null} statusInfo - GitStatusInfo or null.
+ * @param {string} repoId      - Unique repository identifier (e.g. `"my-repo"`).
+ * @param {string} repoName    - Human-readable display name; falls back to
+ *                               `repoId` when no name is available.
+ * @param {Object|null} statusInfo - GitStatusInfo object from the API, or
+ *                               `null` when status data is not yet available.
+ * @param {string} projectId   - ID of the parent project. Passed directly to
+ *                               `api.workspaces.launch.githubDesktop()` when the
+ *                               "Open" button is clicked.
+ * @param {string} wid         - ID of the parent workspace. Passed directly to
+ *                               `api.workspaces.launch.githubDesktop()` when the
+ *                               "Open" button is clicked.
  * @returns {HTMLTableRowElement}
  */
-function buildRepoStatusRow(repoId, repoName, statusInfo) {
+function buildRepoStatusRow(repoId, repoName, statusInfo, projectId, wid) {
     const tr = document.createElement('tr');
     tr.dataset.repoId = repoId;
 
@@ -190,7 +203,7 @@ function buildRepoStatusRow(repoId, repoName, statusInfo) {
         : '—';
     tr.appendChild(branchCell);
 
-    // Status badge cell
+    // Status badge cell (index 2 — must stay at this position)
     const badgeCell = document.createElement('td');
     badgeCell.className = 'repo-badge-cell';
 
@@ -199,6 +212,32 @@ function buildRepoStatusRow(repoId, repoName, statusInfo) {
     badgeWrapper.appendChild(createStatusBadge(statusInfo || null));
     badgeCell.appendChild(badgeWrapper);
     tr.appendChild(badgeCell);
+
+    // Actions cell (index 3) — "Open" button for GitHub Desktop
+    const actionsCell = document.createElement('td');
+    actionsCell.className = 'repo-actions-cell';
+
+    const openBtn = document.createElement('button');
+    openBtn.type      = 'button';
+    openBtn.className = 'btn btn-secondary btn-sm';
+    openBtn.textContent = 'Open';
+    openBtn.title = 'Open this repository in GitHub Desktop.';
+
+    openBtn.addEventListener('click', async () => {
+        openBtn.disabled    = true;
+        openBtn.textContent = 'Opening…';
+        try {
+            await api.workspaces.launch.githubDesktop(projectId, wid, repoId);
+        } catch (err) {
+            showToast(err.message || 'Failed to open GitHub Desktop.', 'error');
+        } finally {
+            openBtn.disabled    = false;
+            openBtn.textContent = 'Open';
+        }
+    });
+
+    actionsCell.appendChild(openBtn);
+    tr.appendChild(actionsCell);
 
     return tr;
 }
@@ -352,13 +391,51 @@ function buildRenameForm(projectId, workspace, renameBtn) {
 }
 
 /**
+ * Build the "Open in VS Code" button and wire its click handler.
+ *
+ * The button calls `api.workspaces.launch.vscode` and shows a success or error
+ * toast based on the API response. It is only rendered when the workspace is
+ * initialised (`workspace.initialized === true`).
+ *
+ * @param {string} projectId
+ * @param {string} workspaceId
+ * @returns {HTMLButtonElement}
+ */
+function buildOpenVscodeButton(projectId, workspaceId) {
+    const btn = document.createElement('button');
+    btn.type      = 'button';
+    btn.className = 'btn btn-secondary btn-sm';
+    btn.textContent = 'Open in VS Code';
+    btn.title = 'Open this workspace folder in Visual Studio Code.';
+
+    btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        btn.textContent = 'Opening…';
+
+        try {
+            await api.workspaces.launch.vscode(projectId, workspaceId);
+            showToast('VS Code launched for this workspace.', 'success');
+        } catch (err) {
+            showToast(err.message || 'Failed to open VS Code.', 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Open in VS Code';
+        }
+    });
+
+    return btn;
+}
+
+/**
  * Build the workspace header section — compact layout with breadcrumb,
  * workspace name, and a meta card for description + management actions.
  *
  * @param {string} projectId
  * @param {{ id: string, description: string, initialized: boolean, folderPath: string }} workspace
  * @param {boolean} isStable
- * @param {function(): void} [onSetupSuccess] - Called after a successful setup to trigger refresh.
+ * @param {function(): void} [onSetupSuccess] - Called after a successful workspace setup, *after* the
+ *   DOM mutation is complete (setupBtn removed from mgmtRow, vscodeBtn inserted before renameBtn,
+ *   and `workspace.initialized` set to `true`). Intended to trigger a status refresh in the caller.
  * @returns {HTMLElement}
  */
 function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
@@ -424,6 +501,19 @@ function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
     const mgmtRow = document.createElement('div');
     mgmtRow.className = 'workspace-mgmt-row';
 
+    // Rename button — declared early so the setupBtn click handler can reference
+    // it without a forward reference. Appended to mgmtRow after conditional buttons
+    // (Setup / VS Code) so the visual order is: [Setup|VS Code] → Rename → Delete.
+    const renameBtn = document.createElement('button');
+    renameBtn.type      = 'button';
+    renameBtn.className = 'btn btn-secondary btn-sm';
+    renameBtn.textContent = 'Rename';
+
+    if (isStable) {
+        renameBtn.disabled = true;
+        renameBtn.title    = 'The STABLE workspace cannot be renamed.';
+    }
+
     // Setup button (if not initialized)
     if (!workspace.initialized) {
         const setupBtn = document.createElement('button');
@@ -440,9 +530,12 @@ function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
                 await runSetup(projectId, workspace.id,
                     `Workspace "${workspace.id}" set up successfully.`);
 
-                // Update DOM in-place — remove setup button and notify caller
+                // Update DOM in-place — remove setup button, insert "Open in VS Code",
+                // update state flag, and notify caller.
                 setupBtn.remove();
                 workspace.initialized = true;
+                const vscodeBtn = buildOpenVscodeButton(projectId, workspace.id);
+                mgmtRow.insertBefore(vscodeBtn, renameBtn);
                 if (onSetupSuccess) onSetupSuccess();
             } catch (err) {
                 showToast(err.message || 'Failed to set up workspace.', 'error');
@@ -453,16 +546,11 @@ function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
         mgmtRow.appendChild(setupBtn);
     }
 
-    // Rename button (disabled for STABLE)
-    const renameBtn = document.createElement('button');
-    renameBtn.type      = 'button';
-    renameBtn.className = 'btn btn-secondary btn-sm';
-    renameBtn.textContent = 'Rename';
-
-    if (isStable) {
-        renameBtn.disabled = true;
-        renameBtn.title    = 'The STABLE workspace cannot be renamed.';
+    // "Open in VS Code" button — shown only when the workspace is initialized
+    if (workspace.initialized) {
+        mgmtRow.appendChild(buildOpenVscodeButton(projectId, workspace.id));
     }
+
     mgmtRow.appendChild(renameBtn);
 
     // Delete button (disabled for STABLE)
@@ -520,9 +608,11 @@ function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
  *
  * @param {Array<{ repoId: string, repoName: string }>} repos
  * @param {Record<string, Object|null>} statusMap
+ * @param {string} projectId - Project ID, threaded to each row's "Open" button.
+ * @param {string} wid - Workspace ID, threaded to each row's "Open" button.
  * @returns {{ section: HTMLElement, tbody: HTMLTableSectionElement }}
  */
-function buildStatusTableSection(repos, statusMap) {
+function buildStatusTableSection(repos, statusMap, projectId, wid) {
     const section = document.createElement('section');
     section.className = 'workspace-status-section';
 
@@ -539,7 +629,7 @@ function buildStatusTableSection(repos, statusMap) {
 
     const thead = document.createElement('thead');
     const htr   = document.createElement('tr');
-    ['Repository', 'Branch', 'Status'].forEach((label) => {
+    ['Repository', 'Branch', 'Status', 'Actions'].forEach((label) => {
         const th = document.createElement('th');
         th.textContent = label;
         htr.appendChild(th);
@@ -551,7 +641,7 @@ function buildStatusTableSection(repos, statusMap) {
 
     repos.forEach(({ repoId, repoName }) => {
         const statusInfo = statusMap[repoId] ?? null;
-        tbody.appendChild(buildRepoStatusRow(repoId, repoName, statusInfo));
+        tbody.appendChild(buildRepoStatusRow(repoId, repoName, statusInfo, projectId, wid));
     });
 
     table.appendChild(tbody);
@@ -773,7 +863,7 @@ export function renderWorkspaceDetail(container, params) {
             : DEFAULT_POLL_INTERVAL_MS;
 
         // Build status table first to obtain tbody reference for helpers.
-        const { section: statusSection, tbody } = buildStatusTableSection(repos, statusMap || {});
+        const { section: statusSection, tbody } = buildStatusTableSection(repos, statusMap || {}, projectId, wid);
 
         // -------------------------------------------------------------------
         // Refresh helpers (referenced by toolbar, polling, and setup)

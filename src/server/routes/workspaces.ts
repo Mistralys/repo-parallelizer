@@ -6,10 +6,13 @@ import type { WorkspaceManager } from '../../models/workspace/workspace.manager.
 import type { WorkspaceOrchestrator } from '../../orchestration/workspace-orchestrator.js';
 import type { ProjectManager } from '../../models/project/project.manager.js';
 import type { AppConfig } from '../../config/config.types.js';
+import type { ErrorLogManager } from '../../error-log/error-log.manager.js';
+import type { WorkspaceInfo } from '../../models/workspace/workspace.types.js';
 import { NotFoundError } from '../../errors.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
 import { generateWorkspaceFile, getWorkspaceFilePath } from '../../orchestration/vscode-workspace.js';
 import { checkWorkspaceHealth } from '../../orchestration/workspace-health.js';
+import { launchApplication } from '../app-launcher.js';
 
 // ---------------------------------------------------------------------------
 // Route registration
@@ -19,20 +22,23 @@ import { checkWorkspaceHealth } from '../../orchestration/workspace-health.js';
  * Registers workspace routes for the `/api/projects/:id/workspaces` resource
  * group on the provided `Router` instance.
  *
- * All handlers delegate to the supplied `WorkspaceManager` and map results
- * or errors to the appropriate HTTP status codes:
+ * Handlers delegate to the supplied `WorkspaceManager`, `ProjectManager`,
+ * and (on launch failure) `ErrorLogManager`, mapping results or errors to the
+ * appropriate HTTP status codes:
  *
- * | Method | Path                                                         | Success | Failure     |
- * |--------|--------------------------------------------------------------|---------|-------------|
- * | GET    | /api/projects/:id/workspaces                                | 200     | 404         |
- * | POST   | /api/projects/:id/workspaces                                | 201     | 400/404     |
- * | GET    | /api/projects/:id/workspaces/:wid                           | 200     | 404         |
- * | PUT    | /api/projects/:id/workspaces/:wid                           | 200     | 400/404     |
- * | PUT    | /api/projects/:id/workspaces/:wid/rename                    | 200     | 400/404     |
- * | DELETE | /api/projects/:id/workspaces/:wid                           | 204     | 404         |
- * | POST   | /api/projects/:id/workspaces/:wid/setup                     | 200     | 400/404/500 |
- * | GET    | /api/projects/:id/workspaces/:wid/health                    | 200     | 404         |
- * | POST   | /api/projects/:id/workspaces/:wid/regenerate-workspace-file | 200     | 400/404/500 |
+ * | Method | Path                                                              | Success | Failure     |
+ * |--------|-------------------------------------------------------------------|---------|-------------|
+ * | GET    | /api/projects/:id/workspaces                                     | 200     | 404         |
+ * | POST   | /api/projects/:id/workspaces                                     | 201     | 400/404     |
+ * | GET    | /api/projects/:id/workspaces/:wid                                | 200     | 404         |
+ * | PUT    | /api/projects/:id/workspaces/:wid                                | 200     | 400/404     |
+ * | PUT    | /api/projects/:id/workspaces/:wid/rename                         | 200     | 400/404     |
+ * | DELETE | /api/projects/:id/workspaces/:wid                                | 204     | 404         |
+ * | POST   | /api/projects/:id/workspaces/:wid/setup                          | 200     | 400/404/500 |
+ * | GET    | /api/projects/:id/workspaces/:wid/health                         | 200     | 404         |
+ * | POST   | /api/projects/:id/workspaces/:wid/regenerate-workspace-file      | 200     | 400/404/500 |
+ * | POST   | /api/projects/:id/workspaces/:wid/launch/vscode                  | 200     | 400/404/500 |
+ * | POST   | /api/projects/:id/workspaces/:wid/launch/github-desktop/:rid     | 200     | 400/404/500 |
  */
 export function registerWorkspaceRoutes(
     router: Router,
@@ -40,6 +46,19 @@ export function registerWorkspaceRoutes(
     workspaceOrchestrator: WorkspaceOrchestrator,
     appConfig: AppConfig,
     projectManager: ProjectManager,
+    errorLogManager: ErrorLogManager,
+    /**
+     * Overrides the default `launchApplication` function.
+     *
+     * **For testing only.** Production callers must not pass this argument.
+     * When omitted, the real `launchApplication` (from `app-launcher.ts`) is used.
+     *
+     * @param command - Application command name (e.g. `'code'`, `'github'`).
+     * @param args    - Arguments passed to the spawned process.
+     * @returns       A Promise that resolves when the application launches successfully,
+     *                or rejects with an `Error` if the OS-level spawn fails.
+     */
+    launchFn: (command: string, args: string[]) => Promise<void> = launchApplication,
 ): void {
 
     // Helper: compute absolute workspace folder path.
@@ -51,6 +70,42 @@ export function registerWorkspaceRoutes(
     function withInitialized<T extends { ProjectID: string; WorkspaceID: string }>(ws: T): T & { Initialized: boolean; FolderPath: string } {
         const wsFolder = workspaceFolder(ws.ProjectID, ws.WorkspaceID);
         return { ...ws, Initialized: fs.existsSync(wsFolder), FolderPath: wsFolder };
+    }
+
+    /**
+     * Look up a workspace by project and workspace ID.
+     *
+     * Sends a `404` response and returns `undefined` when the workspace (or its
+     * parent project) cannot be found, so callers can use a one-line early-exit
+     * guard:
+     *
+     * ```ts
+     * const workspace = resolveWorkspace(res, projectId, workspaceId);
+     * if (workspace === undefined) return; // 404 already sent
+     * ```
+     *
+     * @param res         - The outgoing HTTP response (used to send the 404 error).
+     * @param projectId   - The ID of the parent project.
+     * @param workspaceId - The ID of the workspace to look up.
+     * @returns The matching `WorkspaceInfo` on success, or `undefined` when a 404
+     *          has already been written to `res`.
+     */
+    function resolveWorkspace(
+        res: ServerResponse,
+        projectId: string,
+        workspaceId: string,
+    ): WorkspaceInfo | undefined {
+        try {
+            const ws = workspaceManager.getById(projectId, workspaceId);
+            if (ws === undefined) {
+                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
+                return undefined;
+            }
+            return ws;
+        } catch (err) {
+            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
+            return undefined;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -124,17 +179,9 @@ export function registerWorkspaceRoutes(
         res: ServerResponse,
         params: Record<string, string>,
     ): void => {
-        try {
-            const workspace = workspaceManager.getById(params['id'], params['wid']);
-            if (workspace === undefined) {
-                sendError(res, 404, `Workspace "${params['wid']}" not found in project "${params['id']}".`);
-                return;
-            }
-            sendJson(res, 200, withInitialized(workspace));
-        } catch (err) {
-            // getById throws when the project does not exist
-            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
-        }
+        const workspace = resolveWorkspace(res, params['id'], params['wid']);
+        if (workspace === undefined) return;
+        sendJson(res, 200, withInitialized(workspace));
     });
 
     // ------------------------------------------------------------------
@@ -247,16 +294,7 @@ export function registerWorkspaceRoutes(
         const workspaceId = params['wid'];
 
         // Verify workspace data entry exists
-        try {
-            const ws = workspaceManager.getById(projectId, workspaceId);
-            if (ws === undefined) {
-                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
-                return;
-            }
-        } catch (err) {
-            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
-            return;
-        }
+        if (resolveWorkspace(res, projectId, workspaceId) === undefined) return;
 
         try {
             const result = await workspaceOrchestrator.createWorkspace(projectId, workspaceId);
@@ -287,16 +325,7 @@ export function registerWorkspaceRoutes(
         }
 
         // Verify workspace data entry exists.
-        try {
-            const ws = workspaceManager.getById(projectId, workspaceId);
-            if (ws === undefined) {
-                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
-                return;
-            }
-        } catch (err) {
-            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
-            return;
-        }
+        if (resolveWorkspace(res, projectId, workspaceId) === undefined) return;
 
         // Verify workspace folder exists on disk (workspace must be initialized).
         const wsFolder = workspaceFolder(projectId, workspaceId);
@@ -340,16 +369,7 @@ export function registerWorkspaceRoutes(
         }
 
         // Verify workspace data entry exists.
-        try {
-            const ws = workspaceManager.getById(projectId, workspaceId);
-            if (ws === undefined) {
-                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
-                return;
-            }
-        } catch (err) {
-            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
-            return;
-        }
+        if (resolveWorkspace(res, projectId, workspaceId) === undefined) return;
 
         // Uninitialized workspaces are considered healthy — they have not been
         // set up yet, so structural checks are not applicable.
@@ -366,5 +386,96 @@ export function registerWorkspaceRoutes(
             project.Repositories,
         );
         sendJson(res, 200, report);
+    });
+
+    // ------------------------------------------------------------------
+    // POST /api/projects/:id/workspaces/:wid/launch/vscode
+    // Opens the workspace's .code-workspace file in VS Code.
+    // ------------------------------------------------------------------
+    router.post('/api/projects/:id/workspaces/:wid/launch/vscode', async (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const projectId   = params['id'];
+        const workspaceId = params['wid'];
+
+        // Verify workspace data entry exists.
+        if (resolveWorkspace(res, projectId, workspaceId) === undefined) return;
+
+        // Verify the .code-workspace file exists on disk.
+        const wsFilePath = getWorkspaceFilePath(appConfig.projectsFolder, projectId, workspaceId);
+        if (!fs.existsSync(wsFilePath)) {
+            sendError(res, 400, 'Workspace file does not exist. Run setup first.');
+            return;
+        }
+
+        try {
+            await launchFn('code', [wsFilePath]);
+            sendJson(res, 200, { success: true });
+        } catch (err) {
+            const message = err instanceof Error ? err.message : 'Failed to launch VS Code.';
+            errorLogManager.append({
+                Severity: 'error',
+                Source: 'app-launcher',
+                Operation: 'launch-vscode',
+                Context: { ProjectId: projectId, WorkspaceId: workspaceId },
+                Message: message,
+            });
+            sendError(res, 500, message);
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // POST /api/projects/:id/workspaces/:wid/launch/github-desktop/:rid
+    // Opens a repository directory in GitHub Desktop.
+    // ------------------------------------------------------------------
+    router.post('/api/projects/:id/workspaces/:wid/launch/github-desktop/:rid', async (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const projectId   = params['id'];
+        const workspaceId = params['wid'];
+        const repoId      = params['rid'];
+
+        // Verify project exists and contains the requested repository.
+        const project = projectManager.getById(projectId);
+        if (!project) {
+            sendError(res, 404, `Project "${projectId}" not found.`);
+            return;
+        }
+        // repoId is validated against the project allow-list here, which also prevents
+        // path traversal: only IDs that were registered (kebab-case validated at creation
+        // time) can match, so a segment like '..' can never reach the filesystem join below.
+        if (!project.Repositories.includes(repoId)) {
+            sendError(res, 404, `Repository "${repoId}" not found in project "${projectId}".`);
+            return;
+        }
+
+        // Verify workspace data entry exists.
+        if (resolveWorkspace(res, projectId, workspaceId) === undefined) return;
+
+        // Verify the repository directory exists on disk.
+        const repoDir = path.join(appConfig.projectsFolder, projectId, workspaceId, repoId);
+        if (!fs.existsSync(repoDir)) {
+            sendError(res, 400, 'Repository directory does not exist. Run setup first.');
+            return;
+        }
+
+        try {
+            await launchFn('github', [repoDir]);
+            sendJson(res, 200, { success: true });
+        } catch (err) {
+            const message = err instanceof Error ? err.message : 'Failed to launch GitHub Desktop.';
+            errorLogManager.append({
+                Severity: 'error',
+                Source: 'app-launcher',
+                Operation: 'launch-github-desktop',
+                Context: { ProjectId: projectId, WorkspaceId: workspaceId, RepositoryId: repoId },
+                Message: message,
+            });
+            sendError(res, 500, message);
+        }
     });
 }
