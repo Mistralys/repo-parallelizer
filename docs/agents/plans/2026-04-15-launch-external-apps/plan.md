@@ -97,7 +97,7 @@ Add two new route handlers inside the registration function:
 3. Verify the file exists on disk (`fs.existsSync`). Return 400 with `"Workspace file does not exist. Run setup first."` if absent.
 4. Call `launchApplication('code', [filePath])`.
 5. On success: `sendJson(res, 200, { success: true })`.
-6. On failure: log to error log (`source: 'app-launcher'`, `operation: 'open-vscode'`), `sendError(res, 500, descriptive message)`.
+6. On failure: log to error log (`Source: 'app-launcher'`, `Operation: 'open-vscode'`, `Severity: 'error'`, `Context: { ProjectId, WorkspaceId }`, `Message: '...'`), `sendError(res, 500, descriptive message)`. **Note:** `ErrorLogManager.append()` accepts `Omit<ErrorLogEntry, 'Id' | 'Timestamp'>` — all fields use **PascalCase** (`Source`, `Operation`, `Severity`, `Context`, `Message`).
 
 **`POST /api/projects/:id/workspaces/:wid/launch/github-desktop/:rid`:**
 1. Look up workspace via `workspaceManager.getById(params.id, params.wid)`. Return 404 if not found.
@@ -106,7 +106,7 @@ Add two new route handlers inside the registration function:
 4. Verify the directory exists on disk. Return 400 with `"Repository directory does not exist. Run setup first."` if absent.
 5. Call `launchApplication('github', [repoPath])`.
 6. On success: `sendJson(res, 200, { success: true })`.
-7. On failure: log to error log (`source: 'app-launcher'`, `operation: 'open-github-desktop'`), `sendError(res, 500, descriptive message)`.
+7. On failure: log to error log (`Source: 'app-launcher'`, `Operation: 'open-github-desktop'`, `Severity: 'error'`, `Context: { ProjectId, WorkspaceId, RepositoryId }`, `Message: '...'`), `sendError(res, 500, descriptive message)`.
 
 ### Step 3 — Modify `src/server/index.ts`
 
@@ -114,14 +114,22 @@ Pass `errorLogManager` as a new parameter to `registerWorkspaceRoutes()`.
 
 ### Step 4 — Modify `gui/public/js/api.js`
 
-Add two new methods to the `api.workspaces` namespace:
+Add two new methods to the `api.workspaces` namespace.
+
+**Important:** The `request()` helper signature is `request(method, url, body)` — NOT `request(url, options)`. All path parameters must be wrapped in `encodeURIComponent()`, consistent with every existing method.
 
 ```javascript
 openVscode(projectId, wid) {
-    return request(`/api/projects/${projectId}/workspaces/${wid}/launch/vscode`, { method: 'POST' });
+    return request(
+        'POST',
+        `/api/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wid)}/launch/vscode`,
+    );
 },
 openGithubDesktop(projectId, wid, repoId) {
-    return request(`/api/projects/${projectId}/workspaces/${wid}/launch/github-desktop/${repoId}`, { method: 'POST' });
+    return request(
+        'POST',
+        `/api/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wid)}/launch/github-desktop/${encodeURIComponent(repoId)}`,
+    );
 },
 ```
 
@@ -133,7 +141,7 @@ In `buildHeaderSection()`, add a new button to `mgmtRow` (after the Setup button
 - Label: `Open in VS Code`
 - Is shown only when `workspace.initialized` is `true`.
 - On click: calls `api.workspaces.openVscode(projectId, workspace.id)`. Shows a success toast on success, an error toast on failure.
-- After a successful setup (via `onSetupSuccess`), the button should be dynamically inserted into the management row.
+- After a successful setup (via `onSetupSuccess`), the button must be dynamically inserted into the management row. **Implementation note:** `onSetupSuccess` calls `doRefresh()` (which only updates git status) — it does **not** re-render the header. Therefore, the button must be explicitly created and appended to `mgmtRow` inside the setup success handler, similar to how the Setup button removes itself via `setupBtn.remove()`. Store a reference to `mgmtRow` in the closure so the insertion point is accessible from the setup success callback.
 
 **5b. Add "Open" button per repository row.**
 
@@ -142,7 +150,7 @@ In `buildRepoStatusRow()`:
 - Render a small "Open" button (`btn btn-secondary btn-sm`).
 - On click: calls `api.workspaces.openGithubDesktop(projectId, workspaceId, repoId)`. Shows an error toast on failure.
 
-This requires threading `projectId` and `workspaceId` through to `buildRepoStatusRow()` (currently it only receives `repoId`, `repoName`, and `statusInfo`).
+This requires threading `projectId` and `wid` through to `buildRepoStatusRow()` (currently it only receives `repoId`, `repoName`, and `statusInfo`). **Note:** The workspace detail view uses the variable name `wid` (not `workspaceId`), extracted from `params.wid` at the top of `renderWorkspaceDetail()`.
 
 In `buildStatusTableSection()`:
 - Add a 4th `<th>` header with an empty label (or visually hidden "Actions" for accessibility).
