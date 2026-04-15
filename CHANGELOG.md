@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.5.0 - Branch Quick-Switch and Browse Button
+- GUI: Added branch quick-switch popover to switch repo branches from the workspace detail view.
+- GUI: Added "Browse" button per repository row linking to a configurable webserver URL.
+- GUI: Added Webserver URL section to the settings page.
+- Config: Added `webserverUrl` field with API endpoints for reading and persisting the value.
+- Docs: Trimmed README to essential content.
+
 ## 0.4.0 - Launch External Apps
 - Server: Added cross-platform external app launcher with detached process spawning.
 - GUI: Added "Open in VS Code" button on workspace detail page.
