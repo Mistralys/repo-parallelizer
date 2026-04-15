@@ -389,6 +389,10 @@ main {
     font-size: var(--font-size-xs);
 }
 
+.repo-actions-cell button + button {
+    margin-left: 6px;
+}
+
 .btn-icon {
     padding: 6px;
     border: none;
