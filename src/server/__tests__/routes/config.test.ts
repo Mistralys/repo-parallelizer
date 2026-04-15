@@ -783,3 +783,203 @@ test('PUT /api/config/polling: returns 400 when seconds exceeds 86400', async ()
     assert.ok(body.error.includes('86400'), 'error must mention max value');
     assert.ok(body.error.includes('86401'), 'error must echo received value');
 });
+
+// ---------------------------------------------------------------------------
+// GET /api/config/webserver-url
+// ---------------------------------------------------------------------------
+
+test('GET /api/config/webserver-url: returns null when not configured', () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('GET', '/api/config/webserver-url');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { webserverUrl: string | null };
+    assert.strictEqual(body.webserverUrl, null);
+});
+
+test('GET /api/config/webserver-url: returns the configured value', () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig({ webserverUrl: 'http://localhost:8080' });
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('GET', '/api/config/webserver-url');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { webserverUrl: string | null };
+    assert.strictEqual(body.webserverUrl, 'http://localhost:8080');
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/config/webserver-url
+// ---------------------------------------------------------------------------
+
+test('PUT /api/config/webserver-url: returns 400 when body is not an object', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/webserver-url', 'not-an-object');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+});
+
+test('PUT /api/config/webserver-url: returns 400 when url field is missing', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/webserver-url', {});
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+    const body = JSON.parse(mock.body) as { error: string };
+    assert.ok(body.error.includes('"url"'), 'error must mention field name');
+});
+
+test('PUT /api/config/webserver-url: returns 400 when url is a number', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/webserver-url', { url: 123 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+});
+
+test('PUT /api/config/webserver-url: persists a valid URL and returns it', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/webserver-url', { url: 'http://localhost:8080' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { webserverUrl: string | null };
+    assert.strictEqual(body.webserverUrl, 'http://localhost:8080');
+    assert.strictEqual(appConfig.webserverUrl, 'http://localhost:8080');
+
+    const saved = readConfigFile(configPath);
+    assert.strictEqual(saved['webserverUrl'], 'http://localhost:8080');
+});
+
+test('PUT /api/config/webserver-url: strips trailing slashes before persisting', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/webserver-url', { url: 'http://localhost:8080///' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { webserverUrl: string | null };
+    assert.strictEqual(body.webserverUrl, 'http://localhost:8080');
+});
+
+test('PUT /api/config/webserver-url: empty string clears the setting', async () => {
+    const configPath = makeConfigFile({ webserverUrl: 'http://localhost:8080' });
+    const appConfig = makeAppConfig({ webserverUrl: 'http://localhost:8080' });
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/webserver-url', { url: '' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { webserverUrl: string | null };
+    assert.strictEqual(body.webserverUrl, null);
+    assert.strictEqual(appConfig.webserverUrl, undefined);
+
+    const saved = readConfigFile(configPath);
+    assert.ok(!Object.hasOwn(saved, 'webserverUrl'), 'webserverUrl should be absent after clearing');
+});
+
+test('PUT /api/config/webserver-url: whitespace-only string clears the setting', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig({ webserverUrl: 'http://localhost:8080' });
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/webserver-url', { url: '   ' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { webserverUrl: string | null };
+    assert.strictEqual(body.webserverUrl, null);
+});
+
+test('PUT /api/config/webserver-url: rejects javascript: scheme with 400', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/webserver-url', { url: 'javascript:alert(1)' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+    const body = JSON.parse(mock.body) as { error: string };
+    assert.ok(body.error.includes('javascript'), 'error must mention the rejected scheme');
+});
+
+test('PUT /api/config/webserver-url: rejects data: scheme with 400', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/webserver-url', { url: 'data:text/html,<h1>test</h1>' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+    const body = JSON.parse(mock.body) as { error: string };
+    assert.ok(body.error.includes('data'), 'error must mention the rejected scheme');
+});
+
+test('PUT /api/config/webserver-url: rejects vbscript: scheme with 400', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/webserver-url', { url: 'vbscript:msgbox("xss")' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+    const body = JSON.parse(mock.body) as { error: string };
+    assert.ok(body.error.includes('vbscript'), 'error must mention the rejected scheme');
+});

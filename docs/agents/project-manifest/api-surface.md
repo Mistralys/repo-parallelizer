@@ -27,6 +27,7 @@ interface AppConfig {
     gitPollingIntervalSeconds: number; // default: 30
     gitCredentials?: Record<string, string>; // hostname → PAT/password; absent = public repos only
     maxErrorLogEntries?: number;  // default: 500 — FIFO eviction cap for error log
+    webserverUrl?: string;  // base URL of local webserver (e.g. http://localhost:8080); absent = Browse button hidden
 }
 ```
 

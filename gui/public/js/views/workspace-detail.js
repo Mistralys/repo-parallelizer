@@ -158,27 +158,54 @@ async function runSetup(projectId, workspaceId, successMessage) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Build a branch-switch trigger `<button>` styled as inline text.
+ *
+ * Extracted to avoid duplicating the element setup between `buildRepoStatusRow`
+ * (initial render) and `updateStatusTable` (polling updates). The click handler
+ * is wired by the caller so it can close over a fresh `trigger` reference.
+ *
+ * @param {string} branchName - Branch name shown as the button label.
+ * @param {string} ariaLabel  - Accessible label for screen-readers.
+ * @returns {HTMLButtonElement}
+ */
+function makeBranchTrigger(branchName, ariaLabel) {
+    const btn = document.createElement('button');
+    btn.type      = 'button';
+    btn.className = 'branch-switch-trigger';
+    btn.textContent = branchName;
+    btn.setAttribute('aria-label', ariaLabel);
+    return btn;
+}
+
+/**
  * Build the status `<tbody>` row for a single repository.
  *
  * The row uses `data-repo-id` on the badge container so the polling update
  * can locate and replace badge contents in-place.
  *
- * @param {string} repoId      - Unique repository identifier (e.g. `"my-repo"`).
- * @param {string} repoName    - Human-readable display name; falls back to
- *                               `repoId` when no name is available.
- * @param {Object|null} statusInfo - GitStatusInfo object from the API, or
- *                               `null` when status data is not yet available.
- * @param {string} projectId   - ID of the parent project. Passed directly to
- *                               `api.workspaces.launch.githubDesktop()` when the
- *                               "Open" button is clicked.
- * @param {string} wid         - ID of the parent workspace. Passed directly to
- *                               `api.workspaces.launch.githubDesktop()` when the
- *                               "Open" button is clicked.
+ * @param {Object} opts
+ * @param {string} opts.repoId      - Unique repository identifier (e.g. `"my-repo"`).
+ * @param {string} opts.repoName    - Human-readable display name; falls back to
+ *                                    `repoId` when no name is available.
+ * @param {Object|null} opts.statusInfo - GitStatusInfo object from the API, or
+ *                                    `null` when status data is not yet available.
+ * @param {string} opts.projectId   - ID of the parent project.
+ * @param {string} opts.wid         - ID of the parent workspace.
+ * @param {boolean} [opts.isStable] - When `true`, the branch cell is rendered as
+ *                                    plain text (no clickable trigger).
+ * @param {function(HTMLElement, string, string): void} [opts.onBranchCellClick]
+ *                                  - Callback invoked with `(anchorEl, repoId,
+ *                                    currentBranch)` when the branch cell trigger is
+ *                                    clicked. Only wired when `!isStable`.
+ * @param {string|null} [opts.webserverUrl] - Base URL of the local webserver. When
+ *                                    truthy, a "Browse" button is prepended before
+ *                                    the "Git GUI" button.
  * @returns {HTMLTableRowElement}
  */
-function buildRepoStatusRow(repoId, repoName, statusInfo, projectId, wid) {
+function buildRepoStatusRow({ repoId, repoName, statusInfo, projectId, wid, isStable, onBranchCellClick, webserverUrl }) {
     const tr = document.createElement('tr');
-    tr.dataset.repoId = repoId;
+    tr.dataset.repoId   = repoId;
+    tr.dataset.repoName = repoName;
 
     // Repository name / ID
     const nameCell = document.createElement('td');
@@ -198,9 +225,14 @@ function buildRepoStatusRow(repoId, repoName, statusInfo, projectId, wid) {
     // Branch name
     const branchCell = document.createElement('td');
     branchCell.className = 'repo-branch-cell';
-    branchCell.textContent = (statusInfo && statusInfo.currentBranch)
-        ? statusInfo.currentBranch
-        : '—';
+    const currentBranch = (statusInfo && statusInfo.currentBranch) ? statusInfo.currentBranch : null;
+    if (!isStable && currentBranch && onBranchCellClick) {
+        const trigger = makeBranchTrigger(currentBranch, `Switch branch for ${repoName}`);
+        trigger.addEventListener('click', () => onBranchCellClick(trigger, repoId, currentBranch));
+        branchCell.appendChild(trigger);
+    } else {
+        branchCell.textContent = currentBranch || '—';
+    }
     tr.appendChild(branchCell);
 
     // Status badge cell (index 2 — must stay at this position)
@@ -220,7 +252,7 @@ function buildRepoStatusRow(repoId, repoName, statusInfo, projectId, wid) {
     const openBtn = document.createElement('button');
     openBtn.type      = 'button';
     openBtn.className = 'btn btn-secondary btn-sm';
-    openBtn.textContent = 'Open';
+    openBtn.textContent = 'Git GUI';
     openBtn.title = 'Open this repository in GitHub Desktop.';
 
     openBtn.addEventListener('click', async () => {
@@ -232,12 +264,29 @@ function buildRepoStatusRow(repoId, repoName, statusInfo, projectId, wid) {
             showToast(err.message || 'Failed to open GitHub Desktop.', 'error');
         } finally {
             openBtn.disabled    = false;
-            openBtn.textContent = 'Open';
+            openBtn.textContent = 'Git GUI';
         }
     });
 
     actionsCell.appendChild(openBtn);
     tr.appendChild(actionsCell);
+
+    // Browse button — shown only when webserverUrl is configured.
+    if (webserverUrl) {
+        const browseBtn = document.createElement('button');
+        browseBtn.type      = 'button';
+        browseBtn.className = 'btn btn-secondary btn-sm';
+        browseBtn.textContent = 'Browse';
+        browseBtn.title = 'Open this repository in the browser via the configured webserver URL.';
+
+        browseBtn.addEventListener('click', () => {
+            const url = `${webserverUrl}/${encodeURIComponent(projectId)}/${encodeURIComponent(wid)}/${encodeURIComponent(repoId)}/`;
+            window.open(url, '_blank');
+        });
+
+        // Insert Browse before Git GUI.
+        actionsCell.insertBefore(browseBtn, openBtn);
+    }
 
     return tr;
 }
@@ -251,18 +300,28 @@ function buildRepoStatusRow(repoId, repoName, statusInfo, projectId, wid) {
  *
  * @param {HTMLElement}           tableBody - The `<tbody>` to update.
  * @param {Record<string, Object|null>} statusMap - Keyed by repository ID.
+ * @param {boolean} [isStable] - When `true`, branch cells are rebuilt as plain text.
+ * @param {function(HTMLElement, string, string): void} [onBranchCellClick]
+ *   Wired to the branch trigger button in non-STABLE workspaces.
  */
-function updateStatusTable(tableBody, statusMap) {
+function updateStatusTable(tableBody, statusMap, isStable, onBranchCellClick) {
     for (const [repoId, statusInfo] of Object.entries(statusMap)) {
         const row = tableBody.querySelector(`tr[data-repo-id="${CSS.escape(repoId)}"]`);
         if (!row) continue;
 
-        // Update branch cell (second cell)
+        // Update branch cell (second cell) — rebuild as clickable trigger or plain text
         const branchCell = row.cells[1];
         if (branchCell) {
-            branchCell.textContent = (statusInfo && statusInfo.currentBranch)
-                ? statusInfo.currentBranch
-                : '—';
+            const currentBranch = (statusInfo && statusInfo.currentBranch) ? statusInfo.currentBranch : null;
+            branchCell.innerHTML = '';
+            if (!isStable && currentBranch && onBranchCellClick) {
+                const repoName = row.dataset.repoName || repoId;
+                const trigger = makeBranchTrigger(currentBranch, `Switch branch for ${repoName}`);
+                trigger.addEventListener('click', () => onBranchCellClick(trigger, repoId, currentBranch));
+                branchCell.appendChild(trigger);
+            } else {
+                branchCell.textContent = currentBranch || '—';
+            }
         }
 
         // Update badge wrapper (third cell → div[data-repo-id])
@@ -610,9 +669,14 @@ function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
  * @param {Record<string, Object|null>} statusMap
  * @param {string} projectId - Project ID, threaded to each row's "Open" button.
  * @param {string} wid - Workspace ID, threaded to each row's "Open" button.
+ * @param {boolean} [isStable] - When `true`, branch cells render as plain text.
+ * @param {function(HTMLElement, string, string): void} [onBranchCellClick]
+ *   Callback forwarded to each `buildRepoStatusRow()` call.
+ * @param {string|null} [webserverUrl] - Base URL for the Browse button. When
+ *   truthy, each row gains a "Browse" button before the "Git GUI" button.
  * @returns {{ section: HTMLElement, tbody: HTMLTableSectionElement }}
  */
-function buildStatusTableSection(repos, statusMap, projectId, wid) {
+function buildStatusTableSection(repos, statusMap, projectId, wid, isStable, onBranchCellClick, webserverUrl) {
     const section = document.createElement('section');
     section.className = 'workspace-status-section';
 
@@ -641,7 +705,7 @@ function buildStatusTableSection(repos, statusMap, projectId, wid) {
 
     repos.forEach(({ repoId, repoName }) => {
         const statusInfo = statusMap[repoId] ?? null;
-        tbody.appendChild(buildRepoStatusRow(repoId, repoName, statusInfo, projectId, wid));
+        tbody.appendChild(buildRepoStatusRow({ repoId, repoName, statusInfo, projectId, wid, isStable, onBranchCellClick, webserverUrl }));
     });
 
     table.appendChild(tbody);
@@ -829,11 +893,12 @@ export function renderWorkspaceDetail(container, params) {
     Promise.all([
         api.workspaces.get(projectId, wid),
         api.projects.get(projectId),
-        api.status.refresh(projectId, wid),
+        api.status.refresh(projectId, wid).catch(() => null),
         api.config.polling.get().catch(() => null),
         api.workspaces.health(projectId, wid).catch(() => null),
+        api.config.webserverUrl.get().catch(() => null),
     ]).then((results) => {
-        const [rawWorkspace, rawProject, statusMap, pollingConfig, healthReport] = results;
+        const [rawWorkspace, rawProject, statusMap, pollingConfig, healthReport, webserverUrlConfig] = results;
         // Guard: if the container was cleared by navigation before we resolved,
         // do nothing and let the cleanup function handle the interval.
         if (!container.isConnected) return;
@@ -862,8 +927,17 @@ export function renderWorkspaceDetail(container, params) {
             ? pollingConfig.gitPollingIntervalSeconds * 1000
             : DEFAULT_POLL_INTERVAL_MS;
 
+        // Resolve webserver URL (null when not configured or fetch failed).
+        const webserverUrl = (
+            webserverUrlConfig &&
+            typeof webserverUrlConfig.webserverUrl === 'string' &&
+            webserverUrlConfig.webserverUrl !== ''
+        )
+            ? webserverUrlConfig.webserverUrl
+            : null;
+
         // Build status table first to obtain tbody reference for helpers.
-        const { section: statusSection, tbody } = buildStatusTableSection(repos, statusMap || {}, projectId, wid);
+        const { section: statusSection, tbody } = buildStatusTableSection(repos, statusMap || {}, projectId, wid, isStable, onBranchCellClick, webserverUrl);
 
         // -------------------------------------------------------------------
         // Refresh helpers (referenced by toolbar, polling, and setup)
@@ -984,7 +1058,7 @@ export function renderWorkspaceDetail(container, params) {
                 if (container.isConnected) {
                     renderHealthSection(freshHealth);
                     if (fresh) {
-                        updateStatusTable(tbody, fresh);
+                        updateStatusTable(tbody, fresh, isStable, onBranchCellClick);
                         updateMissingReposRow(fresh);
                     }
                 }
@@ -1014,7 +1088,7 @@ export function renderWorkspaceDetail(container, params) {
                 if (container.isConnected) {
                     renderHealthSection(freshHealth);
                     if (fresh) {
-                        updateStatusTable(tbody, fresh);
+                        updateStatusTable(tbody, fresh, isStable, onBranchCellClick);
                         updateMissingReposRow(fresh);
                     }
                 }
@@ -1052,6 +1126,27 @@ export function renderWorkspaceDetail(container, params) {
         }
 
         refreshNowBtn.addEventListener('click', doRefresh);
+
+        /**
+         * Handle a click on a branch cell trigger in the status table.
+         *
+         * Dynamically imports the branch-quick-switch component (avoiding
+         * loading it in STABLE workspaces or on initial page load), shows the
+         * popover anchored below `anchorEl`, then triggers a status refresh on
+         * a successful switch.
+         *
+         * @param {HTMLElement} anchorEl      - The clicked trigger button.
+         * @param {string}      repoId        - Repository ID to switch.
+         * @param {string}      currentBranch - Currently checked-out branch name.
+         */
+        function onBranchCellClick(anchorEl, repoId, currentBranch) {
+            import('../components/branch-quick-switch.js')
+                .then(({ showBranchQuickSwitch }) =>
+                    showBranchQuickSwitch({ anchorEl, projectId, wid, repoId, currentBranch }),
+                )
+                .then((result) => { if (result.switched) doRefresh(); })
+                .catch(() => { showToast('Failed to load branch switcher.', 'error'); });
+        }
 
         // Setup success callback — hides setup button, triggers refresh.
         const onSetupSuccess = () => {

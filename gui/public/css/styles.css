@@ -1339,3 +1339,123 @@ input.refresh-delay-input {
     color: var(--color-warning);
     background: var(--color-warning-light);
 }
+
+/* --------------------------------------------------------------------------
+   Branch Quick Switch — Popover Component
+   -------------------------------------------------------------------------- */
+
+/**
+ * Transparent fixed backdrop that sits just below the popover and catches
+ * click-outside events. z-index 499 keeps it below the popover (500) and
+ * well below modal overlays (1000) and toasts (2000).
+ */
+.branch-quick-switch-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 499;
+    background: transparent;
+}
+
+/**
+ * Anchored popover container. Positioned absolutely via JS (getBoundingClientRect).
+ * z-index 500 sits above normal content but below modals (1000) and toasts (2000).
+ */
+.branch-quick-switch {
+    position: absolute;
+    z-index: 500;
+    min-width: 220px;
+    max-width: 320px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--border-radius);
+    box-shadow: var(--shadow-lg);
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    animation: popoverSlideDown var(--transition-base);
+}
+
+@keyframes popoverSlideDown {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/**
+ * Scrollable branch list.
+ */
+.branch-quick-switch-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 200px;
+    overflow-y: auto;
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--border-radius-sm);
+}
+
+.branch-quick-switch-list li {
+    padding: 6px 10px;
+    font-size: var(--font-size-sm);
+    cursor: pointer;
+    transition: background var(--transition-fast);
+}
+
+.branch-quick-switch-list li:hover {
+    background: var(--color-primary-light);
+    color: var(--color-primary);
+}
+
+/**
+ * Mark the currently checked-out branch in the list.
+ */
+.branch-quick-switch-list li.current {
+    font-weight: 600;
+}
+
+.branch-current-hint {
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+}
+
+/**
+ * Action row — reuses the existing .form-actions layout pattern
+ * but scoped inside the popover to avoid side effects.
+ */
+.branch-quick-switch .form-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 4px;
+}
+
+/* --------------------------------------------------------------------------
+   Branch Switch Trigger — Clickable branch cell in the status table
+   -------------------------------------------------------------------------- */
+
+/**
+ * Unstyled button that sits inside the "Branch" column cell of the workspace
+ * status table for non-STABLE workspaces. Inherits all typography from its
+ * parent cell so it looks like plain text but has pointer cursor and a subtle
+ * hover hint to signal interactivity.
+ */
+.branch-switch-trigger {
+    display: inline;
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    text-decoration-line: underline;
+    text-decoration-style: dotted;
+    text-decoration-color: var(--color-text-muted);
+    text-underline-offset: 2px;
+    transition: color var(--transition-fast);
+}
+
+.branch-switch-trigger:hover {
+    color: var(--color-primary);
+    text-decoration-color: var(--color-primary);
+}

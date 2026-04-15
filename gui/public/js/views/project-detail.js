@@ -502,53 +502,12 @@ function buildWorkspacesSection(projectId, workspaces, wsStatusMap, wsHealthMap,
 
             const isStable = ws.id === 'STABLE';
 
-            // Setup button — shown when workspace is not initialized on disk
-            if (!ws.initialized) {
-                const setupBtn = document.createElement('button');
-                setupBtn.type      = 'button';
-                setupBtn.className = 'btn btn-primary btn-sm';
-                setupBtn.textContent = 'Setup';
-                setupBtn.title = 'Initialize workspace on disk (create folder, clone repos).';
+            if (!isStable) {
+                const deleteBtn = document.createElement('button');
+                deleteBtn.type      = 'button';
+                deleteBtn.className = 'btn btn-danger btn-sm';
+                deleteBtn.textContent = 'Delete';
 
-                setupBtn.addEventListener('click', async () => {
-                    setupBtn.disabled = true;
-                    setupBtn.textContent = 'Setting up…';
-
-                    try {
-                        const result = await api.workspaces.setup(projectId, ws.id);
-
-                        // Report per-repo clone results
-                        const failures = (result && result.results || []).filter((r) => !r.success);
-                        if (failures.length > 0) {
-                            for (const failure of failures) {
-                                const detail = failure.error ? `: ${failure.error}` : '.';
-                                showToast(`Failed to clone "${failure.repositoryId}"${detail}`, 'warning', 8000);
-                            }
-                        } else {
-                            showToast(`Workspace "${ws.id}" set up successfully.`, 'success');
-                        }
-
-                        await onRefresh();
-                    } catch (err) {
-                        showToast(err.message || 'Failed to set up workspace.', 'error');
-                        setupBtn.disabled = false;
-                        setupBtn.textContent = 'Setup';
-                    }
-                });
-
-                actCell.appendChild(setupBtn);
-            }
-
-            const deleteBtn = document.createElement('button');
-            deleteBtn.type      = 'button';
-            deleteBtn.className = 'btn btn-danger btn-sm';
-            deleteBtn.textContent = 'Delete';
-
-            if (isStable) {
-                deleteBtn.disabled = true;
-                deleteBtn.title    = 'The STABLE workspace cannot be deleted.';
-                deleteBtn.classList.add('btn-disabled');
-            } else {
                 deleteBtn.addEventListener('click', async () => {
                     try {
                         await showConfirm(
@@ -572,9 +531,9 @@ function buildWorkspacesSection(projectId, workspaces, wsStatusMap, wsHealthMap,
                         deleteBtn.textContent = 'Delete';
                     }
                 });
-            }
 
-            actCell.appendChild(deleteBtn);
+                actCell.appendChild(deleteBtn);
+            }
             tr.appendChild(actCell);
 
             tbody.appendChild(tr);

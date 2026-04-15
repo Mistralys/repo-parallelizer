@@ -1,10 +1,13 @@
 /**
  * Settings View — Repo Parallelizer GUI.
  *
- * Renders two settings sections:
+ * Renders three settings sections:
  *   1. **Git Credentials** — table of per-host PATs with add/delete controls.
  *   2. **Repositories Refresh Delay** — number input for `gitPollingIntervalSeconds`
  *      with client-side validation (min 10) and save/feedback.
+ *   3. **Webserver URL** — text input for the base URL of the local webserver
+ *      that serves the workspace repositories, enabling the "Browse" button in
+ *      the workspace-detail view.
  *
  * This view has no side-effects (no polling), so it returns no cleanup function.
  *
@@ -385,6 +388,91 @@ function buildRefreshDelaySection() {
 }
 
 // ---------------------------------------------------------------------------
+// Webserver URL section
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the "Webserver URL" section.
+ *
+ * Fetches the current server-side `webserverUrl` value on mount, populates a
+ * text input, and exposes a `save()` function for the shared settings footer
+ * button.
+ *
+ * @returns {{ element: HTMLElement, save: () => Promise<boolean> }}
+ */
+function buildWebserverUrlSection() {
+    const section = document.createElement('section');
+    section.className = 'settings-section webserver-url-section';
+
+    const heading = document.createElement('h2');
+    heading.textContent = 'Webserver URL';
+    section.appendChild(heading);
+
+    const description = document.createElement('p');
+    description.textContent =
+        'Base URL of the local webserver serving your workspace repositories. ' +
+        'When set, a "Browse" button appears in the workspace-detail view for each ' +
+        'repository. The URL should point to the root of your projects folder ' +
+        '(e.g. http://localhost:8080). Leave empty to hide the Browse button.';
+    section.appendChild(description);
+
+    // ---- Input row ----
+    const inputRow = document.createElement('div');
+    inputRow.className = 'webserver-url-input-row';
+
+    const label = document.createElement('label');
+    label.htmlFor = 'webserver-url-input';
+    label.textContent = 'URL';
+    label.className = 'webserver-url-label';
+
+    const input = document.createElement('input');
+    input.type = 'url';
+    input.id = 'webserver-url-input';
+    input.name = 'webserverUrl';
+    input.className = 'form-input webserver-url-input';
+    input.placeholder = 'http://localhost:8080';
+    input.setAttribute('aria-label', 'Webserver base URL');
+
+    inputRow.appendChild(label);
+    inputRow.appendChild(input);
+    section.appendChild(inputRow);
+
+    // ---- Inline error message ----
+    const errorMsg = document.createElement('p');
+    errorMsg.className = 'error-message';
+    errorMsg.setAttribute('role', 'alert');
+    errorMsg.hidden = true;
+    section.appendChild(errorMsg);
+
+    // ---- Populate current value on mount ----
+    (async () => {
+        try {
+            const cfg = await api.config.webserverUrl.get();
+            if (cfg && typeof cfg.webserverUrl === 'string') {
+                input.value = cfg.webserverUrl;
+            }
+        } catch {
+            // Non-fatal — leave the placeholder in place.
+        }
+    })();
+
+    // ---- Save function (called by the shared footer button) ----
+    async function save() {
+        errorMsg.hidden = true;
+
+        try {
+            await api.config.webserverUrl.set(input.value.trim());
+            return true;
+        } catch (err) {
+            showToast(err.message || 'Failed to save webserver URL.', 'error');
+            return false;
+        }
+    }
+
+    return { element: section, save };
+}
+
+// ---------------------------------------------------------------------------
 // View entry point
 // ---------------------------------------------------------------------------
 
@@ -435,6 +523,9 @@ export function renderSettings(container, _params) {
     const refreshDelay = buildRefreshDelaySection();
     container.appendChild(refreshDelay.element);
 
+    const webserverUrl = buildWebserverUrlSection();
+    container.appendChild(webserverUrl.element);
+
     // ---- Form footer ----
     const footer = document.createElement('footer');
     footer.className = 'settings-footer';
@@ -453,6 +544,7 @@ export function renderSettings(container, _params) {
         try {
             const results = await Promise.all([
                 refreshDelay.save(),
+                webserverUrl.save(),
             ]);
 
             if (results.every(Boolean)) {

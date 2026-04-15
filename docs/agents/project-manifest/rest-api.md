@@ -261,3 +261,54 @@ Read and update the git polling interval at runtime, without a server restart. C
 ```
 
 > **Note:** No upper bound is currently enforced. Values up to `Number.MAX_SAFE_INTEGER` pass validation and would effectively disable polling for the process lifetime. A practical maximum of 86 400 seconds (24 hours) is planned as a follow-up improvement.
+
+---
+
+## Webserver URL (`/api/config/webserver-url`)
+
+Read and update the base URL of the local webserver that serves workspace repositories. When set, the workspace-detail view shows a "Browse" button for each repository row, opening `{webserverUrl}/{projectId}/{workspaceId}/{repoId}/` in a new browser tab. Changes are persisted to `config.json` and take effect immediately.
+
+| Method | Path | Success | Error Codes | Description |
+|---|---|---|---|---|
+| `GET` | `/api/config/webserver-url` | 200 | — | Return the current webserver URL (or `null` when not configured). |
+| `PUT` | `/api/config/webserver-url` | 200 | 400 | Update the webserver URL. Body: `{ url }`. Empty string clears the setting. |
+
+### Validation (PUT)
+
+- `url`: must be a string. Non-string values return `400`.
+- Dangerous schemes (`javascript:`, `data:`, `vbscript:`) are rejected with `400` (defence-in-depth — `window.open('javascript:...')` can execute code in some browsers).
+- An empty string (or whitespace-only string) clears the setting (`webserverUrl` is removed from `config.json`; the Browse button is hidden).
+- Trailing slashes are stripped before persisting to prevent double-slash in constructed URLs.
+
+### `GET /api/config/webserver-url` Response
+
+```json
+{ "webserverUrl": "http://localhost:8080" }
+```
+
+Returns `null` when not configured:
+```json
+{ "webserverUrl": null }
+```
+
+### `PUT /api/config/webserver-url` Request / Response
+
+**Request body (set):**
+```json
+{ "url": "http://localhost:8080" }
+```
+
+**Response:**
+```json
+{ "webserverUrl": "http://localhost:8080" }
+```
+
+**Request body (clear):**
+```json
+{ "url": "" }
+```
+
+**Response:**
+```json
+{ "webserverUrl": null }
+```

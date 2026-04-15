@@ -59,6 +59,9 @@ export function loadConfig(configPath?: string): AppConfig {
                 ? raw['gitPollingIntervalSeconds']
                 : DEFAULTS.gitPollingIntervalSeconds,
         gitCredentials: parseGitCredentials(raw['gitCredentials']),
+        webserverUrl: typeof raw['webserverUrl'] === 'string' && raw['webserverUrl'].trim() !== ''
+            ? raw['webserverUrl'].trim().replace(/\/+$/, '')
+            : undefined,
     };
 }
 

@@ -626,6 +626,27 @@ const config = {
             return request('PUT', '/api/config/polling', { seconds });
         },
     },
+
+    webserverUrl: {
+        /**
+         * Get the current webserver URL.
+         *
+         * @returns {Promise<{ webserverUrl: string|null }>}
+         */
+        get() {
+            return request('GET', '/api/config/webserver-url');
+        },
+
+        /**
+         * Update the webserver URL.
+         *
+         * @param {string} url - The new webserver base URL. Pass an empty string to clear.
+         * @returns {Promise<{ webserverUrl: string|null }>}
+         */
+        set(url) {
+            return request('PUT', '/api/config/webserver-url', { url });
+        },
+    },
 };
 
 // ---------------------------------------------------------------------------

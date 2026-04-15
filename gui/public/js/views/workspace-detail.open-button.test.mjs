@@ -166,7 +166,7 @@ test('status table has a 4th column header labelled "Actions"', async () => {
 });
 
 // AC 2 — each row has a 4th cell with btn btn-secondary btn-sm
-test('each repository row has a 4th cell with a correctly-styled "Open" button', async () => {
+test('each repository row has a 4th cell with a correctly-styled "Git GUI" button', async () => {
     const { container, cleanup } = await renderView();
     try {
         const rows = [...container.querySelectorAll('tbody tr[data-repo-id]')];
@@ -176,7 +176,7 @@ test('each repository row has a 4th cell with a correctly-styled "Open" button',
             assert.ok(row.cells.length >= 4, `expected ≥4 cells, got ${row.cells.length}`);
             const btn = row.cells[3].querySelector('button');
             assert.ok(btn, 'expected a <button> in cells[3]');
-            assert.equal(btn.textContent.trim(), 'Open');
+            assert.equal(btn.textContent.trim(), 'Git GUI');
             assert.ok(btn.classList.contains('btn'),           'missing class "btn"');
             assert.ok(btn.classList.contains('btn-secondary'), 'missing class "btn-secondary"');
             assert.ok(btn.classList.contains('btn-sm'),        'missing class "btn-sm"');
@@ -186,8 +186,8 @@ test('each repository row has a 4th cell with a correctly-styled "Open" button',
     }
 });
 
-// AC 3 — clicking "Open" calls api.workspaces.launch.githubDesktop with correct args
-test('clicking "Open" calls launch.githubDesktop with projectId, wid, and repoId', async () => {
+// AC 3 — clicking "Git GUI" calls api.workspaces.launch.githubDesktop with correct args
+test('clicking "Git GUI" calls launch.githubDesktop with projectId, wid, and repoId', async () => {
     const { container, cleanup } = await renderView('my-project', 'DEV');
     try {
         const firstRow = container.querySelector('tbody tr[data-repo-id]');
@@ -228,7 +228,7 @@ test('when launch.githubDesktop rejects, the button is re-enabled after the erro
         }
 
         assert.equal(btn.disabled,           false,  'button should be re-enabled after error');
-        assert.equal(btn.textContent.trim(), 'Open', 'button label should be restored after error');
+        assert.equal(btn.textContent.trim(), 'Git GUI', 'button label should be restored after error');
         assert.equal(ghDesktopCalls.length,  1,      'API should have been called despite the error');
     } finally {
         cleanup();

@@ -276,3 +276,81 @@ test('saveConfigField() sets file permissions to 0o600 on non-Windows platforms'
     const mode = fs.statSync(configPath).mode & 0o777;
     assert.strictEqual(mode, 0o600, `expected 0o600, got 0o${mode.toString(8)}`);
 });
+
+// --- webserverUrl ---
+
+test('loadConfig() returns webserverUrl: undefined when field is absent', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.webserverUrl, undefined);
+});
+
+test('loadConfig() returns webserverUrl: undefined when field is null', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        webserverUrl: null,
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.webserverUrl, undefined);
+});
+
+test('loadConfig() returns webserverUrl: undefined when field is empty string', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        webserverUrl: '',
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.webserverUrl, undefined);
+});
+
+test('loadConfig() returns webserverUrl: undefined when field is whitespace-only', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        webserverUrl: '   ',
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.webserverUrl, undefined);
+});
+
+test('loadConfig() preserves a valid webserverUrl value', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        webserverUrl: 'http://localhost:8080',
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.webserverUrl, 'http://localhost:8080');
+});
+
+test('loadConfig() strips trailing slashes from webserverUrl', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        webserverUrl: 'http://localhost:8080///',
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.webserverUrl, 'http://localhost:8080');
+});
+
+test('loadConfig() trims leading/trailing whitespace from webserverUrl', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        webserverUrl: '  http://localhost:8080  ',
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.webserverUrl, 'http://localhost:8080');
+});

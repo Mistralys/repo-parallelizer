@@ -53,4 +53,14 @@ export interface AppConfig {
      * @default 500
      */
     maxErrorLogEntries?: number;
+
+    /**
+     * Base URL of the local webserver serving the workspace repositories.
+     * When set, a "Browse" button appears in the workspace-detail view for
+     * each repository, opening `{webserverUrl}/{projectId}/{workspaceId}/{repoId}/`
+     * in the default browser.
+     *
+     * Leave empty or omit to hide the Browse button entirely.
+     */
+    webserverUrl?: string;
 }

@@ -6,5 +6,6 @@
     "serverPort": 4200,
     "gitPollingIntervalSeconds": 30,
     "maxErrorLogEntries": 500,
-    "gitCredentials": {}
+    "gitCredentials": {},
+    "webserverUrl": ""
 }
