@@ -167,7 +167,8 @@ function buildSut(): { router: Router; wm: MockWorkspaceManager } {
     // existing tests don't exercise that route, so stub values suffice.
     const stubOrchestrator = {} as never;
     const stubConfig = { projectsFolder: '/tmp/nonexistent-test-projects' } as never;
-    registerWorkspaceRoutes(router, wm as never, stubOrchestrator, stubConfig);
+    const stubProjectManager = {} as never;
+    registerWorkspaceRoutes(router, wm as never, stubOrchestrator, stubConfig, stubProjectManager);
     return { router, wm };
 }
 

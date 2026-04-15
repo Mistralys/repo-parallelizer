@@ -409,6 +409,30 @@ function generateWorkspaceFile(workspaceId: string, repoPaths: { slug: string; p
 function removeWorkspaceFile(filePath: string): void
 ```
 
+### Workspace Health (`workspace-health.ts`)
+
+```typescript
+interface WorkspaceHealthIssue {
+    type: string;
+    severity: 'error' | 'warning';
+    message: string;
+    fixAction: string;
+    repositoryId?: string;
+}
+
+interface WorkspaceHealthReport {
+    healthy: boolean;
+    issues: WorkspaceHealthIssue[];
+}
+
+function checkWorkspaceHealth(
+    projectId: string,
+    workspaceId: string,
+    projectsFolder: string,
+    repositoryIds: string[],
+): WorkspaceHealthReport
+```
+
 ---
 
 ## Storage (`src/storage/`)

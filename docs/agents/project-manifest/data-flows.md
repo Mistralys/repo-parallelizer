@@ -189,3 +189,48 @@ toast UI.
             ├── {repo-slug}/                      # Git clone
             └── ...
 ```
+
+---
+
+## 12. Workspace Health Check
+
+```
+User → GET /api/projects/:id/workspaces/:wid/health
+  └→ projectManager.getById(projectId)          # 404 if project unknown
+  └→ workspaceManager.getById(projectId, wid)   # 404 if workspace unknown
+  └→ fs.existsSync(workspaceFolder)?
+       ├→ false (uninitialized): sendJson 200 { healthy: true, issues: [] }
+       └→ true (initialized):
+            checkWorkspaceHealth(projectId, workspaceId, projectsFolder, repositoryIds)
+              └→ Check 1: fs.existsSync(getWorkspaceFilePath(...))
+                   └→ absent → issue { type: 'workspace-file-missing', severity: 'warning',
+                                        fixAction: 'regenerate-workspace-file' }
+              └→ Check 2: for each repoId in repositoryIds:
+                   fs.existsSync(path.join(projectsFolder, projectId, wid, repoId, '.git'))
+                   └→ absent → issue { type: 'repository-not-cloned', severity: 'warning',
+                                        fixAction: 'setup-workspace', repositoryId }
+              └→ Return WorkspaceHealthReport { healthy: issues.length === 0, issues }
+            sendJson 200 WorkspaceHealthReport
+```
+
+**GUI integration:**
+- `project-detail.js`: health fetched in parallel with status for all initialized workspaces via `Promise.allSettled`. Failing fetches degrade gracefully (health cell left empty).
+- `workspace-detail.js`: health report fetched on initial load and every poll cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix action buttons.
+
+---
+
+## 13. Regenerate Workspace File
+
+```
+User → POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file
+  └→ projectManager.getById(projectId)          # 404 if project unknown
+  └→ workspaceManager.getById(projectId, wid)   # 404 if workspace unknown
+  └→ fs.existsSync(workspaceFolder)?
+       └→ absent → sendError 400 "Workspace folder does not exist. Run setup first."
+  └→ Build repoPaths: project.Repositories.map(repoId → { slug: repoId, path: ... })
+  └→ getWorkspaceFilePath(projectsFolder, projectId, workspaceId) → wsFilePath
+  └→ generateWorkspaceFile(workspaceId, repoPaths, wsFilePath)   # writes .code-workspace
+  └→ sendJson 200 { success: true }
+```
+
+**No git operations are performed.** This endpoint only writes the `.code-workspace` JSON file. All repository clones remain untouched. Use `POST .../setup` to clone missing repositories.

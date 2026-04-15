@@ -26,8 +26,8 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 |---|---|---|
 | `#/` | `dashboard.js` | Project listing with creation form. |
 | `#/repositories` | `repositories.js` | Repository CRUD table. |
-| `#/projects/:id` | `project-detail.js` | Project metadata, tabbed repo/workspace/danger-zone management. |
-| `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with countdown-based polling and manual refresh. |
+| `#/projects/:id` | `project-detail.js` | Project metadata, tabbed repo/workspace/danger-zone management. The workspace table includes a **Health** column: initialized workspaces with health issues show a warning badge with issue count; healthy and uninitialized workspaces show an empty cell. Health is fetched in parallel with status for all initialized workspaces via `Promise.allSettled` (graceful degradation — fetch failures leave the health cell empty). |
+| `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with countdown-based polling and manual refresh. Health report fetched in parallel on initial load and on every poll/refresh cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix buttons (`Regenerate File` for `regenerate-workspace-file` issues, `Fix Setup` for `setup-workspace` issues). |
 | `#/projects/:id/workspaces/:wid/branch-switch` | `branch-switch.js` | 3-step branch switch wizard. |
 | `#/settings` | `settings.js` | Settings view with two sections: **Git Credentials** (add/delete per-host PATs) and **Repositories Refresh Delay** (configurable `gitPollingIntervalSeconds`). |
 | `#/error-log` | `error-log.js` | Paginated, filterable error log table with expandable detail rows and "Clear All" action. |
@@ -38,12 +38,23 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 
 - `api.repositories` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `delete(id)`
 - `api.projects` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `rename(id, newId)`, `delete(id)`, `addRepository(pid, rid)`, `removeRepository(pid, rid)`
-- `api.workspaces` — `list(pid)`, `get(pid, wid)`, `create(pid, data)`, `update(pid, wid, data)`, `rename(pid, wid, newId)`, `delete(pid, wid)`, `setup(pid, wid)`
+- `api.workspaces` — `list(pid)`, `get(pid, wid)`, `create(pid, data)`, `update(pid, wid, data)`, `rename(pid, wid, newId)`, `delete(pid, wid)`, `setup(pid, wid)`, `health(pid, wid)`, `regenerateFile(pid, wid)`
 - `api.branches` — `list(pid, wid)`, `switch(pid, wid, assignments)`
 - `api.status` — `get(pid, wid)`, `refresh(pid, wid)`
 - `api.config.credentials` — `list()`, `set(data)`, `delete(host)`
 - `api.config.polling` — `get()`, `set(seconds)`
 - `api.errorLog` — `list(params?)`, `get(id)`, `clear()`, `count()`
+
+### `api.workspaces` — Health & File Methods
+
+| Method | HTTP | Description |
+|---|---|---|
+| `health(pid, wid)` | `GET /api/projects/:id/workspaces/:wid/health` | Fetch the health report for an initialized workspace. Returns `{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }`. |
+| `regenerateFile(pid, wid)` | `POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file` | Regenerate the `.code-workspace` file from the current repository list without cloning. Returns `{ success: boolean }`. |
+
+**`health()` issue `fixAction` values:**
+- `regenerate-workspace-file` — missing or stale `.code-workspace` file; surface a `Regenerate File` button.
+- `setup-workspace` — uncloned repository; surface a `Fix Setup` button.
 
 ### `api.errorLog` Reference
 

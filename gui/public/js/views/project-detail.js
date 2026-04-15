@@ -381,10 +381,11 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
  * @param {string}   projectId  - Current project ID.
  * @param {Array<{ id: string, description: string, createdAt: string, initialized: boolean }>} workspaces
  * @param {Record<string, Record<string, Object>|null>} wsStatusMap - Keyed by workspace ID; values are status maps (repoId → GitStatusInfo) or null.
+ * @param {Record<string, { healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }|null>} wsHealthMap - Keyed by workspace ID; null when health fetch failed or workspace is uninitialized.
  * @param {function(): Promise<void>} onRefresh - Re-renders the entire view.
  * @returns {HTMLElement}
  */
-function buildWorkspacesSection(projectId, workspaces, wsStatusMap, onRefresh) {
+function buildWorkspacesSection(projectId, workspaces, wsStatusMap, wsHealthMap, onRefresh) {
     const section = document.createElement('section');
     section.className = 'project-workspaces-section';
 
@@ -400,7 +401,7 @@ function buildWorkspacesSection(projectId, workspaces, wsStatusMap, onRefresh) {
 
         const thead = document.createElement('thead');
         const htr   = document.createElement('tr');
-        ['ID', 'Description', 'Created', 'Branches', 'Actions'].forEach((label) => {
+        ['ID', 'Description', 'Created', 'Branches', 'Health', 'Actions'].forEach((label) => {
             const th = document.createElement('th');
             th.textContent = label;
             htr.appendChild(th);
@@ -464,6 +465,36 @@ function buildWorkspacesSection(projectId, workspaces, wsStatusMap, onRefresh) {
                 branchesCell.textContent = '—';
             }
             tr.appendChild(branchesCell);
+
+            // Health cell — badge shown only for initialized workspaces with issues.
+            // Uninitialized workspaces and healthy workspaces render an empty cell.
+            const healthCell = document.createElement('td');
+            healthCell.className = 'workspace-health-cell';
+            if (ws.initialized) {
+                const healthReport = wsHealthMap[ws.id];
+                if (
+                    healthReport &&
+                    !healthReport.healthy &&
+                    Array.isArray(healthReport.issues) &&
+                    healthReport.issues.length > 0
+                ) {
+                    const badge = document.createElement('span');
+                    badge.className = 'health-badge';
+
+                    const icon = document.createElement('span');
+                    icon.setAttribute('aria-hidden', 'true');
+                    icon.textContent = '\u26a0';
+                    badge.appendChild(icon);
+
+                    const label = document.createElement('span');
+                    const n = healthReport.issues.length;
+                    label.textContent = `${n} ${n === 1 ? 'issue' : 'issues'}`;
+                    badge.appendChild(label);
+
+                    healthCell.appendChild(badge);
+                }
+            }
+            tr.appendChild(healthCell);
 
             // Actions cell
             const actCell = document.createElement('td');
@@ -563,7 +594,7 @@ function buildWorkspacesSection(projectId, workspaces, wsStatusMap, onRefresh) {
 /**
  * Build the "Add Workspace" collapsible form.
  *
- * Workspace ID must match /^[A-Z]{2,6}$/ (2-6 uppercase letters).
+ * Workspace ID must match /^[A-Z]{2,10}$/ (2-10 uppercase letters).
  *
  * @param {string}   projectId
  * @param {function(): Promise<void>} onSuccess
@@ -596,7 +627,7 @@ function buildAddWorkspaceForm(projectId, onSuccess) {
     const wsIdField = createFormField('Workspace ID', 'text', 'workspaceId', {
         required: true,
         placeholder: 'e.g. DEV or FEATURE',
-        hint: 'Must be 2–6 uppercase letters (A-Z only).',
+        hint: 'Must be 2–10 uppercase letters (A-Z only).',
     });
     form.appendChild(wsIdField);
 
@@ -647,10 +678,10 @@ function buildAddWorkspaceForm(projectId, onSuccess) {
 
         const workspaceId = wsIdInput ? wsIdInput.value.trim() : '';
 
-        // Validate format: 2-6 uppercase A-Z only
+        // Validate format: 2-10 uppercase A-Z only
         if (!WORKSPACE_ID_PATTERN.test(workspaceId)) {
             if (wsIdErrorEl) {
-                wsIdErrorEl.textContent = 'Must be 2–6 uppercase letters (A-Z only).';
+                wsIdErrorEl.textContent = 'Must be 2–10 uppercase letters (A-Z only).';
                 wsIdErrorEl.hidden = false;
             }
             if (wsIdInput) {
@@ -885,14 +916,24 @@ export async function renderProjectDetail(container, params) {
     // -----------------------------------------------------------------------
     /** @type {Record<string, Record<string, Object>|null>} */
     const wsStatusMap = {};
+    /** @type {Record<string, { healthy: boolean, issues: Array }|null>} */
+    const wsHealthMap = {};
     const initializedWs = normWorkspaces.filter((ws) => ws.initialized);
     if (initializedWs.length > 0) {
-        const statusResults = await Promise.allSettled(
-            initializedWs.map((ws) => api.status.get(projectId, ws.id)),
-        );
+        const [statusResults, healthResults] = await Promise.all([
+            Promise.allSettled(
+                initializedWs.map((ws) => api.status.get(projectId, ws.id)),
+            ),
+            Promise.allSettled(
+                initializedWs.map((ws) => api.workspaces.health(projectId, ws.id)),
+            ),
+        ]);
         initializedWs.forEach((ws, i) => {
             wsStatusMap[ws.id] = statusResults[i].status === 'fulfilled'
                 ? statusResults[i].value
+                : null;
+            wsHealthMap[ws.id] = healthResults[i].status === 'fulfilled'
+                ? healthResults[i].value
                 : null;
         });
     }
@@ -988,7 +1029,7 @@ export async function renderProjectDetail(container, params) {
 
     // ---- Workspaces panel ----
     panels.workspaces.appendChild(
-        buildWorkspacesSection(normProject.id, normWorkspaces, wsStatusMap, refresh),
+        buildWorkspacesSection(normProject.id, normWorkspaces, wsStatusMap, wsHealthMap, refresh),
     );
     container.appendChild(panels.workspaces);
 

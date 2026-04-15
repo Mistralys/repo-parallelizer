@@ -16,7 +16,7 @@ export interface WorkspaceInfo {
     /** ID of the project this workspace belongs to. */
     ProjectID: string;
 
-    /** Unique workspace identifier (2–6 uppercase ASCII letters, e.g. "STABLE", "DEV"). */
+    /** Unique workspace identifier (2–10 uppercase ASCII letters, e.g. "STABLE", "DEV"). */
     WorkspaceID: string;
 
     /** Human-readable description of this workspace. */

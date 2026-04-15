@@ -96,13 +96,13 @@ export class WorkspaceManager {
      * - Validates that no workspace with the same ID already exists in the project.
      *
      * @throws {Error} If the project does not exist.
-     * @throws {Error} If `workspaceId` is not 2–6 uppercase ASCII letters.
+     * @throws {Error} If `workspaceId` is not 2–10 uppercase ASCII letters.
      * @throws {Error} If a workspace with `workspaceId` already exists in the project.
      */
     create(projectId: string, workspaceId: string, description?: string): WorkspaceInfo {
         if (!isValidWorkspaceId(workspaceId)) {
             throw new Error(
-                `Invalid workspace ID "${workspaceId}": must be 2–6 uppercase ASCII letters (A–Z) ` +
+                `Invalid workspace ID "${workspaceId}": must be 2–10 uppercase ASCII letters (A–Z) ` +
                 `with no digits or special characters.`
             );
         }
@@ -186,7 +186,7 @@ export class WorkspaceManager {
      * @throws {Error} If attempting to rename the STABLE workspace.
      * @throws {Error} If the project does not exist.
      * @throws {Error} If the workspace does not exist.
-     * @throws {Error} If `newId` is not 2–6 uppercase ASCII letters.
+     * @throws {Error} If `newId` is not 2–10 uppercase ASCII letters.
      * @throws {Error} If a workspace with `newId` already exists in the project.
      */
     rename(projectId: string, oldId: string, newId: string): WorkspaceInfo {
@@ -199,7 +199,7 @@ export class WorkspaceManager {
 
         if (!isValidWorkspaceId(newId)) {
             throw new Error(
-                `Invalid workspace ID "${newId}": must be 2–6 uppercase ASCII letters (A–Z) ` +
+                `Invalid workspace ID "${newId}": must be 2–10 uppercase ASCII letters (A–Z) ` +
                 `with no digits or special characters.`
             );
         }

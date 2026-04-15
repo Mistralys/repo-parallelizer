@@ -438,7 +438,7 @@ new WorkspaceManager(projectManager: ProjectManager)
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `projectId` | `string` | ✅ | ID of the project to add the workspace to. |
-| `workspaceId` | `string` | ✅ | ID for the new workspace. Must be 2–6 uppercase ASCII letters (A–Z), no digits or special characters (e.g. `"DEV"`, `"PROD"`). Validated via `isValidWorkspaceId()`. |
+| `workspaceId` | `string` | ✅ | ID for the new workspace. Must be 2–10 uppercase ASCII letters (A–Z), no digits or special characters (e.g. `"DEV"`, `"PROD"`). Validated via `isValidWorkspaceId()`. |
 | `description` | `string` | | Optional description text. Defaults to `''`. |
 
 `create()` throws when:
@@ -452,7 +452,7 @@ new WorkspaceManager(projectManager: ProjectManager)
 |-----------|------|----------|-------------|
 | `projectId` | `string` | ✅ | ID of the project containing the workspace. |
 | `oldId` | `string` | ✅ | Current workspace ID. Must not be `"STABLE"`. |
-| `newId` | `string` | ✅ | New workspace ID. Must be 2–6 uppercase ASCII letters; must not already exist in the project. |
+| `newId` | `string` | ✅ | New workspace ID. Must be 2–10 uppercase ASCII letters; must not already exist in the project. |
 
 `rename()` throws when:
 - `oldId` is `"STABLE"`.
@@ -861,7 +861,7 @@ The project detail view is rendered at `#/projects/:id`. It fetches all required
 | **Metadata** | Project ID and name as a page heading; inline description editor. Clicking **Edit Description** reveals a textarea; **Save** calls `PUT /api/projects/:id`; **Cancel** restores the read-mode display. |
 | **Repositories** | Lists repositories currently in the project. Each row shows name and ID, plus a **Remove** button (requires confirmation dialog). An **Add Repository** select picker lists only repos not already in the project and calls `POST /api/projects/:id/repositories`. When all global repositories are already added, the picker is replaced by an informational message. |
 | **Workspaces** | Table of all workspaces (ID, description, creation date, actions). Each workspace ID is a link to `#/projects/:id/workspaces/:wid`. The **STABLE** workspace's Delete button is visually disabled and non-functional — the `disabled` attribute and `btn-disabled` CSS class are applied, and the button carries a `title` tooltip explaining the restriction. Non-STABLE workspaces can be deleted after confirmation. |
-| **Add Workspace** | Collapsible form toggled by **+ Add Workspace**. Validates workspace ID against `/^[A-Z]{2,6}$/` (2–6 uppercase letters, no digits or special characters) before calling `POST /api/projects/:id/workspaces`. |
+| **Add Workspace** | Collapsible form toggled by **+ Add Workspace**. Validates workspace ID against `/^[A-Z]{2,10}$/` (2–10 uppercase letters, no digits or special characters) before calling `POST /api/projects/:id/workspaces`. |
 | **Danger Zone** | Two actions: **Rename Project** (calls `PUT /api/projects/:id/rename`, then navigates to `#/projects/:newId`) and **Delete Project** (calls `DELETE /api/projects/:id`, then navigates to `#/`). Both require confirmation dialogs. Rename is client-side-guarded against identical IDs. |
 
 #### Refresh strategy
@@ -939,7 +939,7 @@ Both **Rename Workspace** and **Delete Workspace** are disabled (HTML `disabled`
 
 #### Rename workflow
 
-Clicking **Rename Workspace** reveals an inline form. The new workspace ID is validated against `WORKSPACE_ID_PATTERN` (`/^[A-Z]{2,6}$/`, imported from `form-helpers.js`) before showing a confirmation dialog. On success, `api.workspaces.rename()` is called and the router navigates to the new workspace URL (`#/projects/:id/workspaces/:newId`).
+Clicking **Rename Workspace** reveals an inline form. The new workspace ID is validated against `WORKSPACE_ID_PATTERN` (`/^[A-Z]{2,10}$/`, imported from `form-helpers.js`) before showing a confirmation dialog. On success, `api.workspaces.rename()` is called and the router navigates to the new workspace URL (`#/projects/:id/workspaces/:newId`).
 
 #### Router injection
 

@@ -260,7 +260,7 @@ function buildRenameForm(projectId, workspace, renameBtn) {
     const newIdField = createFormField('New Workspace ID', 'text', 'newWorkspaceId', {
         required:    true,
         placeholder: 'e.g. DEV or FEATURE',
-        hint:        'Must be 2–6 uppercase letters (A-Z only).',
+        hint:        'Must be 2–10 uppercase letters (A-Z only).',
     });
     wrapper.appendChild(newIdField);
 
@@ -309,7 +309,7 @@ function buildRenameForm(projectId, workspace, renameBtn) {
 
         if (!WORKSPACE_ID_PATTERN.test(newId)) {
             if (newIdErrorEl) {
-                newIdErrorEl.textContent = 'Must be 2–6 uppercase letters (A-Z only).';
+                newIdErrorEl.textContent = 'Must be 2–10 uppercase letters (A-Z only).';
                 newIdErrorEl.hidden      = false;
             }
             if (newIdInput) {
@@ -609,6 +609,98 @@ function buildRefreshToolbar() {
 }
 
 // ---------------------------------------------------------------------------
+// Health alert section
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a health alert section element from a workspace health report.
+ * Returns `null` when the workspace is healthy (no issues to display).
+ *
+ * Fix-action buttons are wired via the `callbacks` argument so the
+ * caller can inject async handlers that match the surrounding view's
+ * closure state (project/workspace IDs, toast helper, etc.).
+ *
+ * @param {{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }|null} healthReport
+ * @param {{ onRegenerate: function(): Promise<void>, onSetup: function(): Promise<void> }} callbacks
+ * @returns {HTMLElement|null}
+ */
+function buildHealthAlertSection(healthReport, callbacks) {
+    if (
+        !healthReport ||
+        healthReport.healthy ||
+        !Array.isArray(healthReport.issues) ||
+        healthReport.issues.length === 0
+    ) {
+        return null;
+    }
+
+    const section = document.createElement('div');
+    section.className = 'health-alert';
+
+    const title = document.createElement('div');
+    title.className = 'health-alert-title';
+    title.textContent = 'Workspace health issues detected';
+    section.appendChild(title);
+
+    for (const issue of healthReport.issues) {
+        const row = document.createElement('div');
+        row.className = 'health-alert-issue';
+
+        const msg = document.createElement('span');
+        msg.className = 'health-alert-issue__message';
+        msg.textContent = issue.message;
+        row.appendChild(msg);
+
+        if (issue.fixAction === 'regenerate-workspace-file') {
+            const actionWrap = document.createElement('span');
+            actionWrap.className = 'health-alert-issue__action';
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-secondary btn-sm';
+            btn.textContent = 'Regenerate File';
+            btn.addEventListener('click', async () => {
+                btn.disabled = true;
+                btn.textContent = 'Regenerating\u2026';
+                try {
+                    await callbacks.onRegenerate();
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = 'Regenerate File';
+                }
+            });
+            actionWrap.appendChild(btn);
+            row.appendChild(actionWrap);
+        } else if (issue.fixAction === 'setup-workspace') {
+            const actionWrap = document.createElement('span');
+            actionWrap.className = 'health-alert-issue__action';
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-secondary btn-sm';
+            btn.textContent = 'Fix Setup';
+            btn.addEventListener('click', async () => {
+                btn.disabled = true;
+                btn.textContent = 'Setting up\u2026';
+                try {
+                    await callbacks.onSetup();
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = 'Fix Setup';
+                }
+            });
+            actionWrap.appendChild(btn);
+            row.appendChild(actionWrap);
+        }
+        // Issues with an unknown fixAction render the message row without a button.
+
+        section.appendChild(row);
+    }
+
+    return section;
+}
+
+// ---------------------------------------------------------------------------
 // Public view entry point
 // ---------------------------------------------------------------------------
 
@@ -649,8 +741,9 @@ export function renderWorkspaceDetail(container, params) {
         api.projects.get(projectId),
         api.status.refresh(projectId, wid),
         api.config.polling.get().catch(() => null),
+        api.workspaces.health(projectId, wid).catch(() => null),
     ]).then((results) => {
-        const [rawWorkspace, rawProject, statusMap, pollingConfig] = results;
+        const [rawWorkspace, rawProject, statusMap, pollingConfig, healthReport] = results;
         // Guard: if the container was cleared by navigation before we resolved,
         // do nothing and let the cleanup function handle the interval.
         if (!container.isConnected) return;
@@ -698,12 +791,34 @@ export function renderWorkspaceDetail(container, params) {
         const progressBar = toolbar.querySelector('.refresh-progress-bar');
         const refreshNowBtn = toolbar.querySelector('.refresh-now-btn');
 
+        // Health section container — always in DOM between header and toolbar;
+        // empty when the workspace is healthy.
+        const healthContainerEl = document.createElement('div');
+
+        // Latest health report — kept in sync by renderHealthSection so that
+        // updateMissingReposRow can exclude repos already covered by health alerts.
+        let currentHealthReport = healthReport;
+
         /**
          * Re-evaluate missing repos after a status update and hide/update
          * the retry row accordingly.
+         *
+         * Repos flagged by a `repository-not-cloned` health alert (fixAction:
+         * `setup-workspace`) are excluded from the missing-repos count here
+         * because the health alert already surfaces a fix button for them.
+         * This row is therefore reserved for the transient polling-lag case
+         * where `.git/` is present but status data has not arrived yet.
          */
         function updateMissingReposRow(freshStatusMap) {
-            const currentMissing = repos.filter((r) => !freshStatusMap[r.repoId]);
+            const notClonedIds = new Set(
+                (currentHealthReport && Array.isArray(currentHealthReport.issues)
+                    ? currentHealthReport.issues : [])
+                    .filter((i) => i.fixAction === 'setup-workspace' && i.repositoryId)
+                    .map((i) => i.repositoryId),
+            );
+            const currentMissing = repos.filter(
+                (r) => !freshStatusMap[r.repoId] && !notClonedIds.has(r.repoId),
+            );
             if (currentMissing.length === 0) {
                 if (retryRow) {
                     retryRow.remove();
@@ -716,16 +831,72 @@ export function renderWorkspaceDetail(container, params) {
         }
 
         /**
+         * Rebuild the health alert container from the given health report.
+         * Updates `currentHealthReport` first so subsequent
+         * `updateMissingReposRow` calls reflect the latest health state.
+         *
+         * @param {{ healthy: boolean, issues: Array }|null} report
+         */
+        function renderHealthSection(report) {
+            currentHealthReport = report;
+            healthContainerEl.innerHTML = '';
+            const el = buildHealthAlertSection(report, {
+                onRegenerate: async () => {
+                    try {
+                        await api.workspaces.regenerateFile(projectId, wid);
+                        showToast('Workspace file regenerated.', 'success');
+                        await fetchAndRenderHealth();
+                    } catch (err) {
+                        showToast(err.message || 'Failed to regenerate workspace file.', 'error');
+                    }
+                },
+                onSetup: async () => {
+                    try {
+                        await runSetup(projectId, wid, 'Workspace setup complete.');
+                        doRefresh();
+                        await fetchAndRenderHealth();
+                    } catch (err) {
+                        showToast(err.message || 'Failed to set up workspace.', 'error');
+                    }
+                },
+            });
+            if (el) {
+                healthContainerEl.appendChild(el);
+            }
+        }
+
+        /**
+         * Fetch the latest health report from the API and re-render the
+         * health alert section in-place. Silently ignores network errors.
+         */
+        async function fetchAndRenderHealth() {
+            try {
+                const fresh = await api.workspaces.health(projectId, wid);
+                if (container.isConnected) {
+                    renderHealthSection(fresh);
+                }
+            } catch {
+                // Silently ignore health fetch errors — stale UI remains.
+            }
+        }
+
+        /**
          * Automatic poll — uses cached status endpoint.
          */
         async function doPoll() {
             if (refreshInProgress) return;
             refreshInProgress = true;
             try {
-                const fresh = await api.status.get(projectId, wid);
-                if (container.isConnected && fresh) {
-                    updateStatusTable(tbody, fresh);
-                    updateMissingReposRow(fresh);
+                const [fresh, freshHealth] = await Promise.all([
+                    api.status.get(projectId, wid),
+                    api.workspaces.health(projectId, wid).catch(() => null),
+                ]);
+                if (container.isConnected) {
+                    renderHealthSection(freshHealth);
+                    if (fresh) {
+                        updateStatusTable(tbody, fresh);
+                        updateMissingReposRow(fresh);
+                    }
                 }
             } catch {
                 // Silently ignore polling errors — stale badges remain.
@@ -746,10 +917,16 @@ export function renderWorkspaceDetail(container, params) {
             refreshNowBtn.disabled = true;
             progressBar.classList.add('refreshing');
             try {
-                const fresh = await api.status.refresh(projectId, wid);
-                if (container.isConnected && fresh) {
-                    updateStatusTable(tbody, fresh);
-                    updateMissingReposRow(fresh);
+                const [fresh, freshHealth] = await Promise.all([
+                    api.status.refresh(projectId, wid),
+                    api.workspaces.health(projectId, wid).catch(() => null),
+                ]);
+                if (container.isConnected) {
+                    renderHealthSection(freshHealth);
+                    if (fresh) {
+                        updateStatusTable(tbody, fresh);
+                        updateMissingReposRow(fresh);
+                    }
                 }
             } catch {
                 // Silently ignore — stale badges remain.
@@ -800,6 +977,11 @@ export function renderWorkspaceDetail(container, params) {
 
         container.appendChild(buildHeaderSection(projectId, workspace, isStable, onSetupSuccess));
 
+        // Health alert section — sits between the header and the refresh toolbar.
+        // Populated by renderHealthSection(); empty div when workspace is healthy.
+        container.appendChild(healthContainerEl);
+        renderHealthSection(healthReport);
+
         // Refresh toolbar (between header and status table)
         if (repos.length > 0) {
             container.appendChild(toolbar);
@@ -807,10 +989,20 @@ export function renderWorkspaceDetail(container, params) {
 
         container.appendChild(statusSection);
 
-        // Show "Retry Setup" when workspace is initialized but some repos
-        // have no status data (likely failed to clone).
+        // Show "Retry Setup" when the workspace is initialized but some repos
+        // have no status data AND are not already covered by a health alert.
+        // Health alerts handle the missing-.git/ case (fixAction: setup-workspace);
+        // this block targets the transient polling-lag case where .git/ is present
+        // but the background status sweep hasn't returned data yet.
         const safeStatusMap = statusMap || {};
-        const missingRepos = repos.filter((r) => !safeStatusMap[r.repoId]);
+        const notClonedRepoIds = new Set(
+            (healthReport && Array.isArray(healthReport.issues) ? healthReport.issues : [])
+                .filter((i) => i.fixAction === 'setup-workspace' && i.repositoryId)
+                .map((i) => i.repositoryId),
+        );
+        const missingRepos = repos.filter(
+            (r) => !safeStatusMap[r.repoId] && !notClonedRepoIds.has(r.repoId),
+        );
         if (workspace.initialized && missingRepos.length > 0) {
             retryRow = document.createElement('div');
             retryRow.className = 'workspace-mgmt-row';

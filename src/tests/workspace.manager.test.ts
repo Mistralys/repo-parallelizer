@@ -180,7 +180,7 @@ test('create throws for an invalid workspace ID (too long)', () => {
     const { repoManager, projectManager, workspaceManager } = makeManagers(base);
     const projectId = makeProject(projectManager, repoManager);
     assert.throws(
-        () => workspaceManager.create(projectId, 'TOOLONG'),
+        () => workspaceManager.create(projectId, 'TOOLONGNAME'),
         /Invalid workspace ID/,
     );
 });

@@ -13,7 +13,7 @@
  *
  * This module also exports shared validation constants:
  *  - `WORKSPACE_ID_PATTERN` — the regex that workspace IDs must satisfy
- *    (`/^[A-Z]{2,6}$/`), used in both `project-detail.js` and
+ *    (`/^[A-Z]{2,10}$/`), used in both `project-detail.js` and
  *    `workspace-detail.js` to avoid duplicating the constraint.
  *
  * Usage:
@@ -37,14 +37,14 @@
 // ---------------------------------------------------------------------------
 
 /**
- * Workspace ID format constraint: 2–6 uppercase ASCII letters only.
+ * Workspace ID format constraint: 2–10 uppercase ASCII letters only.
  *
  * Exported so that all views that create or rename workspaces reference a
  * single authoritative pattern instead of duplicating the literal regex.
  *
  * @type {RegExp}
  */
-export const WORKSPACE_ID_PATTERN = /^[A-Z]{2,6}$/;
+export const WORKSPACE_ID_PATTERN = /^[A-Z]{2,10}$/;
 
 // ---------------------------------------------------------------------------
 // CSS.escape fallback — avoids reliance on the browser-only CSS.escape API

@@ -107,6 +107,10 @@ test('isValidWorkspaceId: accepts a 6-char uppercase ID', () => {
     assert.ok(isValidWorkspaceId('ABCDEF'));
 });
 
+test('isValidWorkspaceId: accepts a 10-char uppercase ID', () => {
+    assert.ok(isValidWorkspaceId('ABCDEFGHIJ'));
+});
+
 test('isValidWorkspaceId: accepts a 3-char uppercase ID', () => {
     assert.ok(isValidWorkspaceId('DEV'));
 });
@@ -115,8 +119,8 @@ test('isValidWorkspaceId: rejects a single character', () => {
     assert.ok(!isValidWorkspaceId('A'));
 });
 
-test('isValidWorkspaceId: rejects 7+ characters', () => {
-    assert.ok(!isValidWorkspaceId('ABCDEFG'));
+test('isValidWorkspaceId: rejects 11+ characters', () => {
+    assert.ok(!isValidWorkspaceId('ABCDEFGHIJK'));
 });
 
 test('isValidWorkspaceId: rejects lowercase letters', () => {
