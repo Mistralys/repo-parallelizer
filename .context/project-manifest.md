@@ -449,6 +449,30 @@ function generateWorkspaceFile(workspaceId: string, repoPaths: { slug: string; p
 function removeWorkspaceFile(filePath: string): void
 ```
 
+### Workspace Health (`workspace-health.ts`)
+
+```typescript
+interface WorkspaceHealthIssue {
+    type: string;
+    severity: 'error' | 'warning';
+    message: string;
+    fixAction: string;
+    repositoryId?: string;
+}
+
+interface WorkspaceHealthReport {
+    healthy: boolean;
+    issues: WorkspaceHealthIssue[];
+}
+
+function checkWorkspaceHealth(
+    projectId: string,
+    workspaceId: string,
+    projectsFolder: string,
+    repositoryIds: string[],
+): WorkspaceHealthReport
+```
+
 ---
 
 ## Storage (`src/storage/`)
@@ -1115,6 +1139,51 @@ toast UI.
             └── ...
 ```
 
+---
+
+## 12. Workspace Health Check
+
+```
+User → GET /api/projects/:id/workspaces/:wid/health
+  └→ projectManager.getById(projectId)          # 404 if project unknown
+  └→ workspaceManager.getById(projectId, wid)   # 404 if workspace unknown
+  └→ fs.existsSync(workspaceFolder)?
+       ├→ false (uninitialized): sendJson 200 { healthy: true, issues: [] }
+       └→ true (initialized):
+            checkWorkspaceHealth(projectId, workspaceId, projectsFolder, repositoryIds)
+              └→ Check 1: fs.existsSync(getWorkspaceFilePath(...))
+                   └→ absent → issue { type: 'workspace-file-missing', severity: 'warning',
+                                        fixAction: 'regenerate-workspace-file' }
+              └→ Check 2: for each repoId in repositoryIds:
+                   fs.existsSync(path.join(projectsFolder, projectId, wid, repoId, '.git'))
+                   └→ absent → issue { type: 'repository-not-cloned', severity: 'warning',
+                                        fixAction: 'setup-workspace', repositoryId }
+              └→ Return WorkspaceHealthReport { healthy: issues.length === 0, issues }
+            sendJson 200 WorkspaceHealthReport
+```
+
+**GUI integration:**
+- `project-detail.js`: health fetched in parallel with status for all initialized workspaces via `Promise.allSettled`. Failing fetches degrade gracefully (health cell left empty).
+- `workspace-detail.js`: health report fetched on initial load and every poll cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix action buttons.
+
+---
+
+## 13. Regenerate Workspace File
+
+```
+User → POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file
+  └→ projectManager.getById(projectId)          # 404 if project unknown
+  └→ workspaceManager.getById(projectId, wid)   # 404 if workspace unknown
+  └→ fs.existsSync(workspaceFolder)?
+       └→ absent → sendError 400 "Workspace folder does not exist. Run setup first."
+  └→ Build repoPaths: project.Repositories.map(repoId → { slug: repoId, path: ... })
+  └→ getWorkspaceFilePath(projectsFolder, projectId, workspaceId) → wsFilePath
+  └→ generateWorkspaceFile(workspaceId, repoPaths, wsFilePath)   # writes .code-workspace
+  └→ sendJson 200 { success: true }
+```
+
+**No git operations are performed.** This endpoint only writes the `.code-workspace` JSON file. All repository clones remain untouched. Use `POST .../setup` to clone missing repositories.
+
 ```
 ###  Path: `/docs/agents/project-manifest/gui-frontend.md`
 
@@ -1147,8 +1216,8 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 |---|---|---|
 | `#/` | `dashboard.js` | Project listing with creation form. |
 | `#/repositories` | `repositories.js` | Repository CRUD table. |
-| `#/projects/:id` | `project-detail.js` | Project metadata, tabbed repo/workspace/danger-zone management. |
-| `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with countdown-based polling and manual refresh. |
+| `#/projects/:id` | `project-detail.js` | Project metadata, tabbed repo/workspace/danger-zone management. The workspace table includes a **Health** column: initialized workspaces with health issues show a warning badge with issue count; healthy and uninitialized workspaces show an empty cell. Health is fetched in parallel with status for all initialized workspaces via `Promise.allSettled` (graceful degradation — fetch failures leave the health cell empty). |
+| `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with countdown-based polling and manual refresh. Health report fetched in parallel on initial load and on every poll/refresh cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix buttons (`Regenerate File` for `regenerate-workspace-file` issues, `Fix Setup` for `setup-workspace` issues). |
 | `#/projects/:id/workspaces/:wid/branch-switch` | `branch-switch.js` | 3-step branch switch wizard. |
 | `#/settings` | `settings.js` | Settings view with two sections: **Git Credentials** (add/delete per-host PATs) and **Repositories Refresh Delay** (configurable `gitPollingIntervalSeconds`). |
 | `#/error-log` | `error-log.js` | Paginated, filterable error log table with expandable detail rows and "Clear All" action. |
@@ -1159,12 +1228,23 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 
 - `api.repositories` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `delete(id)`
 - `api.projects` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `rename(id, newId)`, `delete(id)`, `addRepository(pid, rid)`, `removeRepository(pid, rid)`
-- `api.workspaces` — `list(pid)`, `get(pid, wid)`, `create(pid, data)`, `update(pid, wid, data)`, `rename(pid, wid, newId)`, `delete(pid, wid)`, `setup(pid, wid)`
+- `api.workspaces` — `list(pid)`, `get(pid, wid)`, `create(pid, data)`, `update(pid, wid, data)`, `rename(pid, wid, newId)`, `delete(pid, wid)`, `setup(pid, wid)`, `health(pid, wid)`, `regenerateFile(pid, wid)`
 - `api.branches` — `list(pid, wid)`, `switch(pid, wid, assignments)`
 - `api.status` — `get(pid, wid)`, `refresh(pid, wid)`
 - `api.config.credentials` — `list()`, `set(data)`, `delete(host)`
 - `api.config.polling` — `get()`, `set(seconds)`
 - `api.errorLog` — `list(params?)`, `get(id)`, `clear()`, `count()`
+
+### `api.workspaces` — Health & File Methods
+
+| Method | HTTP | Description |
+|---|---|---|
+| `health(pid, wid)` | `GET /api/projects/:id/workspaces/:wid/health` | Fetch the health report for an initialized workspace. Returns `{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }`. |
+| `regenerateFile(pid, wid)` | `POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file` | Regenerate the `.code-workspace` file from the current repository list without cloning. Returns `{ success: boolean }`. |
+
+**`health()` issue `fixAction` values:**
+- `regenerate-workspace-file` — missing or stale `.code-workspace` file; surface a `Regenerate File` button.
+- `setup-workspace` — uncloned repository; surface a `Fix Setup` button.
 
 ### `api.errorLog` Reference
 
@@ -1324,6 +1404,8 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 | `PUT` | `/api/projects/:id/workspaces/:wid/rename` | 200 | 400, 404 | Rename workspace. Body: `{ newId }`. |
 | `DELETE` | `/api/projects/:id/workspaces/:wid` | 204 | 404 | Delete workspace (STABLE cannot be deleted). |
 | `POST` | `/api/projects/:id/workspaces/:wid/setup` | 200 | 400, 404, 500 | Initialize workspace on disk (clone repos, generate .code-workspace file). |
+| `POST` | `/api/projects/:id/workspaces/:wid/regenerate-workspace-file` | 200 | 400, 404, 500 | Regenerate the `.code-workspace` file from the current repository list without cloning. Workspace folder must already exist on disk (400 if absent). Body: none. Response: `{ success: true }`. |
+| `GET` | `/api/projects/:id/workspaces/:wid/health` | 200 | 404 | Fetch the health report for a workspace. Returns `{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }`. Uninitialized workspaces return `{ healthy: true, issues: [] }`. 404 if project or workspace ID is unknown. |
 
 ---
 
@@ -1660,6 +1742,6 @@ Both scripts `cd` to their own directory before invoking `node dist/index.js men
 ```
 ---
 **File Statistics**
-- **Size**: 70.54 KB
-- **Lines**: 1622
+- **Size**: 77.33 KB
+- **Lines**: 1748
 File: `project-manifest.md`

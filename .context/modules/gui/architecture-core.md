@@ -352,6 +352,38 @@ const workspaces = {
             `/api/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wid)}/setup`,
         );
     },
+
+    /**
+     * Fetch the health report for an initialized workspace.
+     *
+     * Returns a {@link WorkspaceHealthReport} describing any structural issues
+     * (missing .code-workspace file, uncloned repositories, etc.).
+     *
+     * @param {string} projectId
+     * @param {string} wid
+     * @returns {Promise<{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }>}
+     */
+    health(projectId, wid) {
+        return request(
+            'GET',
+            `/api/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wid)}/health`,
+        );
+    },
+
+    /**
+     * Regenerate the VS Code .code-workspace file from the current project
+     * repository list without performing any git cloning.
+     *
+     * @param {string} projectId
+     * @param {string} wid
+     * @returns {Promise<{ success: boolean }>}
+     */
+    regenerateFile(projectId, wid) {
+        return request(
+            'POST',
+            `/api/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wid)}/regenerate-workspace-file`,
+        );
+    },
 };
 
 /**
@@ -889,6 +921,6 @@ export class Router {
 ```
 ---
 **File Statistics**
-- **Size**: 26.93 KB
-- **Lines**: 895
+- **Size**: 28.05 KB
+- **Lines**: 927
 File: `modules/gui/architecture-core.md`

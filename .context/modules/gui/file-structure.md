@@ -9,6 +9,7 @@
             │   └── pico.classless.min.css
         └── index.html
         └── js/
+            └── api.config.test.mjs
             └── api.errorLog.test.mjs
             └── api.js
             └── app.js
@@ -36,6 +37,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 1.21 KB
-- **Lines**: 42
+- **Size**: 1.25 KB
+- **Lines**: 43
 File: `modules/gui/file-structure.md`

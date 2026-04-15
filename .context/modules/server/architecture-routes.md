@@ -184,15 +184,11 @@ import type { PollingManager } from '../pollingManager.js';
 import { saveConfigField } from '../../config/config.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/**
- * Minimum allowed polling interval in seconds.
- * Enforced by PUT /api/config/polling.
- */
-const MIN_POLLING_INTERVAL_SECONDS = 10;
+// Polling-interval bounds — shared with settings UI (gui/public/js/views/settings.js).
+import {
+    MIN_POLLING_INTERVAL_SECONDS,
+    MAX_POLLING_INTERVAL_SECONDS,
+} from '../../config/config.constants.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -225,6 +221,19 @@ function buildMaskedCredentials(
 // Route registration
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Named-options interface
+// ---------------------------------------------------------------------------
+
+export interface ConfigRoutesOptions {
+    router: Router;
+    appConfig: AppConfig;
+    /** Optional absolute path to `config.json`. Defaults to the tool-root `config.json`. */
+    configPath?: string;
+    /** Optional `PollingManager`. When provided, PUT /api/config/polling restarts the loop. */
+    pollingManager?: PollingManager;
+}
+
 /**
  * Registers REST endpoints for managing application configuration in
  * `config.json`.
@@ -239,10 +248,10 @@ function buildMaskedCredentials(
  *
  * **Polling endpoints:**
  *
- * | Method | Path                    | Description                              |
- * |--------|-------------------------|------------------------------------------|
- * | GET    | /api/config/polling     | Return current `gitPollingIntervalSeconds` |
- * | PUT    | /api/config/polling     | Update the polling interval (min 10 s)   |
+ * | Method | Path                    | Description                                          |
+ * |--------|-------------------------|------------------------------------------------------|
+ * | GET    | /api/config/polling     | Return current `gitPollingIntervalSeconds`           |
+ * | PUT    | /api/config/polling     | Update the polling interval (min 10 s, max 86400 s)  |
  *
  * Changes take effect immediately (the in-memory `appConfig` is mutated) and
  * are persisted to `config.json` via `saveConfigField()`.
@@ -250,20 +259,12 @@ function buildMaskedCredentials(
  * **Security:** tokens are never returned in full — only the last 4 characters
  * are exposed. The `host` field is validated against an injection-safe pattern.
  *
- * @param configPath - Optional absolute path to `config.json`. Defaults to the
- *   tool-root `config.json`. Pass a custom path in tests to avoid touching the
- *   real config file.
- * @param pollingManager - Optional `PollingManager` reference. When provided,
- *   the PUT /api/config/polling endpoint calls `pollingManager.restart()` after
- *   persisting the new interval. Existing callers that omit this parameter
- *   continue to work without error.
+ * @param options - Named-options bag: `router`, `appConfig`, optional
+ *   `configPath` (defaults to tool-root `config.json`), optional
+ *   `pollingManager` (restarts polling loop when present).
  */
-export function registerConfigRoutes(
-    router: Router,
-    appConfig: AppConfig,
-    configPath?: string,
-    pollingManager?: PollingManager,
-): void {
+export function registerConfigRoutes(options: ConfigRoutesOptions): void {
+    const { router, appConfig, configPath, pollingManager } = options;
     // ------------------------------------------------------------------
     // GET /api/config/credentials — list all (tokens masked)
     // ------------------------------------------------------------------
@@ -425,6 +426,15 @@ export function registerConfigRoutes(
                 res,
                 400,
                 `Field "seconds" must be at least ${MIN_POLLING_INTERVAL_SECONDS}. Received: ${seconds}.`,
+            );
+            return;
+        }
+
+        if (seconds > MAX_POLLING_INTERVAL_SECONDS) {
+            sendError(
+                res,
+                400,
+                `Field "seconds" must be at most ${MAX_POLLING_INTERVAL_SECONDS} (24 hours). Received: ${seconds}.`,
             );
             return;
         }
@@ -1243,37 +1253,42 @@ import * as path from 'node:path';
 import type { Router } from '../router.js';
 import type { WorkspaceManager } from '../../models/workspace/workspace.manager.js';
 import type { WorkspaceOrchestrator } from '../../orchestration/workspace-orchestrator.js';
+import type { ProjectManager } from '../../models/project/project.manager.js';
 import type { AppConfig } from '../../config/config.types.js';
 import { NotFoundError } from '../../errors.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
+import { generateWorkspaceFile, getWorkspaceFilePath } from '../../orchestration/vscode-workspace.js';
+import { checkWorkspaceHealth } from '../../orchestration/workspace-health.js';
 
 // ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
 /**
- * Registers the six CRUD routes for the `/api/projects/:id/workspaces` resource
+ * Registers workspace routes for the `/api/projects/:id/workspaces` resource
  * group on the provided `Router` instance.
  *
  * All handlers delegate to the supplied `WorkspaceManager` and map results
  * or errors to the appropriate HTTP status codes:
  *
- * | Method | Path                                             | Success | Failure |
- * |--------|--------------------------------------------------|---------|---------|
- * | GET    | /api/projects/:id/workspaces                    | 200     | 404     |
- * | POST   | /api/projects/:id/workspaces                    | 201     | 400/404 |
- * | GET    | /api/projects/:id/workspaces/:wid               | 200     | 404     |
- * | PUT    | /api/projects/:id/workspaces/:wid/rename        | 200     | 404/400 |
- * | DELETE | /api/projects/:id/workspaces/:wid               | 204     | 404     |
- *
- * Note: the spec lists 6 handlers; the 6th is the implicit update (description)
- * for a workspace via PUT /api/projects/:id/workspaces/:wid.
+ * | Method | Path                                                         | Success | Failure     |
+ * |--------|--------------------------------------------------------------|---------|-------------|
+ * | GET    | /api/projects/:id/workspaces                                | 200     | 404         |
+ * | POST   | /api/projects/:id/workspaces                                | 201     | 400/404     |
+ * | GET    | /api/projects/:id/workspaces/:wid                           | 200     | 404         |
+ * | PUT    | /api/projects/:id/workspaces/:wid                           | 200     | 400/404     |
+ * | PUT    | /api/projects/:id/workspaces/:wid/rename                    | 200     | 400/404     |
+ * | DELETE | /api/projects/:id/workspaces/:wid                           | 204     | 404         |
+ * | POST   | /api/projects/:id/workspaces/:wid/setup                     | 200     | 400/404/500 |
+ * | GET    | /api/projects/:id/workspaces/:wid/health                    | 200     | 404         |
+ * | POST   | /api/projects/:id/workspaces/:wid/regenerate-workspace-file | 200     | 400/404/500 |
  */
 export function registerWorkspaceRoutes(
     router: Router,
     workspaceManager: WorkspaceManager,
     workspaceOrchestrator: WorkspaceOrchestrator,
     appConfig: AppConfig,
+    projectManager: ProjectManager,
 ): void {
 
     // Helper: compute absolute workspace folder path.
@@ -1499,11 +1514,113 @@ export function registerWorkspaceRoutes(
             sendError(res, 500, err instanceof Error ? err.message : 'Failed to set up workspace.');
         }
     });
+
+    // ------------------------------------------------------------------
+    // POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file
+    // Regenerates the .code-workspace file from the current project
+    // repository list without cloning. Lightweight, no git operations.
+    // ------------------------------------------------------------------
+    router.post('/api/projects/:id/workspaces/:wid/regenerate-workspace-file', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        const projectId = params['id'];
+        const workspaceId = params['wid'];
+
+        // Verify project exists.
+        const project = projectManager.getById(projectId);
+        if (!project) {
+            sendError(res, 404, `Project "${projectId}" not found.`);
+            return;
+        }
+
+        // Verify workspace data entry exists.
+        try {
+            const ws = workspaceManager.getById(projectId, workspaceId);
+            if (ws === undefined) {
+                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
+                return;
+            }
+        } catch (err) {
+            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
+            return;
+        }
+
+        // Verify workspace folder exists on disk (workspace must be initialized).
+        const wsFolder = workspaceFolder(projectId, workspaceId);
+        if (!fs.existsSync(wsFolder)) {
+            sendError(res, 400, `Workspace folder does not exist. Run setup first.`);
+            return;
+        }
+
+        try {
+            const repoPaths = project.Repositories.map((repoId) => ({
+                slug: repoId,
+                path: path.join(appConfig.projectsFolder, projectId, workspaceId, repoId),
+            }));
+            const wsFilePath = getWorkspaceFilePath(appConfig.projectsFolder, projectId, workspaceId);
+            generateWorkspaceFile(workspaceId, repoPaths, wsFilePath);
+            sendJson(res, 200, { success: true });
+        } catch (err) {
+            sendError(res, 500, err instanceof Error ? err.message : 'Failed to regenerate workspace file.');
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // GET /api/projects/:id/workspaces/:wid/health
+    // Returns a WorkspaceHealthReport describing any structural issues.
+    // Uninitialized workspaces (folder not yet created) are considered
+    // healthy and return { healthy: true, issues: [] } immediately.
+    // ------------------------------------------------------------------
+    router.get('/api/projects/:id/workspaces/:wid/health', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        const projectId   = params['id'];
+        const workspaceId = params['wid'];
+
+        // Verify project exists and obtain its repository list.
+        const project = projectManager.getById(projectId);
+        if (!project) {
+            sendError(res, 404, `Project "${projectId}" not found.`);
+            return;
+        }
+
+        // Verify workspace data entry exists.
+        try {
+            const ws = workspaceManager.getById(projectId, workspaceId);
+            if (ws === undefined) {
+                sendError(res, 404, `Workspace "${workspaceId}" not found in project "${projectId}".`);
+                return;
+            }
+        } catch (err) {
+            sendError(res, 404, err instanceof Error ? err.message : 'Not found.');
+            return;
+        }
+
+        // Uninitialized workspaces are considered healthy — they have not been
+        // set up yet, so structural checks are not applicable.
+        const wsDir = workspaceFolder(projectId, workspaceId);
+        if (!fs.existsSync(wsDir)) {
+            sendJson(res, 200, { healthy: true, issues: [] });
+            return;
+        }
+
+        const report = checkWorkspaceHealth(
+            projectId,
+            workspaceId,
+            appConfig.projectsFolder,
+            project.Repositories,
+        );
+        sendJson(res, 200, report);
+    });
 }
 
 ```
 ---
 **File Statistics**
-- **Size**: 57.05 KB
-- **Lines**: 1510
+- **Size**: 62.23 KB
+- **Lines**: 1627
 File: `modules/server/architecture-routes.md`

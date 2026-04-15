@@ -35,6 +35,7 @@ import { registerBranchRoutes } from './routes/branches.js';
 import { registerStatusRoutes } from './routes/status.js';
 import { registerConfigRoutes } from './routes/config.js';
 import { registerErrorLogRoutes } from './routes/error-log.js';
+import { migrateWorkspaceFiles } from '../orchestration/vscode-workspace.js';
 
 // ---------------------------------------------------------------------------
 // Public configuration type
@@ -130,16 +131,28 @@ export function startServer(config: ServerConfig): Promise<void> {
     );
 
     // ------------------------------------------------------------------
+    // One-time migration: move .code-workspace files from flat layout to
+    // per-project subdirectory layout (idempotent, safe to run every startup).
+    // ------------------------------------------------------------------
+    const projectSlugs = projectManager.list().map((p) => p.Id);
+    const migratedCount = migrateWorkspaceFiles(config.appConfig.projectsFolder, projectSlugs);
+    if (migratedCount > 0) {
+        process.stdout.write(
+            `[repo-parallelizer] Migrated ${migratedCount} workspace file(s) to per-project subdirectories.\n`,
+        );
+    }
+
+    // ------------------------------------------------------------------
     // Build the router and register all route groups
     // ------------------------------------------------------------------
     const router = new Router();
     router.setErrorLogManager(errorLogManager);
     registerRepositoryRoutes(router, repoManager);
     registerProjectRoutes(router, projectManager);
-    registerWorkspaceRoutes(router, workspaceManager, workspaceOrchestrator, config.appConfig);
+    registerWorkspaceRoutes(router, workspaceManager, workspaceOrchestrator, config.appConfig, projectManager);
     registerBranchRoutes(router, branchOrchestrator, workspaceManager);
     registerStatusRoutes(router, pollingManager, projectManager, workspaceManager, config.appConfig);
-    registerConfigRoutes(router, config.appConfig, undefined, pollingManager);
+    registerConfigRoutes({ router, appConfig: config.appConfig, pollingManager });
     registerErrorLogRoutes(router, errorLogManager);
 
     // ------------------------------------------------------------------
@@ -946,6 +959,6 @@ export async function serveStatic(
 ```
 ---
 **File Statistics**
-- **Size**: 34.63 KB
-- **Lines**: 952
+- **Size**: 35.36 KB
+- **Lines**: 965
 File: `modules/server/architecture-core.md`

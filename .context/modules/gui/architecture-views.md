@@ -2122,10 +2122,11 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
  * @param {string}   projectId  - Current project ID.
  * @param {Array<{ id: string, description: string, createdAt: string, initialized: boolean }>} workspaces
  * @param {Record<string, Record<string, Object>|null>} wsStatusMap - Keyed by workspace ID; values are status maps (repoId → GitStatusInfo) or null.
+ * @param {Record<string, { healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }|null>} wsHealthMap - Keyed by workspace ID; null when health fetch failed or workspace is uninitialized.
  * @param {function(): Promise<void>} onRefresh - Re-renders the entire view.
  * @returns {HTMLElement}
  */
-function buildWorkspacesSection(projectId, workspaces, wsStatusMap, onRefresh) {
+function buildWorkspacesSection(projectId, workspaces, wsStatusMap, wsHealthMap, onRefresh) {
     const section = document.createElement('section');
     section.className = 'project-workspaces-section';
 
@@ -2141,7 +2142,7 @@ function buildWorkspacesSection(projectId, workspaces, wsStatusMap, onRefresh) {
 
         const thead = document.createElement('thead');
         const htr   = document.createElement('tr');
-        ['ID', 'Description', 'Created', 'Branches', 'Actions'].forEach((label) => {
+        ['ID', 'Description', 'Created', 'Branches', 'Health', 'Actions'].forEach((label) => {
             const th = document.createElement('th');
             th.textContent = label;
             htr.appendChild(th);
@@ -2205,6 +2206,36 @@ function buildWorkspacesSection(projectId, workspaces, wsStatusMap, onRefresh) {
                 branchesCell.textContent = '—';
             }
             tr.appendChild(branchesCell);
+
+            // Health cell — badge shown only for initialized workspaces with issues.
+            // Uninitialized workspaces and healthy workspaces render an empty cell.
+            const healthCell = document.createElement('td');
+            healthCell.className = 'workspace-health-cell';
+            if (ws.initialized) {
+                const healthReport = wsHealthMap[ws.id];
+                if (
+                    healthReport &&
+                    !healthReport.healthy &&
+                    Array.isArray(healthReport.issues) &&
+                    healthReport.issues.length > 0
+                ) {
+                    const badge = document.createElement('span');
+                    badge.className = 'health-badge';
+
+                    const icon = document.createElement('span');
+                    icon.setAttribute('aria-hidden', 'true');
+                    icon.textContent = '\u26a0';
+                    badge.appendChild(icon);
+
+                    const label = document.createElement('span');
+                    const n = healthReport.issues.length;
+                    label.textContent = `${n} ${n === 1 ? 'issue' : 'issues'}`;
+                    badge.appendChild(label);
+
+                    healthCell.appendChild(badge);
+                }
+            }
+            tr.appendChild(healthCell);
 
             // Actions cell
             const actCell = document.createElement('td');
@@ -2626,14 +2657,24 @@ export async function renderProjectDetail(container, params) {
     // -----------------------------------------------------------------------
     /** @type {Record<string, Record<string, Object>|null>} */
     const wsStatusMap = {};
+    /** @type {Record<string, { healthy: boolean, issues: Array }|null>} */
+    const wsHealthMap = {};
     const initializedWs = normWorkspaces.filter((ws) => ws.initialized);
     if (initializedWs.length > 0) {
-        const statusResults = await Promise.allSettled(
-            initializedWs.map((ws) => api.status.get(projectId, ws.id)),
-        );
+        const [statusResults, healthResults] = await Promise.all([
+            Promise.allSettled(
+                initializedWs.map((ws) => api.status.get(projectId, ws.id)),
+            ),
+            Promise.allSettled(
+                initializedWs.map((ws) => api.workspaces.health(projectId, ws.id)),
+            ),
+        ]);
         initializedWs.forEach((ws, i) => {
             wsStatusMap[ws.id] = statusResults[i].status === 'fulfilled'
                 ? statusResults[i].value
+                : null;
+            wsHealthMap[ws.id] = healthResults[i].status === 'fulfilled'
+                ? healthResults[i].value
                 : null;
         });
     }
@@ -2729,7 +2770,7 @@ export async function renderProjectDetail(container, params) {
 
     // ---- Workspaces panel ----
     panels.workspaces.appendChild(
-        buildWorkspacesSection(normProject.id, normWorkspaces, wsStatusMap, refresh),
+        buildWorkspacesSection(normProject.id, normWorkspaces, wsStatusMap, wsHealthMap, refresh),
     );
     container.appendChild(panels.workspaces);
 
@@ -3493,16 +3534,14 @@ function buildAddCredentialForm(tableContainer) {
  * Build the "Repositories Refresh Delay" section.
  *
  * Fetches the current server-side `gitPollingIntervalSeconds` value on mount,
- * populates a number input, and persists changes via `PUT /api/config/polling`.
+ * populates a number input, and exposes a `save()` function for the shared
+ * settings footer button.
  *
- * Client-side validation rejects values below 10 without sending a request.
- * A success or error toast is shown after every save attempt.
- *
- * @returns {HTMLElement} The section wrapper element.
+ * @returns {{ element: HTMLElement, save: () => Promise<boolean> }}
  */
 function buildRefreshDelaySection() {
-    const section = document.createElement('div');
-    section.className = 'refresh-delay-section';
+    const section = document.createElement('section');
+    section.className = 'settings-section refresh-delay-section';
 
     const heading = document.createElement('h2');
     heading.textContent = 'Repositories Refresh Delay';
@@ -3530,6 +3569,8 @@ function buildRefreshDelaySection() {
     input.name = 'refreshDelay';
     input.className = 'form-input refresh-delay-input';
     input.min = '10';
+    // Maximum matches server-side MAX_POLLING_INTERVAL_SECONDS in src/config/config.constants.ts
+    input.max = '86400';
     input.step = '1';
     input.placeholder = '30';
     input.setAttribute('aria-label', 'Polling interval in seconds');
@@ -3538,15 +3579,9 @@ function buildRefreshDelaySection() {
     unitLabel.className = 'refresh-delay-unit';
     unitLabel.textContent = 'seconds';
 
-    const saveBtn = document.createElement('button');
-    saveBtn.type = 'button';
-    saveBtn.className = 'btn btn-primary';
-    saveBtn.textContent = 'Save';
-
     inputRow.appendChild(label);
     inputRow.appendChild(input);
     inputRow.appendChild(unitLabel);
-    inputRow.appendChild(saveBtn);
     section.appendChild(inputRow);
 
     // ---- Inline error message ----
@@ -3568,35 +3603,37 @@ function buildRefreshDelaySection() {
         }
     })();
 
-    // ---- Save behaviour ----
-    saveBtn.addEventListener('click', async () => {
+    // ---- Save function (called by the shared footer button) ----
+    async function save() {
         const raw   = input.value.trim();
         const value = Number(raw);
 
-        // Client-side validation.
         if (!raw || !Number.isFinite(value) || !Number.isInteger(value) || value < 10) {
             errorMsg.textContent = 'Please enter a whole number of 10 or more.';
             errorMsg.hidden = false;
             input.focus();
-            return;
+            return false;
+        }
+
+        if (value > 86400) {
+            errorMsg.textContent = 'Please enter a value of 86400 or less (24 hours maximum).';
+            errorMsg.hidden = false;
+            input.focus();
+            return false;
         }
 
         errorMsg.hidden = true;
-        saveBtn.disabled = true;
-        saveBtn.textContent = 'Saving…';
 
         try {
             await api.config.polling.set(value);
-            showToast('Refresh delay saved.', 'success');
+            return true;
         } catch (err) {
             showToast(err.message || 'Failed to save refresh delay.', 'error');
-        } finally {
-            saveBtn.disabled = false;
-            saveBtn.textContent = 'Save';
+            return false;
         }
-    });
+    }
 
-    return section;
+    return { element: section, save };
 }
 
 // ---------------------------------------------------------------------------
@@ -3624,26 +3661,60 @@ export function renderSettings(container, _params) {
     container.appendChild(heading);
 
     // Credentials section
+    const credSection = document.createElement('section');
+    credSection.className = 'settings-section';
+
     const credHeading = document.createElement('h2');
     credHeading.textContent = 'Git Credentials';
-    container.appendChild(credHeading);
+    credSection.appendChild(credHeading);
 
     const credDescription = document.createElement('p');
     credDescription.textContent =
         'Manage per-host personal access tokens used for authenticating with private repositories. Tokens are stored masked — only the last 4 characters are visible.';
-    container.appendChild(credDescription);
+    credSection.appendChild(credDescription);
 
     const tableContainer = document.createElement('div');
     tableContainer.className = 'credentials-table-container';
-    container.appendChild(tableContainer);
+    credSection.appendChild(tableContainer);
 
-    container.appendChild(buildAddCredentialForm(tableContainer));
+    credSection.appendChild(buildAddCredentialForm(tableContainer));
+    container.appendChild(credSection);
 
     // Initial data load
     renderCredentialsTable(tableContainer);
 
-    // ---- Refresh Delay section ----
-    container.appendChild(buildRefreshDelaySection());
+    // ---- Remaining sections ----
+    const refreshDelay = buildRefreshDelaySection();
+    container.appendChild(refreshDelay.element);
+
+    // ---- Form footer ----
+    const footer = document.createElement('footer');
+    footer.className = 'settings-footer';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'btn btn-primary';
+    saveBtn.textContent = 'Save Settings';
+    footer.appendChild(saveBtn);
+    container.appendChild(footer);
+
+    saveBtn.addEventListener('click', async () => {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving…';
+
+        try {
+            const results = await Promise.all([
+                refreshDelay.save(),
+            ]);
+
+            if (results.every(Boolean)) {
+                showToast('Settings saved.', 'success');
+            }
+        } finally {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save Settings';
+        }
+    });
 }
 
 ```
@@ -3711,8 +3782,8 @@ export function setRouter(router) {
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Polling interval in milliseconds. */
-const POLL_INTERVAL_MS = 10_000;
+/** Default polling interval in milliseconds (fallback when config fetch fails). */
+const DEFAULT_POLL_INTERVAL_MS = 10_000;
 
 /** The workspace ID that cannot be renamed or deleted. */
 const STABLE_WS_ID = 'STABLE';
@@ -4261,15 +4332,108 @@ function buildRefreshToolbar() {
 }
 
 // ---------------------------------------------------------------------------
+// Health alert section
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a health alert section element from a workspace health report.
+ * Returns `null` when the workspace is healthy (no issues to display).
+ *
+ * Fix-action buttons are wired via the `callbacks` argument so the
+ * caller can inject async handlers that match the surrounding view's
+ * closure state (project/workspace IDs, toast helper, etc.).
+ *
+ * @param {{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }|null} healthReport
+ * @param {{ onRegenerate: function(): Promise<void>, onSetup: function(): Promise<void> }} callbacks
+ * @returns {HTMLElement|null}
+ */
+function buildHealthAlertSection(healthReport, callbacks) {
+    if (
+        !healthReport ||
+        healthReport.healthy ||
+        !Array.isArray(healthReport.issues) ||
+        healthReport.issues.length === 0
+    ) {
+        return null;
+    }
+
+    const section = document.createElement('div');
+    section.className = 'health-alert';
+
+    const title = document.createElement('div');
+    title.className = 'health-alert-title';
+    title.textContent = 'Workspace health issues detected';
+    section.appendChild(title);
+
+    for (const issue of healthReport.issues) {
+        const row = document.createElement('div');
+        row.className = 'health-alert-issue';
+
+        const msg = document.createElement('span');
+        msg.className = 'health-alert-issue__message';
+        msg.textContent = issue.message;
+        row.appendChild(msg);
+
+        if (issue.fixAction === 'regenerate-workspace-file') {
+            const actionWrap = document.createElement('span');
+            actionWrap.className = 'health-alert-issue__action';
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-secondary btn-sm';
+            btn.textContent = 'Regenerate File';
+            btn.addEventListener('click', async () => {
+                btn.disabled = true;
+                btn.textContent = 'Regenerating\u2026';
+                try {
+                    await callbacks.onRegenerate();
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = 'Regenerate File';
+                }
+            });
+            actionWrap.appendChild(btn);
+            row.appendChild(actionWrap);
+        } else if (issue.fixAction === 'setup-workspace') {
+            const actionWrap = document.createElement('span');
+            actionWrap.className = 'health-alert-issue__action';
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-secondary btn-sm';
+            btn.textContent = 'Fix Setup';
+            btn.addEventListener('click', async () => {
+                btn.disabled = true;
+                btn.textContent = 'Setting up\u2026';
+                try {
+                    await callbacks.onSetup();
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = 'Fix Setup';
+                }
+            });
+            actionWrap.appendChild(btn);
+            row.appendChild(actionWrap);
+        }
+        // Issues with an unknown fixAction render the message row without a button.
+
+        section.appendChild(row);
+    }
+
+    return section;
+}
+
+// ---------------------------------------------------------------------------
 // Public view entry point
 // ---------------------------------------------------------------------------
 
 /**
  * Render the workspace detail view.
  *
- * Fetches workspace metadata, project (for the repositories list), and
- * initial Git status in parallel. Then starts a polling interval that
- * updates badges in-place every {@link POLL_INTERVAL_MS} milliseconds.
+ * Fetches workspace metadata, project (for the repositories list), polling
+ * configuration, and initial Git status in parallel. Then starts a polling
+ * interval that updates badges in-place using the server-configured interval
+ * (falls back to {@link DEFAULT_POLL_INTERVAL_MS} if the config fetch fails).
  *
  * @param {HTMLElement} container - The `#app` DOM element provided by the router.
  * @param {{ id: string, wid: string }} params - Route parameters.
@@ -4299,7 +4463,10 @@ export function renderWorkspaceDetail(container, params) {
         api.workspaces.get(projectId, wid),
         api.projects.get(projectId),
         api.status.refresh(projectId, wid),
-    ]).then(([rawWorkspace, rawProject, statusMap]) => {
+        api.config.polling.get().catch(() => null),
+        api.workspaces.health(projectId, wid).catch(() => null),
+    ]).then((results) => {
+        const [rawWorkspace, rawProject, statusMap, pollingConfig, healthReport] = results;
         // Guard: if the container was cleared by navigation before we resolved,
         // do nothing and let the cleanup function handle the interval.
         if (!container.isConnected) return;
@@ -4318,6 +4485,16 @@ export function renderWorkspaceDetail(container, params) {
 
         const isStable = wid === STABLE_WS_ID;
 
+        // Resolve the effective poll interval from server config, with fallback.
+        const pollIntervalMs = (
+            pollingConfig &&
+            typeof pollingConfig.gitPollingIntervalSeconds === 'number' &&
+            Number.isFinite(pollingConfig.gitPollingIntervalSeconds) &&
+            pollingConfig.gitPollingIntervalSeconds > 0
+        )
+            ? pollingConfig.gitPollingIntervalSeconds * 1000
+            : DEFAULT_POLL_INTERVAL_MS;
+
         // Build status table first to obtain tbody reference for helpers.
         const { section: statusSection, tbody } = buildStatusTableSection(repos, statusMap || {});
 
@@ -4325,7 +4502,7 @@ export function renderWorkspaceDetail(container, params) {
         // Refresh helpers (referenced by toolbar, polling, and setup)
         // -------------------------------------------------------------------
 
-        let remainingSeconds = POLL_INTERVAL_MS / 1000;
+        let remainingSeconds = pollIntervalMs / 1000;
         let refreshInProgress = false;
 
         // Retry row reference — kept so polling can update/hide it.
@@ -4337,12 +4514,34 @@ export function renderWorkspaceDetail(container, params) {
         const progressBar = toolbar.querySelector('.refresh-progress-bar');
         const refreshNowBtn = toolbar.querySelector('.refresh-now-btn');
 
+        // Health section container — always in DOM between header and toolbar;
+        // empty when the workspace is healthy.
+        const healthContainerEl = document.createElement('div');
+
+        // Latest health report — kept in sync by renderHealthSection so that
+        // updateMissingReposRow can exclude repos already covered by health alerts.
+        let currentHealthReport = healthReport;
+
         /**
          * Re-evaluate missing repos after a status update and hide/update
          * the retry row accordingly.
+         *
+         * Repos flagged by a `repository-not-cloned` health alert (fixAction:
+         * `setup-workspace`) are excluded from the missing-repos count here
+         * because the health alert already surfaces a fix button for them.
+         * This row is therefore reserved for the transient polling-lag case
+         * where `.git/` is present but status data has not arrived yet.
          */
         function updateMissingReposRow(freshStatusMap) {
-            const currentMissing = repos.filter((r) => !freshStatusMap[r.repoId]);
+            const notClonedIds = new Set(
+                (currentHealthReport && Array.isArray(currentHealthReport.issues)
+                    ? currentHealthReport.issues : [])
+                    .filter((i) => i.fixAction === 'setup-workspace' && i.repositoryId)
+                    .map((i) => i.repositoryId),
+            );
+            const currentMissing = repos.filter(
+                (r) => !freshStatusMap[r.repoId] && !notClonedIds.has(r.repoId),
+            );
             if (currentMissing.length === 0) {
                 if (retryRow) {
                     retryRow.remove();
@@ -4355,22 +4554,78 @@ export function renderWorkspaceDetail(container, params) {
         }
 
         /**
+         * Rebuild the health alert container from the given health report.
+         * Updates `currentHealthReport` first so subsequent
+         * `updateMissingReposRow` calls reflect the latest health state.
+         *
+         * @param {{ healthy: boolean, issues: Array }|null} report
+         */
+        function renderHealthSection(report) {
+            currentHealthReport = report;
+            healthContainerEl.innerHTML = '';
+            const el = buildHealthAlertSection(report, {
+                onRegenerate: async () => {
+                    try {
+                        await api.workspaces.regenerateFile(projectId, wid);
+                        showToast('Workspace file regenerated.', 'success');
+                        await fetchAndRenderHealth();
+                    } catch (err) {
+                        showToast(err.message || 'Failed to regenerate workspace file.', 'error');
+                    }
+                },
+                onSetup: async () => {
+                    try {
+                        await runSetup(projectId, wid, 'Workspace setup complete.');
+                        doRefresh();
+                        await fetchAndRenderHealth();
+                    } catch (err) {
+                        showToast(err.message || 'Failed to set up workspace.', 'error');
+                    }
+                },
+            });
+            if (el) {
+                healthContainerEl.appendChild(el);
+            }
+        }
+
+        /**
+         * Fetch the latest health report from the API and re-render the
+         * health alert section in-place. Silently ignores network errors.
+         */
+        async function fetchAndRenderHealth() {
+            try {
+                const fresh = await api.workspaces.health(projectId, wid);
+                if (container.isConnected) {
+                    renderHealthSection(fresh);
+                }
+            } catch {
+                // Silently ignore health fetch errors — stale UI remains.
+            }
+        }
+
+        /**
          * Automatic poll — uses cached status endpoint.
          */
         async function doPoll() {
             if (refreshInProgress) return;
             refreshInProgress = true;
             try {
-                const fresh = await api.status.get(projectId, wid);
-                if (container.isConnected && fresh) {
-                    updateStatusTable(tbody, fresh);
-                    updateMissingReposRow(fresh);
+                const [fresh, freshHealth] = await Promise.all([
+                    api.status.get(projectId, wid),
+                    api.workspaces.health(projectId, wid).catch(() => null),
+                ]);
+                if (container.isConnected) {
+                    renderHealthSection(freshHealth);
+                    if (fresh) {
+                        updateStatusTable(tbody, fresh);
+                        updateMissingReposRow(fresh);
+                    }
                 }
             } catch {
                 // Silently ignore polling errors — stale badges remain.
             } finally {
                 refreshInProgress = false;
-                remainingSeconds = POLL_INTERVAL_MS / 1000;
+                remainingSeconds = pollIntervalMs / 1000;
                 progressBar.classList.remove('refreshing');
                 progressBar.style.width = '0%';
             }
@@ -4385,17 +4640,23 @@ export function renderWorkspaceDetail(container, params) {
             refreshNowBtn.disabled = true;
             progressBar.classList.add('refreshing');
             try {
-                const fresh = await api.status.refresh(projectId, wid);
-                if (container.isConnected && fresh) {
-                    updateStatusTable(tbody, fresh);
-                    updateMissingReposRow(fresh);
+                const [fresh, freshHealth] = await Promise.all([
+                    api.status.refresh(projectId, wid),
+                    api.workspaces.health(projectId, wid).catch(() => null),
+                ]);
+                if (container.isConnected) {
+                    renderHealthSection(freshHealth);
+                    if (fresh) {
+                        updateStatusTable(tbody, fresh);
+                        updateMissingReposRow(fresh);
+                    }
                 }
             } catch {
                 // Silently ignore — stale badges remain.
             } finally {
                 refreshInProgress = false;
                 refreshNowBtn.disabled = false;
-                remainingSeconds = POLL_INTERVAL_MS / 1000;
+                remainingSeconds = pollIntervalMs / 1000;
                 progressBar.classList.remove('refreshing');
                 progressBar.style.width = '0%';
             }
@@ -4416,7 +4677,7 @@ export function renderWorkspaceDetail(container, params) {
                     progressBar.classList.add('refreshing');
                     doPoll();
                 } else {
-                    const totalSeconds = POLL_INTERVAL_MS / 1000;
+                    const totalSeconds = pollIntervalMs / 1000;
                     const pct = ((totalSeconds - remainingSeconds) / totalSeconds) * 100;
                     progressBar.style.width = `${pct}%`;
                 }
@@ -4439,6 +4700,11 @@ export function renderWorkspaceDetail(container, params) {
 
         container.appendChild(buildHeaderSection(projectId, workspace, isStable, onSetupSuccess));
 
+        // Health alert section — sits between the header and the refresh toolbar.
+        // Populated by renderHealthSection(); empty div when workspace is healthy.
+        container.appendChild(healthContainerEl);
+        renderHealthSection(healthReport);
+
         // Refresh toolbar (between header and status table)
         if (repos.length > 0) {
             container.appendChild(toolbar);
@@ -4446,10 +4712,20 @@ export function renderWorkspaceDetail(container, params) {
 
         container.appendChild(statusSection);
 
-        // Show "Retry Setup" when workspace is initialized but some repos
-        // have no status data (likely failed to clone).
+        // Show "Retry Setup" when the workspace is initialized but some repos
+        // have no status data AND are not already covered by a health alert.
+        // Health alerts handle the missing-.git/ case (fixAction: setup-workspace);
+        // this block targets the transient polling-lag case where .git/ is present
+        // but the background status sweep hasn't returned data yet.
         const safeStatusMap = statusMap || {};
-        const missingRepos = repos.filter((r) => !safeStatusMap[r.repoId]);
+        const notClonedRepoIds = new Set(
+            (healthReport && Array.isArray(healthReport.issues) ? healthReport.issues : [])
+                .filter((i) => i.fixAction === 'setup-workspace' && i.repositoryId)
+                .map((i) => i.repositoryId),
+        );
+        const missingRepos = repos.filter(
+            (r) => !safeStatusMap[r.repoId] && !notClonedRepoIds.has(r.repoId),
+        );
         if (workspace.initialized && missingRepos.length > 0) {
             retryRow = document.createElement('div');
             retryRow.className = 'workspace-mgmt-row';
@@ -4531,6 +4807,6 @@ export function renderWorkspaceDetail(container, params) {
 ```
 ---
 **File Statistics**
-- **Size**: 157.82 KB
-- **Lines**: 4537
+- **Size**: 169.44 KB
+- **Lines**: 4813
 File: `modules/gui/architecture-views.md`

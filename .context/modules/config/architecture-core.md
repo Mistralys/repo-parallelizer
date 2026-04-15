@@ -5,8 +5,25 @@ _SOURCE: Configuration types and loader_
 // Structure of documents
 └── src/
     └── config/
+        └── config.constants.ts
         └── config.ts
         └── config.types.ts
+
+```
+###  Path: `/src/config/config.constants.ts`
+
+```ts
+/**
+ * Minimum allowed polling interval in seconds.
+ * Enforced by PUT /api/config/polling and mirrored in the settings UI.
+ */
+export const MIN_POLLING_INTERVAL_SECONDS = 10;
+
+/**
+ * Maximum allowed polling interval in seconds (24 hours).
+ * Enforced by PUT /api/config/polling and mirrored in the settings UI (input.max).
+ */
+export const MAX_POLLING_INTERVAL_SECONDS = 86_400;
 
 ```
 ###  Path: `/src/config/config.ts`
@@ -210,6 +227,6 @@ export interface AppConfig {
 ```
 ---
 **File Statistics**
-- **Size**: 6.8 KB
-- **Lines**: 216
+- **Size**: 7.27 KB
+- **Lines**: 233
 File: `modules/config/architecture-core.md`

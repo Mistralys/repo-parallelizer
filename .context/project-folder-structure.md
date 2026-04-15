@@ -16,6 +16,8 @@
     │   └── projects-index.json
     │   └── projects/
     │       ├── ai-insights.json
+    │       ├── hcp-editor.json
+    │       ├── mailcode.json
     │       ├── repo-parallelizer.json
     │   └── repositories.json
 └── docs/
@@ -40,6 +42,7 @@
     │       │   └── pico.classless.min.css
     │   └── index.html
     │   └── js/
+    │       └── api.config.test.mjs
     │       └── api.errorLog.test.mjs
     │       └── api.js
     │       └── app.js
@@ -75,6 +78,7 @@
     │   ├── terminal-ui.ts
     ├── config/
     │   ├── README.md
+    │   ├── config.constants.ts
     │   ├── config.ts
     │   ├── config.types.ts
     │   ├── module-context.yaml
@@ -114,6 +118,7 @@
     │   ├── project-orchestrator.ts
     │   ├── repository-orchestrator.ts
     │   ├── vscode-workspace.ts
+    │   ├── workspace-health.ts
     │   ├── workspace-orchestrator.ts
     ├── server/
     │   ├── README.md
@@ -130,6 +135,7 @@
     │   │   │   ├── projects.test.ts
     │   │   │   ├── repositories.test.ts
     │   │   │   ├── status.test.ts
+    │   │   │   ├── workspaces-health.test.ts
     │   │   │   ├── workspaces.test.ts
     │   │   ├── staticServer.test.ts
     │   ├── index.ts
@@ -171,6 +177,7 @@
     │   ├── storage-init.test.ts
     │   ├── test-helpers.ts
     │   ├── vscode-workspace.test.ts
+    │   ├── workspace-health.test.ts
     │   ├── workspace-orchestrator.test.ts
     │   ├── workspace.manager.test.ts
     ├── utils/
@@ -183,6 +190,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 6.32 KB
-- **Lines**: 189
+- **Size**: 6.62 KB
+- **Lines**: 196
 File: `project-folder-structure.md`

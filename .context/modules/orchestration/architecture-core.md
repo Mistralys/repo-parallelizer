@@ -10,6 +10,7 @@ _SOURCE: Orchestrator types and implementation classes_
         └── project-orchestrator.ts
         └── repository-orchestrator.ts
         └── vscode-workspace.ts
+        └── workspace-health.ts
         └── workspace-orchestrator.ts
 
 ```
@@ -806,14 +807,18 @@ interface VsCodeWorkspaceFile {
 /**
  * Returns the absolute path for a VS Code .code-workspace file.
  *
- * Format: `{projectsFolder}/{projectSlug}-{workspaceId}.code-workspace`
+ * Format: `{projectsFolder}/{projectSlug}/{projectSlug}-{workspaceId}.code-workspace`
+ *
+ * The file is nested inside the per-project subdirectory so that each
+ * project's on-disk footprint (repositories + workspace file) is
+ * self-contained under a single directory.
  */
 export function getWorkspaceFilePath(
     projectsFolder: string,
     projectSlug: string,
     workspaceId: string,
 ): string {
-    return path.join(projectsFolder, `${projectSlug}-${workspaceId}.code-workspace`);
+    return path.join(projectsFolder, projectSlug, `${projectSlug}-${workspaceId}.code-workspace`);
 }
 
 /**
@@ -879,6 +884,165 @@ export function removeWorkspaceFile(filePath: string): void {
         }
         throw err;
     }
+}
+
+/**
+ * One-time migration utility: moves `.code-workspace` files from the legacy
+ * flat layout (`{projectsFolder}/{slug}-*.code-workspace`) into the nested
+ * per-project layout (`{projectsFolder}/{slug}/{slug}-*.code-workspace`).
+ *
+ * Behaviour:
+ * - Only files whose base name starts with a known project slug followed by `-`
+ *   are considered.  Unrecognized files are left untouched.
+ * - Files that are already at the correct target location are skipped (the
+ *   function is idempotent).
+ * - The target parent directory is created if it does not already exist.
+ *
+ * @param projectsFolder  Absolute path to the root folder that contains all
+ *                        project subdirectories and (legacy) flat workspace files.
+ * @param projectSlugs    Array of known project slug strings.  Only files
+ *                        matching one of these slugs are migrated.
+ * @returns               The number of files that were actually moved.
+ */
+export function migrateWorkspaceFiles(
+    projectsFolder: string,
+    projectSlugs: string[],
+): number {
+    let moved = 0;
+
+    // Build a Set for O(1) slug lookups.
+    const slugSet = new Set(projectSlugs);
+
+    let entries: fs.Dirent[];
+    try {
+        entries = fs.readdirSync(projectsFolder, { withFileTypes: true });
+    } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+            // projectsFolder does not yet exist — nothing to migrate.
+            return 0;
+        }
+        throw err;
+    }
+
+    for (const entry of entries) {
+        if (!entry.isFile()) continue;
+
+        const fileName = entry.name;
+        if (!fileName.endsWith('.code-workspace')) continue;
+
+        // Determine which known slug this file belongs to, if any.
+        // File names are of the form `{slug}-{workspaceId}.code-workspace`.
+        // We find the matching slug by checking whether the file name starts
+        // with `{slug}-`.  If multiple slugs could match (e.g. `foo` and
+        // `foo-bar`), we pick the longest matching slug (most specific).
+        let matchedSlug: string | null = null;
+        for (const slug of slugSet) {
+            if (fileName.startsWith(`${slug}-`)) {
+                if (matchedSlug === null || slug.length > matchedSlug.length) {
+                    matchedSlug = slug;
+                }
+            }
+        }
+
+        if (matchedSlug === null) continue; // unrecognized file — leave it alone
+
+        const sourcePath = path.join(projectsFolder, fileName);
+        const targetDir  = path.join(projectsFolder, matchedSlug);
+        const targetPath = path.join(targetDir, fileName);
+
+        // Already at the correct location — idempotency guard.
+        if (sourcePath === targetPath) continue;
+
+        // If the file somehow already exists at the target, skip to avoid
+        // overwriting (treat as already migrated).
+        if (fs.existsSync(targetPath)) continue;
+
+        fs.mkdirSync(targetDir, { recursive: true });
+        fs.renameSync(sourcePath, targetPath);
+        moved++;
+    }
+
+    return moved;
+}
+
+```
+###  Path: `/src/orchestration/workspace-health.ts`
+
+```ts
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { getWorkspaceFilePath } from './vscode-workspace.js';
+
+export interface WorkspaceHealthIssue {
+    type: string;
+    severity: 'error' | 'warning';
+    message: string;
+    fixAction: string;
+    repositoryId?: string;
+}
+
+export interface WorkspaceHealthReport {
+    healthy: boolean;
+    issues: WorkspaceHealthIssue[];
+}
+
+/**
+ * Performs a side-effect-free health check on a workspace.
+ *
+ * Checks:
+ * 1. Whether the VS Code .code-workspace file exists on disk.
+ * 2. Whether each repository directory contains a `.git` entry
+ *    (i.e. has been successfully cloned).
+ *
+ * Note on `.git` detection: the clone check uses `fs.existsSync` on the `.git`
+ * path entry, which returns `true` for both a `.git` directory (standard clone)
+ * and a `.git` file (git worktree pointer). Both forms are treated as a
+ * successfully cloned repository. If you need to distinguish between a full
+ * clone and a worktree, use `fs.statSync().isDirectory()` instead.
+ *
+ * @param projectId       Project identifier (used as the project slug in paths).
+ * @param workspaceId     Workspace identifier.
+ * @param projectsFolder  Root folder where projects are stored on disk.
+ * @param repositoryIds   Ordered list of repository IDs belonging to the workspace.
+ * @returns               A health report with a `healthy` flag and an array of issues.
+ */
+export function checkWorkspaceHealth(
+    projectId: string,
+    workspaceId: string,
+    projectsFolder: string,
+    repositoryIds: string[],
+): WorkspaceHealthReport {
+    const issues: WorkspaceHealthIssue[] = [];
+
+    // Check 1: VS Code workspace file exists.
+    const workspaceFilePath = getWorkspaceFilePath(projectsFolder, projectId, workspaceId);
+    if (!fs.existsSync(workspaceFilePath)) {
+        issues.push({
+            type: 'workspace-file-missing',
+            severity: 'warning',
+            message: 'VS Code workspace file is missing.',
+            fixAction: 'regenerate-workspace-file',
+        });
+    }
+
+    // Check 2: Each repository has been cloned (has a .git subdirectory).
+    for (const repoId of repositoryIds) {
+        const repoPath = path.join(projectsFolder, projectId, workspaceId, repoId);
+        if (!fs.existsSync(path.join(repoPath, '.git'))) {
+            issues.push({
+                type: 'repository-not-cloned',
+                severity: 'warning',
+                message: `Repository "${repoId}" is not cloned.`,
+                fixAction: 'setup-workspace',
+                repositoryId: repoId,
+            });
+        }
+    }
+
+    return {
+        healthy: issues.length === 0,
+        issues,
+    };
 }
 
 ```
@@ -1201,6 +1365,6 @@ export class WorkspaceOrchestrator {
 ```
 ---
 **File Statistics**
-- **Size**: 48.25 KB
-- **Lines**: 1207
+- **Size**: 54.15 KB
+- **Lines**: 1371
 File: `modules/orchestration/architecture-core.md`
