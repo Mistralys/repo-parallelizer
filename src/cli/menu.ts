@@ -121,6 +121,7 @@ async function launchGui(): Promise<void> {
     } catch (err) {
         printError('No config.json found. Run setup first.');
         printInfo(`Details: ${(err as Error).message}`);
+        await pressAnyKeyToContinue();
         return; // Return to menu.
     }
 
