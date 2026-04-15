@@ -1115,6 +1115,6 @@ export function formatLastActivity(isoTimestamp) {
 ```
 ---
 **File Statistics**
-- **Size**: 37.65 KB
+- **Size**: 37.66 KB
 - **Lines**: 1121
 File: `modules/gui/architecture-components.md`

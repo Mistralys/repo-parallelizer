@@ -8,6 +8,7 @@ moduleMetaData:
     - startServer
     - stopServer
     - REST API
+    - launchApplication
   relatedModules:
     - config
     - models

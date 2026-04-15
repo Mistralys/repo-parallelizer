@@ -3,6 +3,7 @@
 ```
 └── src/
     └── server/
+        └── app-launcher.ts
         └── index.ts
         └── pollingManager.ts
         └── requestUtils.ts
@@ -20,6 +21,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 603 B
-- **Lines**: 26
+- **Size**: 637 B
+- **Lines**: 27
 File: `modules/server/file-structure.md`
