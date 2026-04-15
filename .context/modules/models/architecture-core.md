@@ -1095,6 +1095,6 @@ export interface WorkspaceInfo {
 ```
 ---
 **File Statistics**
-- **Size**: 37.74 KB
+- **Size**: 37.75 KB
 - **Lines**: 1101
 File: `modules/models/architecture-core.md`

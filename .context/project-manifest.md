@@ -706,6 +706,29 @@ function startServer(config: ServerConfig): Promise<void>
 function stopServer(): Promise<void>
 ```
 
+### Application Launcher (`app-launcher.ts`)
+
+> **Internal module** — not re-exported from `src/server/index.ts`. Import directly when needed:
+> `import { launchApplication } from './app-launcher.js'`
+
+```typescript
+function launchApplication(command: string, args: string[]): Promise<void>
+```
+
+Launches an external application as a detached, fire-and-forget child process. The spawned process runs independently of the Node.js parent (`detached: true`, `stdio: 'ignore'`, `child.unref()`).
+
+**Cross-platform behaviour:**
+- **Windows (`process.platform === 'win32'`):** `shell: true` — routes through `cmd.exe` so `.cmd`/`.bat` launchers (e.g. `code.cmd`) are found on PATH.
+- **All other platforms:** `shell: false` — direct process execution, no intermediate shell.
+
+**Throws:**
+- `Error('Failed to launch application: command must not be empty.')` — when `command` is empty or blank.
+- `Error('Failed to launch application "<command>": <os-error-message>')` — when the OS-level spawn fails (e.g. command not found on PATH).
+
+**Security note (Windows):** When `shell: true` is active, shell metacharacters in `command` or `args` elements can be interpreted by `cmd.exe`. Call sites **must** validate inputs against an allowlist of known application commands (e.g. `'code'`, `'github'`) before calling this function.
+
+---
+
 ### Router (`router.ts`)
 
 ```typescript
@@ -773,7 +796,15 @@ function registerRepositoryRoutes(router: Router, repoManager: RepositoryManager
 function registerProjectRoutes(router: Router, projectManager: ProjectManager): void
 
 // workspaces.ts
-function registerWorkspaceRoutes(router: Router, workspaceManager: WorkspaceManager, workspaceOrchestrator: WorkspaceOrchestrator, appConfig: AppConfig): void
+function registerWorkspaceRoutes(
+    router: Router,
+    workspaceManager: WorkspaceManager,
+    workspaceOrchestrator: WorkspaceOrchestrator,
+    appConfig: AppConfig,
+    projectManager: ProjectManager,
+    errorLogManager: ErrorLogManager,
+    launchFn?: (command: string, args: string[]) => Promise<void>,  // test-only; defaults to launchApplication
+): void
 
 // branches.ts
 function registerBranchRoutes(router: Router, orchestrator: BranchOrchestrator, workspaceManager: WorkspaceManager): void
@@ -1217,7 +1248,7 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 | `#/` | `dashboard.js` | Project listing with creation form. |
 | `#/repositories` | `repositories.js` | Repository CRUD table. |
 | `#/projects/:id` | `project-detail.js` | Project metadata, tabbed repo/workspace/danger-zone management. The workspace table includes a **Health** column: initialized workspaces with health issues show a warning badge with issue count; healthy and uninitialized workspaces show an empty cell. Health is fetched in parallel with status for all initialized workspaces via `Promise.allSettled` (graceful degradation — fetch failures leave the health cell empty). |
-| `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with countdown-based polling and manual refresh. Health report fetched in parallel on initial load and on every poll/refresh cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix buttons (`Regenerate File` for `regenerate-workspace-file` issues, `Fix Setup` for `setup-workspace` issues). |
+| `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with countdown-based polling and manual refresh. Health report fetched in parallel on initial load and on every poll/refresh cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix buttons (`Regenerate File` for `regenerate-workspace-file` issues, `Fix Setup` for `setup-workspace` issues). The header management row includes an **"Open in VS Code"** button (shown only when `workspace.initialized` is `true`; dynamically inserted after a successful Setup without a full re-render). The repository status table has a 4th **"Actions"** column; each repository row contains an **"Open"** button that calls `api.workspaces.launch.githubDesktop()` to open that repository's local clone in GitHub Desktop. |
 | `#/projects/:id/workspaces/:wid/branch-switch` | `branch-switch.js` | 3-step branch switch wizard. |
 | `#/settings` | `settings.js` | Settings view with two sections: **Git Credentials** (add/delete per-host PATs) and **Repositories Refresh Delay** (configurable `gitPollingIntervalSeconds`). |
 | `#/error-log` | `error-log.js` | Paginated, filterable error log table with expandable detail rows and "Clear All" action. |
@@ -1228,7 +1259,7 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 
 - `api.repositories` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `delete(id)`
 - `api.projects` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `rename(id, newId)`, `delete(id)`, `addRepository(pid, rid)`, `removeRepository(pid, rid)`
-- `api.workspaces` — `list(pid)`, `get(pid, wid)`, `create(pid, data)`, `update(pid, wid, data)`, `rename(pid, wid, newId)`, `delete(pid, wid)`, `setup(pid, wid)`, `health(pid, wid)`, `regenerateFile(pid, wid)`
+- `api.workspaces` — `list(pid)`, `get(pid, wid)`, `create(pid, data)`, `update(pid, wid, data)`, `rename(pid, wid, newId)`, `delete(pid, wid)`, `setup(pid, wid)`, `health(pid, wid)`, `regenerateFile(pid, wid)`, `launch.vscode(pid, wid)`, `launch.githubDesktop(pid, wid, rid)`
 - `api.branches` — `list(pid, wid)`, `switch(pid, wid, assignments)`
 - `api.status` — `get(pid, wid)`, `refresh(pid, wid)`
 - `api.config.credentials` — `list()`, `set(data)`, `delete(host)`
@@ -1245,6 +1276,17 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 **`health()` issue `fixAction` values:**
 - `regenerate-workspace-file` — missing or stale `.code-workspace` file; surface a `Regenerate File` button.
 - `setup-workspace` — uncloned repository; surface a `Fix Setup` button.
+
+### `api.workspaces.launch` — External-App Launch Methods
+
+External-application launchers are grouped under the `api.workspaces.launch` sub-namespace. New launcher methods (e.g. "Open in Terminal") should be added here rather than as flat methods on `api.workspaces`.
+
+| Method | HTTP | Description |
+|---|---|---|
+| `launch.vscode(pid, wid)` | `POST /api/projects/:id/workspaces/:wid/launch/vscode` | Open the workspace's `.code-workspace` file in VS Code. No request body. Returns `{ success: boolean }`. 400 if the workspace file does not exist on disk (run setup first). 500 on OS-level spawn failure (logged under Source: `'app-launcher'`, Operation: `'launch-vscode'`). |
+| `launch.githubDesktop(pid, wid, rid)` | `POST /api/projects/:id/workspaces/:wid/launch/github-desktop/:rid` | Open a repository's local clone directory in GitHub Desktop. No request body. Returns `{ success: boolean }`. 400 if the repository directory does not exist on disk (run setup first). 500 on OS-level spawn failure (logged under Source: `'app-launcher'`, Operation: `'launch-github-desktop'`). |
+
+**Caller contract:** All path parameters (`pid`, `wid`, `rid`) are passed through `encodeURIComponent` inside `api.js`. Callers are responsible for validating that these values are not `undefined`/`null` before invoking these methods — `encodeURIComponent` will coerce them to the strings `'undefined'`/`'null'` rather than throwing.
 
 ### `api.errorLog` Reference
 
@@ -1330,7 +1372,7 @@ The workspace detail view (`#/projects/:id/workspaces/:wid`) renders live git st
 - **Refresh toolbar:** A `.workspace-refresh-toolbar` row between the header and the status table displays a countdown label ("Next refresh in Xs") and a "Refresh Now" button. The countdown ticks every second; when it reaches 0, an automatic poll is triggered via `api.status.get()`. The "Refresh Now" button triggers a force-refresh via `api.status.refresh()` and resets the countdown.
 - **Countdown-based polling:** Replaces the previous `setInterval(fn, 10000)` approach. A 1-second `setInterval` decrements a counter. At zero it triggers `doPoll()` (cached). A `refreshInProgress` flag prevents race conditions between manual and automatic refreshes.
 - **Reactive missing-repos row:** After each poll or manual refresh, the "X repositories have no data" message is re-evaluated. When all repos have status data, the row is removed. When the count changes, the text updates.
-- **Setup button in-place update:** After a successful workspace setup, the setup button is removed from the DOM and `workspace.initialized` is set to `true` in the local variable. An immediate force-refresh is triggered and the countdown is started — no router re-render needed.
+- **Setup button in-place update:** After a successful workspace setup, the DOM is mutated in-place: the setup button is removed from `mgmtRow`, an "Open in VS Code" button (`buildOpenVscodeButton`) is inserted before the Rename button, and `workspace.initialized` is set to `true` in the local variable. Only after these DOM mutations does `onSetupSuccess()` fire, triggering an immediate force-refresh and starting the countdown — no router re-render needed.
 - **Retry Setup:** The retry button also triggers `doRefresh()` after a successful re-setup instead of reloading the page.
 - **Cleanup contract:** The returned cleanup function clears the 1-second countdown interval.
 
@@ -1406,6 +1448,15 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 | `POST` | `/api/projects/:id/workspaces/:wid/setup` | 200 | 400, 404, 500 | Initialize workspace on disk (clone repos, generate .code-workspace file). |
 | `POST` | `/api/projects/:id/workspaces/:wid/regenerate-workspace-file` | 200 | 400, 404, 500 | Regenerate the `.code-workspace` file from the current repository list without cloning. Workspace folder must already exist on disk (400 if absent). Body: none. Response: `{ success: true }`. |
 | `GET` | `/api/projects/:id/workspaces/:wid/health` | 200 | 404 | Fetch the health report for a workspace. Returns `{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }`. Uninitialized workspaces return `{ healthy: true, issues: [] }`. 404 if project or workspace ID is unknown. |
+
+---
+
+## Launch
+
+| Method | Path | Success | Error Codes | Description |
+|---|---|---|---|---|
+| `POST` | `/api/projects/:id/workspaces/:wid/launch/vscode` | 200 | 400, 404, 500 | Open the workspace's `.code-workspace` file in VS Code. 404 if the workspace is unknown. 400 with `"Workspace file does not exist. Run setup first."` if the file is missing from disk. 500 + error log entry (Source: `'app-launcher'`, Operation: `'launch-vscode'`) if the OS-level spawn fails. Response: `{ success: true }`. |
+| `POST` | `/api/projects/:id/workspaces/:wid/launch/github-desktop/:rid` | 200 | 400, 404, 500 | Open a repository directory in GitHub Desktop. 404 if the workspace, project, or repository is unknown. 400 with `"Repository directory does not exist. Run setup first."` if the repo directory is missing from disk. 500 + error log entry (Source: `'app-launcher'`, Operation: `'launch-github-desktop'`) if the OS-level spawn fails. Response: `{ success: true }`. |
 
 ---
 
@@ -1742,6 +1793,6 @@ Both scripts `cd` to their own directory before invoking `node dist/index.js men
 ```
 ---
 **File Statistics**
-- **Size**: 77.33 KB
-- **Lines**: 1748
+- **Size**: 81.81 KB
+- **Lines**: 1799
 File: `project-manifest.md`

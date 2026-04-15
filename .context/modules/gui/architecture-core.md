@@ -258,6 +258,12 @@ const projects = {
 /**
  * Workspace endpoints.
  *
+ * External-application launchers are grouped under the {@link api.workspaces.launch}
+ * sub-namespace rather than as flat methods on this namespace. Add any new
+ * launcher methods (e.g. "Open in Terminal") to `api.workspaces.launch` to
+ * keep the top-level namespace from growing unwieldy. This mirrors the
+ * `api.config.credentials` / `api.config.polling` sub-namespace pattern.
+ *
  * @namespace api.workspaces
  */
 const workspaces = {
@@ -383,6 +389,50 @@ const workspaces = {
             'POST',
             `/api/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wid)}/regenerate-workspace-file`,
         );
+    },
+
+    /**
+     * External-application launch methods.
+     *
+     * @namespace api.workspaces.launch
+     */
+    launch: {
+        /**
+         * Launch VS Code for the given workspace.
+         *
+         * Sends a POST to the backend launch endpoint which opens VS Code
+         * with the workspace's `.code-workspace` file. No request body is sent.
+         *
+         * @memberof api.workspaces.launch
+         * @param {string} projectId
+         * @param {string} wid - Workspace ID.
+         * @returns {Promise<{ success: boolean }>}
+         */
+        vscode(projectId, wid) {
+            return request(
+                'POST',
+                `/api/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wid)}/launch/vscode`,
+            );
+        },
+
+        /**
+         * Launch GitHub Desktop for a specific repository within the workspace.
+         *
+         * Sends a POST to the backend launch endpoint which opens GitHub Desktop
+         * pointed at the repository's local clone directory. No request body is sent.
+         *
+         * @memberof api.workspaces.launch
+         * @param {string} projectId
+         * @param {string} wid    - Workspace ID.
+         * @param {string} repoId - Repository ID.
+         * @returns {Promise<{ success: boolean }>}
+         */
+        githubDesktop(projectId, wid, repoId) {
+            return request(
+                'POST',
+                `/api/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wid)}/launch/github-desktop/${encodeURIComponent(repoId)}`,
+            );
+        },
     },
 };
 
@@ -921,6 +971,6 @@ export class Router {
 ```
 ---
 **File Statistics**
-- **Size**: 28.05 KB
-- **Lines**: 927
+- **Size**: 29.99 KB
+- **Lines**: 977
 File: `modules/gui/architecture-core.md`

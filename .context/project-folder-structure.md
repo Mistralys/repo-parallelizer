@@ -24,6 +24,7 @@
 └── gui/
     ├── README.md
     ├── module-context.yaml
+    ├── package.json
     ├── public/
     │   └── css/
     │       ├── styles.css
@@ -34,6 +35,7 @@
     │       └── api.config.test.mjs
     │       └── api.errorLog.test.mjs
     │       └── api.js
+    │       └── api.workspaces.launch.test.mjs
     │       └── app.js
     │       └── components/
     │           ├── confirm-dialog.js
@@ -55,6 +57,8 @@
     │           └── repositories.js
     │           └── settings.js
     │           └── workspace-detail.js
+    │           └── workspace-detail.open-button.test.mjs
+    │           └── workspace-detail.vscode-button.test.mjs
 └── menu.cmd
 └── menu.sh
 └── package-lock.json
@@ -112,6 +116,7 @@
     ├── server/
     │   ├── README.md
     │   ├── __tests__/
+    │   │   ├── app-launcher.test.ts
     │   │   ├── index.test.ts
     │   │   ├── pollingManager.errorLog.test.ts
     │   │   ├── pollingManager.test.ts
@@ -125,8 +130,10 @@
     │   │   │   ├── repositories.test.ts
     │   │   │   ├── status.test.ts
     │   │   │   ├── workspaces-health.test.ts
+    │   │   │   ├── workspaces-launch.test.ts
     │   │   │   ├── workspaces.test.ts
     │   │   ├── staticServer.test.ts
+    │   ├── app-launcher.ts
     │   ├── index.ts
     │   ├── module-context.yaml
     │   ├── pollingManager.ts
@@ -179,6 +186,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 6.62 KB
-- **Lines**: 196
+- **Size**: 6.58 KB
+- **Lines**: 191
 File: `project-folder-structure.md`

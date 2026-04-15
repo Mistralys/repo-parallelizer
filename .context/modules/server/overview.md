@@ -26,6 +26,7 @@ Built-in HTTP server providing a REST API and static file serving for the GUI. U
 | Directory/File | Responsibility |
 |---|---|
 | `index.ts` | Server start/stop lifecycle |
+| `app-launcher.ts` | Fire-and-forget external application launcher (internal — not re-exported from `index.ts`) |
 | `router.ts` | HTTP request router with parameter extraction |
 | `staticServer.ts` | Static file serving for GUI assets |
 | `pollingManager.ts` | Periodic git status polling and caching |
@@ -33,6 +34,18 @@ Built-in HTTP server providing a REST API and static file serving for the GUI. U
 | `routes/` | REST API endpoint handlers (one file per resource domain) |
 | `routes/error-log.ts` | `GET /api/error-log`, `GET /api/error-log/:id`, `DELETE /api/error-log` |
 | `__tests__/` | Server-specific unit tests |
+
+## Internal Modules
+
+### `app-launcher.ts` — Application Launcher
+
+Exports `launchApplication(command, args)` as a **module-internal utility** — it is **not** re-exported from `src/server/index.ts` and is not part of the public server barrel. Files that need it import it directly:
+
+```typescript
+import { launchApplication } from './app-launcher.js';
+```
+
+This is intentional. `launchApplication` is a low-level process-spawning primitive specific to the menu's "open browser" use case; exposing it on the server barrel would imply it is part of the server's REST API surface, which it is not. Future contributors should import it directly rather than adding it to the barrel export.
 
 ## Integration Points
 
@@ -43,6 +56,6 @@ Built-in HTTP server providing a REST API and static file serving for the GUI. U
 ```
 ---
 **File Statistics**
-- **Size**: 1.94 KB
-- **Lines**: 49
+- **Size**: 2.73 KB
+- **Lines**: 62
 File: `modules/server/overview.md`
