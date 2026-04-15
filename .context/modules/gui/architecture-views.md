@@ -2335,7 +2335,7 @@ function buildWorkspacesSection(projectId, workspaces, wsStatusMap, wsHealthMap,
 /**
  * Build the "Add Workspace" collapsible form.
  *
- * Workspace ID must match /^[A-Z]{2,6}$/ (2-6 uppercase letters).
+ * Workspace ID must match /^[A-Z]{2,10}$/ (2-10 uppercase letters).
  *
  * @param {string}   projectId
  * @param {function(): Promise<void>} onSuccess
@@ -2368,7 +2368,7 @@ function buildAddWorkspaceForm(projectId, onSuccess) {
     const wsIdField = createFormField('Workspace ID', 'text', 'workspaceId', {
         required: true,
         placeholder: 'e.g. DEV or FEATURE',
-        hint: 'Must be 2–6 uppercase letters (A-Z only).',
+        hint: 'Must be 2–10 uppercase letters (A-Z only).',
     });
     form.appendChild(wsIdField);
 
@@ -2419,10 +2419,10 @@ function buildAddWorkspaceForm(projectId, onSuccess) {
 
         const workspaceId = wsIdInput ? wsIdInput.value.trim() : '';
 
-        // Validate format: 2-6 uppercase A-Z only
+        // Validate format: 2-10 uppercase A-Z only
         if (!WORKSPACE_ID_PATTERN.test(workspaceId)) {
             if (wsIdErrorEl) {
-                wsIdErrorEl.textContent = 'Must be 2–6 uppercase letters (A-Z only).';
+                wsIdErrorEl.textContent = 'Must be 2–10 uppercase letters (A-Z only).';
                 wsIdErrorEl.hidden = false;
             }
             if (wsIdInput) {
@@ -3983,7 +3983,7 @@ function buildRenameForm(projectId, workspace, renameBtn) {
     const newIdField = createFormField('New Workspace ID', 'text', 'newWorkspaceId', {
         required:    true,
         placeholder: 'e.g. DEV or FEATURE',
-        hint:        'Must be 2–6 uppercase letters (A-Z only).',
+        hint:        'Must be 2–10 uppercase letters (A-Z only).',
     });
     wrapper.appendChild(newIdField);
 
@@ -4032,7 +4032,7 @@ function buildRenameForm(projectId, workspace, renameBtn) {
 
         if (!WORKSPACE_ID_PATTERN.test(newId)) {
             if (newIdErrorEl) {
-                newIdErrorEl.textContent = 'Must be 2–6 uppercase letters (A-Z only).';
+                newIdErrorEl.textContent = 'Must be 2–10 uppercase letters (A-Z only).';
                 newIdErrorEl.hidden      = false;
             }
             if (newIdInput) {

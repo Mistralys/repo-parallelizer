@@ -178,20 +178,20 @@ export function inferSlugFromUrl(url: string): string {
 
 /**
  * Returns true if the string is a valid workspace identifier:
- * 2–6 uppercase ASCII letters.
+ * 2–10 uppercase ASCII letters.
  *
  * **Digits are not accepted** — workspace IDs must consist of letters only
  * (A–Z). For example, `"AB1"` returns false. If your workflow requires
- * alphanumeric IDs the regex `^[A-Z]{2,6}$` will need to be updated.
+ * alphanumeric IDs the regex `^[A-Z]{2,10}$` will need to be updated.
  *
  * Examples:
  *   "AB"      → true
  *   "a"       → false   (too short, wrong case)
- *   "TOOLONG" → false   (exceeds 6 characters)
- *   "AB1"     → false   (digit not permitted)
+ *   "TOOLONGNAME" → false   (exceeds 10 characters)
+ *   "AB1"         → false   (digit not permitted)
  */
 export function isValidWorkspaceId(id: string): boolean {
-    return /^[A-Z]{2,6}$/.test(id);
+    return /^[A-Z]{2,10}$/.test(id);
 }
 
 ```

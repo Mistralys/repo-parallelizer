@@ -874,7 +874,7 @@ All model managers (`RepositoryManager`, `ProjectManager`, `WorkspaceManager`) r
 |---|---|---|
 | Repository ID | Lowercase kebab-case (`a-z0-9`, segments separated by `-`) | `isValidKebabCase()` |
 | Project ID | Lowercase kebab-case | `isValidKebabCase()` |
-| Workspace ID | 2–6 uppercase ASCII letters (`A-Z`) | `isValidWorkspaceId()` |
+| Workspace ID | 2–10 uppercase ASCII letters (`A-Z`) | `isValidWorkspaceId()` |
 
 Path-traversal sequences, uppercase characters (for kebab-case IDs), spaces, and other invalid formats are rejected with a descriptive error.
 

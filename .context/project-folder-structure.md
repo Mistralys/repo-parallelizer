@@ -8,18 +8,7 @@
 └── LICENSE/
 └── README.md
 └── config.dist.json
-└── config.json
 └── context.yaml
-└── data/
-    ├── storage/
-    │   └── error-log.json
-    │   └── projects-index.json
-    │   └── projects/
-    │       ├── ai-insights.json
-    │       ├── hcp-editor.json
-    │       ├── mailcode.json
-    │       ├── repo-parallelizer.json
-    │   └── repositories.json
 └── docs/
     ├── agents/
     │   ├── project-manifest/
