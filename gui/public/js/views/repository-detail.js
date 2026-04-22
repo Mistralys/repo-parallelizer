@@ -207,6 +207,28 @@ async function loadWorkspaceRows(repoId, allProjects) {
 }
 
 // ---------------------------------------------------------------------------
+// Formatting helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Format a Date as a human-readable relative string.
+ * e.g. "just now", "3 minutes ago", "2 hours ago", "1 day ago".
+ *
+ * @param {Date} date
+ * @returns {string}
+ */
+function formatRelativeTime(date) {
+    const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+    if (seconds < 60) return 'just now';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+    const days = Math.floor(hours / 24);
+    return `${days} day${days === 1 ? '' : 's'} ago`;
+}
+
+// ---------------------------------------------------------------------------
 // DOM builders
 // ---------------------------------------------------------------------------
 
@@ -284,19 +306,25 @@ function buildHeader(repo) {
         header.appendChild(urlRow);
     }
 
-    // Refresh button
+    // Refresh button + last-refreshed label
     const refreshBtn = document.createElement('button');
     refreshBtn.type      = 'button';
-    refreshBtn.className = 'btn btn-secondary btn-sm';
+    refreshBtn.className = 'btn btn-primary';
     refreshBtn.textContent = 'Refresh';
     refreshBtn.title = 'Re-fetch status for all workspaces containing this repository.';
 
+    const lastRefreshedEl = document.createElement('span');
+    lastRefreshedEl.className = 'repository-last-refreshed text-muted';
+
     const actionsRow = document.createElement('div');
     actionsRow.className = 'repository-detail-actions';
+    actionsRow.style.marginTop = '1rem';
+    actionsRow.style.marginBottom = '1rem';
     actionsRow.appendChild(refreshBtn);
+    actionsRow.appendChild(lastRefreshedEl);
     header.appendChild(actionsRow);
 
-    return { header, refreshBtn };
+    return { header, refreshBtn, lastRefreshedEl };
 }
 
 /**
@@ -534,7 +562,7 @@ export function renderRepositoryDetail(container, params) {
         // Build DOM.
         clearElement(container);
 
-        const { header, refreshBtn } = buildHeader(repo);
+        const { header, refreshBtn, lastRefreshedEl } = buildHeader(repo);
         let { section: statusSection, tbody } = buildStatusSection(
             currentRows, repoId, repo.name || repoId, webserverUrl, onBranchCellClick,
         );
@@ -633,6 +661,12 @@ export function renderRepositoryDetail(container, params) {
                 if (anyFailed && finalRows.length > 0) {
                     showToast('Some workspace data could not be loaded. Results may be incomplete.', 'warning');
                 }
+
+                // Persist the refresh timestamp to the server and update the label.
+                const updated = await api.repositories.touchRefreshTimestamp(repoId).catch(() => null);
+                if (!container.isConnected) return;
+                const ts = updated && updated.LastRefreshedAt ? new Date(updated.LastRefreshedAt) : new Date();
+                lastRefreshedEl.textContent = `Last refreshed: ${formatRelativeTime(ts)}`;
             } finally {
                 refreshInProgress      = false;
                 refreshBtn.disabled    = false;
@@ -641,6 +675,11 @@ export function renderRepositoryDetail(container, params) {
         }
 
         refreshBtn.addEventListener('click', doRefresh);
+
+        // Set initial timestamp from persisted value if available, otherwise show "Never".
+        lastRefreshedEl.textContent = repo.LastRefreshedAt
+            ? `Last refreshed: ${formatRelativeTime(new Date(repo.LastRefreshedAt))}`
+            : 'Last refreshed: Never';
 
         container.appendChild(header);
         container.appendChild(statusSection);

@@ -150,6 +150,16 @@ const repositories = {
     delete(id) {
         return request('DELETE', `/api/repositories/${encodeURIComponent(id)}`);
     },
+
+    /**
+     * Record a manual refresh timestamp for a repository.
+     * Writes the current server-side UTC timestamp to `LastRefreshedAt`.
+     * @param {string} id
+     * @returns {Promise<Object>} The updated repository.
+     */
+    touchRefreshTimestamp(id) {
+        return request('POST', `/api/repositories/${encodeURIComponent(id)}/refresh-timestamp`);
+    },
 };
 
 /**
@@ -666,6 +676,7 @@ const config = {
  *   status:       typeof status,
  *   config:       typeof config,
  *   errorLog:     typeof errorLog,
+ *   version:      { get: () => Promise<{ appVersion: string, guiVersion: string }> },
  * }}
  */
 export const api = {
@@ -676,4 +687,14 @@ export const api = {
     status,
     config,
     errorLog,
+    version: {
+        /**
+         * Fetch the application and GUI version strings from the server.
+         *
+         * @returns {Promise<{ appVersion: string, guiVersion: string }>}
+         */
+        get() {
+            return request('GET', '/api/version');
+        },
+    },
 };

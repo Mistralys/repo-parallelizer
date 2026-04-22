@@ -22,6 +22,13 @@ export interface Repository {
      * that this property is runtime-only and excluded from the data schema.
      */
     credentialsStripped?: boolean;
+
+    /**
+     * ISO 8601 timestamp of the last manual status refresh triggered from the
+     * repository detail view. Written by `RepositoryManager.touchRefreshTimestamp()`.
+     * Undefined when the repository has never been manually refreshed.
+     */
+    LastRefreshedAt?: string;
 }
 
 /**

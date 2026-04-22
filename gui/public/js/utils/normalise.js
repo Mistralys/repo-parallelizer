@@ -12,13 +12,14 @@
  * Normalise a repository object from the backend.
  *
  * @param {Object} repo
- * @returns {{ id: string, name: string, url: string }}
+ * @returns {{ id: string, name: string, url: string, LastRefreshedAt: string|undefined }}
  */
 export function normaliseRepo(repo) {
     return {
-        id:   repo.Id   || repo.id   || '',
-        name: repo.Name || repo.name || '',
-        url:  repo.Url  || repo.url  || repo.URL || '',
+        id:              repo.Id   || repo.id   || '',
+        name:            repo.Name || repo.name || '',
+        url:             repo.Url  || repo.url  || repo.URL || '',
+        LastRefreshedAt: repo.LastRefreshedAt || repo.lastRefreshedAt || undefined,
     };
 }
 

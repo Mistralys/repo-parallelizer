@@ -27,6 +27,7 @@ import { renderErrorLog }                                from './views/error-log
 import { createThemeToggle }                             from './components/theme-toggle.js';
 import { initNavHighlight }                              from './utils/nav-highlight.js';
 import { initNavBadge }                                  from './components/nav-badge.js';
+import { api }                                           from './api.js';
 
 // ---------------------------------------------------------------------------
 // Router instantiation & route registration
@@ -91,3 +92,14 @@ initNavHighlight();
 // ---------------------------------------------------------------------------
 
 initNavBadge();
+
+// ---------------------------------------------------------------------------
+// Footer version — fetch from server and inject into the footer spans
+// ---------------------------------------------------------------------------
+
+api.version.get().then(({ appVersion, guiVersion }) => {
+    const appEl = document.getElementById('footer-app-version');
+    const guiEl = document.getElementById('footer-gui-version');
+    if (appEl) appEl.textContent = `v${appVersion}`;
+    if (guiEl) guiEl.textContent = `GUI v${guiVersion}`;
+}).catch(() => { /* non-critical — footer stays empty on failure */ });
