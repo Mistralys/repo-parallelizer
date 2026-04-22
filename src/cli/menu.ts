@@ -77,6 +77,7 @@ export async function showMenu(): Promise<void> {
 
         switch (key) {
             case 's':
+                await checkAndRepairInstall();
                 await runSetup();
                 await pressAnyKeyToContinue();
                 break;
@@ -102,6 +103,93 @@ export async function showMenu(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Recursively returns the newest `mtimeMs` of any file under `dir`.
+ * Returns `0` if the directory does not exist or is empty.
+ */
+function getNewestMtime(dir: string): number {
+    if (!fs.existsSync(dir)) {
+        return 0;
+    }
+    let newest = 0;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+            newest = Math.max(newest, getNewestMtime(full));
+        } else {
+            newest = Math.max(newest, fs.statSync(full).mtimeMs);
+        }
+    }
+    return newest;
+}
+
+/**
+ * Spawns a command in `cwd` with stdio inherited (output visible in terminal).
+ * Resolves to the process exit code.
+ */
+function runCommand(cmd: string, args: string[], cwd: string): Promise<number> {
+    return new Promise<number>((resolve) => {
+        const child = cp.spawn(cmd, args, { cwd, stdio: 'inherit', shell: false });
+        child.on('close', (code) => resolve(code ?? 1));
+        child.on('error', () => resolve(1));
+    });
+}
+
+/**
+ * Checks whether `node_modules` and `dist/` are up to date with the current
+ * sources. Runs `npm install` and/or `npm run build` as needed.
+ *
+ * Staleness rules:
+ * - **node_modules** is missing or `package.json` is newer than `package-lock.json` → install.
+ * - **dist/** is missing or the newest file in `src/` is newer than the newest
+ *   file in `dist/` → build.
+ */
+async function checkAndRepairInstall(): Promise<void> {
+    const root = getToolRoot();
+
+    // ------------------------------------------------------------------
+    // 1. node_modules — check against package-lock.json
+    // ------------------------------------------------------------------
+    const nodeModulesPath = path.join(root, 'node_modules');
+    const lockPath = path.join(root, 'package-lock.json');
+    const pkgMtime = fs.statSync(path.join(root, 'package.json')).mtimeMs;
+
+    const lockMtime = fs.existsSync(lockPath) ? fs.statSync(lockPath).mtimeMs : 0;
+    const needsInstall = !fs.existsSync(nodeModulesPath) || pkgMtime > lockMtime;
+
+    if (needsInstall) {
+        printInfo('node_modules is missing or out of date — running npm install...');
+        const code = await runCommand('npm', ['install'], root);
+        if (code !== 0) {
+            printError('npm install failed. Please resolve the errors above and retry.');
+            return;
+        }
+        printSuccess('Dependencies installed.');
+    }
+
+    // ------------------------------------------------------------------
+    // 2. dist/ — compare against src/
+    // ------------------------------------------------------------------
+    const distPath = path.join(root, 'dist');
+    const srcNewest = getNewestMtime(path.join(root, 'src'));
+    const distNewest = getNewestMtime(distPath);
+    const needsBuild = !fs.existsSync(distPath) || srcNewest > distNewest;
+
+    if (needsBuild) {
+        printInfo('dist/ is missing or out of date — running npm run build...');
+        const code = await runCommand('npm', ['run', 'build'], root);
+        if (code !== 0) {
+            printError('Build failed. Please resolve the TypeScript errors above and retry.');
+            return;
+        }
+        printSuccess('Build complete.');
+    }
+
+    if (!needsInstall && !needsBuild) {
+        printInfo('Install is up to date — no rebuild needed.');
+    }
+}
 
 /**
  * Loads config, starts the HTTP server, and attempts to open the default
