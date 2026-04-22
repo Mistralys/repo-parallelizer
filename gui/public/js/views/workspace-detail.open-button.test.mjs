@@ -97,6 +97,10 @@ api.config.polling.get = async () => ({ gitPollingIntervalSeconds: 60 });
 
 const { renderWorkspaceDetail } = await import('./workspace-detail.js');
 
+// Local re-declaration — see gui/public/js/utils/dom.js for the canonical export.
+// Static imports from ../utils/dom.js cannot be resolved in this Node.js jsdom harness.
+function clearElement(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+
 // ---------------------------------------------------------------------------
 // Render helper
 // ---------------------------------------------------------------------------
@@ -114,7 +118,7 @@ const { renderWorkspaceDetail } = await import('./workspace-detail.js');
  */
 async function renderView(projectId = 'my-project', wid = 'DEV') {
     const container = window.document.getElementById('app');
-    container.innerHTML = '';
+    clearElement(container);
 
     const cleanup = renderWorkspaceDetail(container, { id: projectId, wid });
 
@@ -146,7 +150,7 @@ beforeEach(() => {
     ghDesktopShouldFail   = false;
     ghDesktopFailMessage  = 'GitHub Desktop not found';
     _intervals.clear();
-    document.getElementById('toast-container').innerHTML = '';
+    clearElement(document.getElementById('toast-container'));
 });
 
 // ---------------------------------------------------------------------------

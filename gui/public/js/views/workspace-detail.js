@@ -39,9 +39,11 @@
 import { api }               from '../api.js';
 import { showToast }         from '../components/toast.js';
 import { showConfirm }       from '../components/confirm-dialog.js';
-import { createStatusBadge } from '../components/status-badge.js';
+import { buildRepoStatusCells, makeBranchTrigger, updateRepoStatusCells } from '../components/repo-status-cells.js';
 import { createFormField, validateRequired, WORKSPACE_ID_PATTERN } from '../components/form-helpers.js';
 import { normaliseProject, normaliseWorkspace } from '../utils/normalise.js';
+import { STABLE_WS_ID } from '../utils/constants.js';
+import { clearElement } from '../utils/dom.js';
 
 // ---------------------------------------------------------------------------
 // Router reference — injected from app.js via setRouter()
@@ -67,8 +69,7 @@ export function setRouter(router) {
 /** Default polling interval in milliseconds (fallback when config fetch fails). */
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
 
-/** The workspace ID that cannot be renamed or deleted. */
-const STABLE_WS_ID = 'STABLE';
+
 
 // ---------------------------------------------------------------------------
 // Normalisation helpers — imported from utils/normalise.js
@@ -111,7 +112,7 @@ function extractRepoName(repo) {
  * @param {string} [label]
  */
 function showLoading(el, label = 'Loading…') {
-    el.innerHTML = '';
+    clearElement(el);
     const wrapper = document.createElement('div');
     wrapper.className = 'loading-indicator';
     wrapper.setAttribute('aria-live', 'polite');
@@ -158,30 +159,13 @@ async function runSetup(projectId, workspaceId, successMessage) {
 // ---------------------------------------------------------------------------
 
 /**
- * Build a branch-switch trigger `<button>` styled as inline text.
- *
- * Extracted to avoid duplicating the element setup between `buildRepoStatusRow`
- * (initial render) and `updateStatusTable` (polling updates). The click handler
- * is wired by the caller so it can close over a fresh `trigger` reference.
- *
- * @param {string} branchName - Branch name shown as the button label.
- * @param {string} ariaLabel  - Accessible label for screen-readers.
- * @returns {HTMLButtonElement}
- */
-function makeBranchTrigger(branchName, ariaLabel) {
-    const btn = document.createElement('button');
-    btn.type      = 'button';
-    btn.className = 'branch-switch-trigger';
-    btn.textContent = branchName;
-    btn.setAttribute('aria-label', ariaLabel);
-    return btn;
-}
-
-/**
  * Build the status `<tbody>` row for a single repository.
  *
- * The row uses `data-repo-id` on the badge container so the polling update
- * can locate and replace badge contents in-place.
+ * Constructs only the name `<td>` locally; delegates the branch, badge, and
+ * actions cells to {@link buildRepoStatusCells} in `repo-status-cells.js`.
+ * That shared component sets `data-repo-id` on the badge wrapper so that
+ * {@link updateRepoStatusCells} can locate and replace badge contents in-place
+ * without touching the rest of the row.
  *
  * @param {Object} opts
  * @param {string} opts.repoId      - Unique repository identifier (e.g. `"my-repo"`).
@@ -222,115 +206,23 @@ function buildRepoStatusRow({ repoId, repoName, statusInfo, projectId, wid, isSt
     nameCell.appendChild(nameEl);
     tr.appendChild(nameCell);
 
-    // Branch name
-    const branchCell = document.createElement('td');
-    branchCell.className = 'repo-branch-cell';
-    const currentBranch = (statusInfo && statusInfo.currentBranch) ? statusInfo.currentBranch : null;
-    if (!isStable && currentBranch && onBranchCellClick) {
-        const trigger = makeBranchTrigger(currentBranch, `Switch branch for ${repoName}`);
-        trigger.addEventListener('click', () => onBranchCellClick(trigger, repoId, currentBranch));
-        branchCell.appendChild(trigger);
-    } else {
-        branchCell.textContent = currentBranch || '—';
-    }
-    tr.appendChild(branchCell);
-
-    // Status badge cell (index 2 — must stay at this position)
-    const badgeCell = document.createElement('td');
-    badgeCell.className = 'repo-badge-cell';
-
-    const badgeWrapper = document.createElement('div');
-    badgeWrapper.dataset.repoId = repoId;
-    badgeWrapper.appendChild(createStatusBadge(statusInfo || null));
-    badgeCell.appendChild(badgeWrapper);
-    tr.appendChild(badgeCell);
-
-    // Actions cell (index 3) — "Open" button for GitHub Desktop
-    const actionsCell = document.createElement('td');
-    actionsCell.className = 'repo-actions-cell';
-
-    const openBtn = document.createElement('button');
-    openBtn.type      = 'button';
-    openBtn.className = 'btn btn-secondary btn-sm';
-    openBtn.textContent = 'Git GUI';
-    openBtn.title = 'Open this repository in GitHub Desktop.';
-
-    openBtn.addEventListener('click', async () => {
-        openBtn.disabled    = true;
-        openBtn.textContent = 'Opening…';
-        try {
-            await api.workspaces.launch.githubDesktop(projectId, wid, repoId);
-        } catch (err) {
-            showToast(err.message || 'Failed to open GitHub Desktop.', 'error');
-        } finally {
-            openBtn.disabled    = false;
-            openBtn.textContent = 'Git GUI';
-        }
+    // Branch, badge, and actions cells — delegated to shared component.
+    const { branchCell, badgeCell, actionsCell } = buildRepoStatusCells({
+        repoId,
+        repoName,
+        statusInfo,
+        projectId,
+        wid,
+        isStable,
+        onBranchCellClick,
+        webserverUrl,
+        onError: (msg) => showToast(msg, 'error'),
     });
-
-    actionsCell.appendChild(openBtn);
+    tr.appendChild(branchCell);
+    tr.appendChild(badgeCell);
     tr.appendChild(actionsCell);
 
-    // Browse button — shown only when webserverUrl is configured.
-    if (webserverUrl) {
-        const browseBtn = document.createElement('button');
-        browseBtn.type      = 'button';
-        browseBtn.className = 'btn btn-secondary btn-sm';
-        browseBtn.textContent = 'Browse';
-        browseBtn.title = 'Open this repository in the browser via the configured webserver URL.';
-
-        browseBtn.addEventListener('click', () => {
-            const url = `${webserverUrl}/${encodeURIComponent(projectId)}/${encodeURIComponent(wid)}/${encodeURIComponent(repoId)}/`;
-            window.open(url, '_blank');
-        });
-
-        // Insert Browse before Git GUI.
-        actionsCell.insertBefore(browseBtn, openBtn);
-    }
-
     return tr;
-}
-
-/**
- * Update an existing status table in-place by replacing badge contents and
- * branch text for each repository whose status has changed.
- *
- * Rows are located via `[data-repo-id]` on both the `<tr>` and the badge
- * wrapper `<div>` inside it. No full re-render of the table is performed.
- *
- * @param {HTMLElement}           tableBody - The `<tbody>` to update.
- * @param {Record<string, Object|null>} statusMap - Keyed by repository ID.
- * @param {boolean} [isStable] - When `true`, branch cells are rebuilt as plain text.
- * @param {function(HTMLElement, string, string): void} [onBranchCellClick]
- *   Wired to the branch trigger button in non-STABLE workspaces.
- */
-function updateStatusTable(tableBody, statusMap, isStable, onBranchCellClick) {
-    for (const [repoId, statusInfo] of Object.entries(statusMap)) {
-        const row = tableBody.querySelector(`tr[data-repo-id="${CSS.escape(repoId)}"]`);
-        if (!row) continue;
-
-        // Update branch cell (second cell) — rebuild as clickable trigger or plain text
-        const branchCell = row.cells[1];
-        if (branchCell) {
-            const currentBranch = (statusInfo && statusInfo.currentBranch) ? statusInfo.currentBranch : null;
-            branchCell.innerHTML = '';
-            if (!isStable && currentBranch && onBranchCellClick) {
-                const repoName = row.dataset.repoName || repoId;
-                const trigger = makeBranchTrigger(currentBranch, `Switch branch for ${repoName}`);
-                trigger.addEventListener('click', () => onBranchCellClick(trigger, repoId, currentBranch));
-                branchCell.appendChild(trigger);
-            } else {
-                branchCell.textContent = currentBranch || '—';
-            }
-        }
-
-        // Update badge wrapper (third cell → div[data-repo-id])
-        const badgeWrapper = row.querySelector(`div[data-repo-id="${CSS.escape(repoId)}"]`);
-        if (badgeWrapper) {
-            badgeWrapper.innerHTML = '';
-            badgeWrapper.appendChild(createStatusBadge(statusInfo || null));
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -913,7 +805,7 @@ export function renderWorkspaceDetail(container, params) {
         })).filter((r) => r.repoId !== '');
 
         // Render the view.
-        container.innerHTML = '';
+        clearElement(container);
 
         const isStable = wid === STABLE_WS_ID;
 
@@ -1003,7 +895,7 @@ export function renderWorkspaceDetail(container, params) {
          */
         function renderHealthSection(report) {
             currentHealthReport = report;
-            healthContainerEl.innerHTML = '';
+            clearElement(healthContainerEl);
             const el = buildHealthAlertSection(report, {
                 onRegenerate: async () => {
                     try {
@@ -1058,7 +950,11 @@ export function renderWorkspaceDetail(container, params) {
                 if (container.isConnected) {
                     renderHealthSection(freshHealth);
                     if (fresh) {
-                        updateStatusTable(tbody, fresh, isStable, onBranchCellClick);
+                        for (const [repoId, statusInfo] of Object.entries(fresh)) {
+                            const row = tbody.querySelector(`tr[data-repo-id="${CSS.escape(repoId)}"]`);
+                            if (!row) continue;
+                            updateRepoStatusCells(row, repoId, statusInfo, isStable, onBranchCellClick);
+                        }
                         updateMissingReposRow(fresh);
                     }
                 }
@@ -1088,7 +984,11 @@ export function renderWorkspaceDetail(container, params) {
                 if (container.isConnected) {
                     renderHealthSection(freshHealth);
                     if (fresh) {
-                        updateStatusTable(tbody, fresh, isStable, onBranchCellClick);
+                        for (const [repoId, statusInfo] of Object.entries(fresh)) {
+                            const row = tbody.querySelector(`tr[data-repo-id="${CSS.escape(repoId)}"]`);
+                            if (!row) continue;
+                            updateRepoStatusCells(row, repoId, statusInfo, isStable, onBranchCellClick);
+                        }
                         updateMissingReposRow(fresh);
                     }
                 }
@@ -1234,7 +1134,7 @@ export function renderWorkspaceDetail(container, params) {
         }
     }).catch((err) => {
         if (!container.isConnected) return;
-        container.innerHTML = '';
+        clearElement(container);
         const errEl = document.createElement('div');
         errEl.className = 'empty-state';
 

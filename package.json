@@ -49,6 +49,7 @@
         "dev": "tsc --watch",
         "start": "node dist/index.js",
         "test": "tsc && node --test dist/tests/*.test.js dist/server/__tests__/*.test.js dist/server/__tests__/**/*.test.js",
+        "test:gui": "node --test 'gui/public/js/**/*.test.mjs'",
         "copy-vendor": "node -e \"const fs = require('fs'); fs.mkdirSync('gui/public/css/vendor', { recursive: true }); fs.copyFileSync('node_modules/@picocss/pico/css/pico.classless.min.css', 'gui/public/css/vendor/pico.classless.min.css');\"",
         "postinstall": "npm run copy-vendor"
     },

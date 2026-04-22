@@ -191,4 +191,27 @@ export class RepositoryManager {
         store.Repositories.splice(index, 1);
         this.save(store);
     }
+
+    /**
+     * Writes the current UTC timestamp to `LastRefreshedAt` for the given
+     * repository. Called when the user triggers a manual refresh from the
+     * repository detail view.
+     *
+     * @throws {NotFoundError} If no repository with the given ID exists.
+     */
+    touchRefreshTimestamp(id: string): Repository {
+        const store = this.load();
+        const index = store.Repositories.findIndex((r) => r.Id === id);
+
+        if (index === -1) {
+            throw new NotFoundError(`Cannot update refresh timestamp: repository with ID "${id}" does not exist.`);
+        }
+
+        store.Repositories[index] = {
+            ...store.Repositories[index],
+            LastRefreshedAt: new Date().toISOString(),
+        };
+        this.save(store);
+        return store.Repositories[index];
+    }
 }

@@ -25,9 +25,10 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 | Hash Pattern | View | Description |
 |---|---|---|
 | `#/` | `dashboard.js` | Project listing with creation form. |
-| `#/repositories` | `repositories.js` | Repository CRUD table. |
+| `#/repositories` | `repositories.js` | Repository CRUD table. Each row's **Name** column renders as a clickable `<a class="repo-name-display repo-name-link">` element linking to `#/repositories/${encodeURIComponent(repo.id)}`. Clicking Edit switches the Name cell to an inline `<input>` for in-place editing; Save/Cancel restore the link with updated or original text. |
+| `#/repositories/:id` | `repository-detail.js` | Repository overview: table of every workspace across every project that contains the given repository. Each row shows Project (link to `#/projects/:pid`), Workspace (link to `#/projects/:pid/workspaces/:wid`), and the shared Branch/Status/Actions cells from `buildRepoStatusCells`. STABLE workspace rows show plain-text branch names; all other rows have a clickable branch-switch trigger. A "Refresh" button re-discovers the full project/workspace set (calls `api.projects.list()` + the full fan-out) and diffs against the existing rows: new rows are appended, removed rows are dropped, and existing rows are updated in-place via `api.status.refresh()` — protected by a `refreshInProgress` mutex. A 404 response for the repository renders a "not found" message with a link back to `#/repositories`. An empty-state message is shown when no projects contain the repository. Individual project/workspace fetch failures are handled gracefully via `Promise.allSettled` — partial results are displayed and a warning toast is shown when any fetch failed. The webserver URL is fetched once during initial load; the "Browse" button is shown only when `webserverUrl` is configured. `buildRepoStatusCells` is called with an `onError` callback (`(msg) => showToast(msg, 'error')`) so Git GUI button failures are surfaced as toasts without a dynamic `import('./toast.js')` inside the component. |
 | `#/projects/:id` | `project-detail.js` | Project metadata, tabbed repo/workspace/danger-zone management. The workspace table includes a **Health** column: initialized workspaces with health issues show a warning badge with issue count; healthy and uninitialized workspaces show an empty cell. Health is fetched in parallel with status for all initialized workspaces via `Promise.allSettled` (graceful degradation — fetch failures leave the health cell empty). |
-| `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with countdown-based polling and manual refresh. Health report fetched in parallel on initial load and on every poll/refresh cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix buttons (`Regenerate File` for `regenerate-workspace-file` issues, `Fix Setup` for `setup-workspace` issues). The header management row includes an **"Open in VS Code"** button (shown only when `workspace.initialized` is `true`; dynamically inserted after a successful Setup without a full re-render). The repository status table has a 4th **"Actions"** column; each repository row contains a **"Browse"** button (shown only when `webserverUrl` is configured, opens `{webserverUrl}/{projectId}/{workspaceId}/{repoId}/` in a new tab via `window.open`) followed by a **"Git GUI"** button that calls `api.workspaces.launch.githubDesktop()`. The webserver URL is fetched once during the initial data load (in parallel with other requests) via `api.config.webserverUrl.get()`. In non-STABLE workspaces, each **Branch** cell is a clickable trigger (`<button class="branch-switch-trigger">`) that opens an inline quick-switch popover via `showBranchQuickSwitch()`. STABLE workspace branch cells remain plain text. |
+| `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with countdown-based polling and manual refresh. Health report fetched in parallel on initial load and on every poll/refresh cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix buttons (`Regenerate File` for `regenerate-workspace-file` issues, `Fix Setup` for `setup-workspace` issues). The header management row includes an **"Open in VS Code"** button (shown only when `workspace.initialized` is `true`; dynamically inserted after a successful Setup without a full re-render). The repository status table has a 4th **"Actions"** column; each repository row contains a **"Browse"** button (shown only when `webserverUrl` is configured, opens `{webserverUrl}/{projectId}/{workspaceId}/{repoId}/` in a new tab via `window.open`) followed by a **"Git GUI"** button that calls `api.workspaces.launch.githubDesktop()`. The webserver URL is fetched once during the initial data load (in parallel with other requests) via `api.config.webserverUrl.get()`. In non-STABLE workspaces, each **Branch** cell is a clickable trigger (`<button class="branch-switch-trigger">`) that opens an inline quick-switch popover via `showBranchQuickSwitch()`. STABLE workspace branch cells remain plain text. `buildRepoStatusCells` is called with an `onError` callback so Git GUI button failures show as toasts. DOM clearing uses `clearElement()` from `utils/dom.js` throughout (no `innerHTML = ''` assignments). |
 | `#/projects/:id/workspaces/:wid/branch-switch` | `branch-switch.js` | 3-step branch switch wizard. |
 | `#/settings` | `settings.js` | Settings view with three sections: **Git Credentials** (add/delete per-host PATs), **Repositories Refresh Delay** (configurable `gitPollingIntervalSeconds`), and **Webserver URL** (base URL of the local webserver; enables the "Browse" button in the workspace-detail view). All non-credentials sections share a single **"Save Settings"** footer button that calls each section's `save()` function in parallel. |
 | `#/error-log` | `error-log.js` | Paginated, filterable error log table with expandable detail rows and "Clear All" action. |
@@ -110,15 +111,70 @@ All params are optional. Omitting `params` entirely (or passing `undefined`) sen
 | Branch Quick Switch | `components/branch-quick-switch.js` | `showBranchQuickSwitch(options): Promise<{ switched: boolean, newBranch?: string }>` | Inline popover anchored below a branch cell. Fetches available branches via `api.branches.list()`, shows a filterable list with a text input, and calls `api.branches.switch()` on confirm. `options`: `{ anchorEl, projectId, wid, repoId, currentBranch }`. Dynamically imported on first click via `import()` to avoid loading for STABLE workspaces. |
 | Confirm Dialog | `components/confirm-dialog.js` | `showConfirm(title, message): Promise<void>` | Modal with Cancel/Confirm. Resolves on confirm, rejects on cancel. |
 | Form Helpers | `components/form-helpers.js` | `createFormField()`, `validateRequired()`, `WORKSPACE_ID_PATTERN` | Form field generation and validation. |
+| Repo Status Cells | `components/repo-status-cells.js` | `buildRepoStatusCells(opts)`, `makeBranchTrigger(branchName, ariaLabel)`, `updateRepoStatusCells(row, repoId, statusInfo, isStable, onBranchCellClick)` | Shared factory for the Branch, Status badge, and Actions `<td>` cells used across repository rows. See [Repo Status Cells Component](#repo-status-cells-component) below. |
 | Status Badge | `components/status-badge.js` | `createStatusBadge(gitStatusInfo): HTMLElement` | Git status badge with branch pill and detail chips. |
 | Theme Toggle | `components/theme-toggle.js` | `createThemeToggle(): HTMLButtonElement` | Light/dark mode toggle button. Reads/persists theme in `localStorage`. |
 | Toast | `components/toast.js` | `showToast(message, type, duration): HTMLElement\|null` | Auto-dismissing notification in `#toast-container`. Message is rendered via `textContent` (not `innerHTML`) — server-controlled strings including git error output are XSS-safe to pass directly. |
+
+### Repo Status Cells Component
+
+`components/repo-status-cells.js` encapsulates the reusable Branch, Status badge, and Actions cell-building logic shared between the workspace-detail and repository-detail views. It exports three named functions:
+
+#### `buildRepoStatusCells(opts)`
+
+Builds the three shared status `<td>` cells for a single repository row.
+
+| Option | Type | Required | Description |
+|---|---|---|---|
+| `repoId` | `string` | Yes | Unique repository identifier. |
+| `repoName` | `string` | Yes | Human-readable display name; used in aria-labels. Falls back to `repoId` when no richer name is available. |
+| `statusInfo` | `Object\|null` | Yes | `GitStatusInfo` from the API, or `null` when no status data is available yet. |
+| `projectId` | `string` | Yes | ID of the parent project. |
+| `wid` | `string` | Yes | ID of the parent workspace. |
+| `isStable` | `boolean` | No | When `true`, the branch cell renders as plain text (no clickable trigger). |
+| `onBranchCellClick` | `function` | No | Callback `(anchorEl, repoId, currentBranch)` wired to the branch trigger button. Only active when `isStable` is falsy. |
+| `webserverUrl` | `string\|null` | No | Base URL of the local webserver. When truthy, a "Browse" button is inserted before the "Git GUI" button inside `actionsCell`. |
+| `onError` | `function` | No | Callback `(message: string) => void` invoked when the "Git GUI" button's click handler fails. When omitted the error is silently swallowed. Consumer views should pass `(msg) => showToast(msg, 'error')`. |
+
+**Returns:** `{ branchCell: HTMLTableCellElement, badgeCell: HTMLTableCellElement, actionsCell: HTMLTableCellElement }`
+
+- `branchCell` carries class `repo-branch-cell`.
+- `badgeCell` carries class `repo-badge-cell`; its inner `<div data-repo-id>` wrapper is the polling target.
+- `actionsCell` carries class `repo-actions-cell`; contains a "Git GUI" button (always present) and an optional "Browse" button.
+
+#### `makeBranchTrigger(branchName, ariaLabel)`
+
+Builds a `<button class="branch-switch-trigger">` styled as inline text. Extracted to avoid duplicating setup in both `buildRepoStatusCells` (initial render) and `updateRepoStatusCells` (polling updates). The click handler is wired by the caller.
+
+**Returns:** `HTMLButtonElement`
+
+#### `updateRepoStatusCells(row, repoId, statusInfo, isStable, onBranchCellClick)`
+
+Updates an existing repository row's Branch and badge cells in-place.
+
+| Param | Type | Description |
+|---|---|---|
+| `row` | `HTMLTableRowElement` | The `<tr>` to update. |
+| `repoId` | `string` | Repository identifier (used to find the `div[data-repo-id]` badge wrapper). |
+| `statusInfo` | `Object\|null` | New `GitStatusInfo` from the API, or `null`. |
+| `isStable` | `boolean` | When `true`, the branch cell is rebuilt as plain text. |
+| `onBranchCellClick` | `function` | Wired to the branch trigger button in non-STABLE workspaces. |
+
+Cells are located by CSS class (`.repo-branch-cell`) and badge wrapper attribute (`div[data-repo-id]`) — **not** by hardcoded cell indices — so callers can prepend additional cells without breaking this function.
+
+> **aria-label fallback:** The branch trigger button aria-label is constructed as `"Switch branch for <name>"` where `<name>` is `row.dataset.repoName` when present on the `<tr>`, falling back to `repoId` when the attribute is absent or empty.
+
+> **Error handling:** The "Git GUI" button calls `opts.onError(message)` when provided, or silently swallows the error when `onError` is absent. The button is disabled during the async call and re-enabled in the `finally` block regardless of outcome. The previous dynamic `import('./toast.js')` inside the click handler has been removed; callers inject the error handler via the `onError` option.
+
+---
 
 ## Utilities
 
 | Utility | File | Export | Purpose |
 |---|---|---|---|
 | Normalise | `utils/normalise.js` | `normaliseRepo()`, `normaliseProject()`, `normaliseWorkspace()` | Maps PascalCase backend keys to camelCase frontend keys. `normaliseWorkspace` now includes `folderPath` (from `FolderPath` in the API response). |
+| Constants | `utils/constants.js` | `STABLE_WS_ID` | Shared GUI constants. `STABLE_WS_ID = 'STABLE'` is the canonical definition; import from here instead of hardcoding the string in views. |
+| DOM | `utils/dom.js` | `clearElement(el)` | DOM utility — removes all children from an element via `removeChild` loop (preferred over `innerHTML = ''`). |
 
 ## Theme Switching
 
@@ -135,7 +191,7 @@ The GUI supports manual light/dark mode switching:
 
 Views that need `router.navigate()` export a `setRouter(router)` function. `app.js` calls `setRouter()` before `router.start()`. Views never import `router.js` directly.
 
-Views using router injection: `dashboard.js`, `project-detail.js`, `workspace-detail.js`, `branch-switch.js`.
+Views using router injection: `dashboard.js`, `project-detail.js`, `workspace-detail.js`, `branch-switch.js`, `repository-detail.js`.
 
 ### Cleanup Contract
 
@@ -155,7 +211,8 @@ The workspace detail view (`#/projects/:id/workspaces/:wid`) renders live git st
 - **Reactive missing-repos row:** After each poll or manual refresh, the "X repositories have no data" message is re-evaluated. When all repos have status data, the row is removed. When the count changes, the text updates.
 - **Setup button in-place update:** After a successful workspace setup, the DOM is mutated in-place: the setup button is removed from `mgmtRow`, an "Open in VS Code" button (`buildOpenVscodeButton`) is inserted before the Rename button, and `workspace.initialized` is set to `true` in the local variable. Only after these DOM mutations does `onSetupSuccess()` fire, triggering an immediate force-refresh and starting the countdown — no router re-render needed.
 - **Retry Setup:** The retry button also triggers `doRefresh()` after a successful re-setup instead of reloading the page.
-- **Per-repo quick branch switch:** In non-STABLE workspaces, each branch cell in the status table renders a `<button class="branch-switch-trigger">` (styled as inline text with a dotted underline). Clicking it expands an inline popover via `showBranchQuickSwitch()` (dynamically imported from `components/branch-quick-switch.js`), anchored below the clicked cell. The popover shows a filterable list of local branches and a text input pre-filled with the current branch; confirming calls `api.branches.switch()` with a single-entry assignment and triggers `doRefresh()`. STABLE workspace branch cells are plain text with no click behaviour. Both `buildStatusTableSection()` and `updateStatusTable()` receive `isStable` and `onBranchCellClick` parameters so polling updates preserve the clickable style.
+- **Per-repo quick branch switch:** In non-STABLE workspaces, each branch cell in the status table renders a `<button class="branch-switch-trigger">` (styled as inline text with a dotted underline). Clicking it expands an inline popover via `showBranchQuickSwitch()` (dynamically imported from `components/branch-quick-switch.js`), anchored below the clicked cell. The popover shows a filterable list of local branches and a text input pre-filled with the current branch; confirming calls `api.branches.switch()` with a single-entry assignment and triggers `doRefresh()`. STABLE workspace branch cells are plain text with no click behaviour. Both `buildStatusTableSection()` and the inlined polling-update loop receive `isStable` and `onBranchCellClick` parameters so polling updates preserve the clickable style.
+- **Repo status cells:** The Branch, Status badge, and Actions `<td>` cells for each repository row are built and updated via `buildRepoStatusCells()` and `updateRepoStatusCells()` from `components/repo-status-cells.js`. These functions locate cells by CSS class (`.repo-branch-cell`, `div[data-repo-id]`) rather than by hardcoded cell indices, so additional cells can be prepended to a row without breaking polling updates.
 - **Cleanup contract:** The returned cleanup function clears the 1-second countdown interval.
 
 ### Tabbed Navigation (Project Detail)

@@ -11,6 +11,7 @@
 import { api } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { createFormField, validateRequired } from '../components/form-helpers.js';
+import { clearElement } from '../utils/dom.js';
 
 // ---------------------------------------------------------------------------
 // Router instance — imported lazily to avoid circular-dependency issues.
@@ -260,7 +261,7 @@ async function renderProjectList(listContainer) {
     try {
         projects = await api.projects.list();
     } catch (err) {
-        listContainer.innerHTML = '';
+        clearElement(listContainer);
         const errMsg = document.createElement('div');
         errMsg.className = 'empty-state error-state';
         errMsg.textContent = `Failed to load projects: ${err.message}`;
@@ -269,7 +270,7 @@ async function renderProjectList(listContainer) {
         return;
     }
 
-    listContainer.innerHTML = '';
+    clearElement(listContainer);
 
     if (!Array.isArray(projects) || projects.length === 0) {
         const empty = document.createElement('div');

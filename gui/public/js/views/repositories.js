@@ -16,6 +16,7 @@ import { showToast } from '../components/toast.js';
 import { showConfirm } from '../components/confirm-dialog.js';
 import { createFormField, validateRequired } from '../components/form-helpers.js';
 import { normaliseRepo } from '../utils/normalise.js';
+import { clearElement } from '../utils/dom.js';
 
 // ---------------------------------------------------------------------------
 // Table rendering
@@ -43,8 +44,9 @@ function buildTableHead() {
 /**
  * Build a single `<tr>` for one repository.
  *
- * The row starts in read mode.  Clicking Edit switches the Name cell to an
- * inline `<input>` and replaces the action buttons with Save / Cancel.
+ * The row starts in read mode.  The Name cell renders as a clickable `<a>`
+ * link navigating to `#/repositories/:id`.  Clicking Edit switches the Name
+ * cell to an inline `<input>` and replaces the action buttons with Save / Cancel.
  * Clicking Delete shows a confirmation dialog and calls the API on confirm.
  *
  * @param {{ id: string, name: string, url: string }} repo
@@ -65,10 +67,11 @@ function buildRepoRow(repo, onDeleted) {
     const nameCell = document.createElement('td');
     nameCell.className = 'repo-name-cell';
 
-    const nameSpan = document.createElement('span');
-    nameSpan.className = 'repo-name-display';
-    nameSpan.textContent = repo.name || '—';
-    nameCell.appendChild(nameSpan);
+    const nameLink = document.createElement('a');
+    nameLink.className = 'repo-name-display repo-name-link';
+    nameLink.href      = `#/repositories/${encodeURIComponent(repo.id)}`;
+    nameLink.textContent = repo.name || '—';
+    nameCell.appendChild(nameLink);
 
     // Inline edit input (hidden initially)
     const nameInput = document.createElement('input');
@@ -133,7 +136,7 @@ function buildRepoRow(repo, onDeleted) {
 
     // Enter edit mode
     editBtn.addEventListener('click', () => {
-        nameSpan.hidden  = true;
+        nameLink.hidden  = true;
         nameInput.hidden = false;
         nameInput.value  = repo.name;
         nameInput.focus();
@@ -148,7 +151,7 @@ function buildRepoRow(repo, onDeleted) {
     // Cancel edit mode
     cancelEditBtn.addEventListener('click', () => {
         nameInput.hidden = true;
-        nameSpan.hidden  = false;
+        nameLink.hidden  = false;
 
         editBtn.hidden   = false;
         deleteBtn.hidden = false;
@@ -165,12 +168,12 @@ function buildRepoRow(repo, onDeleted) {
         try {
             await api.repositories.update(repo.id, { name: newName });
             repo.name = newName;
-            nameSpan.textContent = newName || '—';
+            nameLink.textContent = newName || '—';
             showToast(`Repository "${repo.id}" updated.`, 'success');
 
             // Return to read mode
             nameInput.hidden = true;
-            nameSpan.hidden  = false;
+            nameLink.hidden  = false;
             editBtn.hidden   = false;
             deleteBtn.hidden = false;
             saveBtn.hidden   = true;
@@ -253,7 +256,7 @@ async function renderRepoTable(tableContainer) {
     try {
         repos = await api.repositories.list();
     } catch (err) {
-        tableContainer.innerHTML = '';
+        clearElement(tableContainer);
         const errMsg = document.createElement('div');
         errMsg.className = 'empty-state error-state';
         errMsg.textContent = `Failed to load repositories: ${err.message}`;
@@ -262,7 +265,7 @@ async function renderRepoTable(tableContainer) {
         return;
     }
 
-    tableContainer.innerHTML = '';
+    clearElement(tableContainer);
 
     if (!Array.isArray(repos) || repos.length === 0) {
         const empty = document.createElement('div');

@@ -77,16 +77,16 @@ The GUI is a vanilla-JS SPA. For architecture details, router patterns, and comp
 
 The `gui/public/js/` directory contains co-located unit test files (`.test.mjs`) for the API client. These run directly under Node's built-in test runner — no build step required.
 
+**Run all GUI tests:**
+
+```bash
+npm run test:gui
+```
+
 **Run a single GUI test file:**
 
 ```bash
 node --test gui/public/js/api.errorLog.test.mjs
-```
-
-**Run all GUI test files:**
-
-```bash
-node --test gui/public/js/*.test.mjs
 ```
 
 **Naming convention:** GUI test files are named `<module>.test.mjs` and placed alongside the module they test (e.g. `api.errorLog.test.mjs` next to `api.js`). They use a `mockFetch()` helper to stub `globalThis.fetch` and assert against the URL and options passed to it, without making real HTTP requests.

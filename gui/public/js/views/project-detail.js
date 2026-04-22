@@ -45,6 +45,7 @@ import { showToast } from '../components/toast.js';
 import { showConfirm } from '../components/confirm-dialog.js';
 import { createFormField, validateRequired, WORKSPACE_ID_PATTERN } from '../components/form-helpers.js';
 import { normaliseProject, normaliseRepo, normaliseWorkspace } from '../utils/normalise.js';
+import { STABLE_WS_ID } from '../utils/constants.js';
 
 // ---------------------------------------------------------------------------
 // Router reference — injected from app.js via setRouter()
@@ -500,7 +501,7 @@ function buildWorkspacesSection(projectId, workspaces, wsStatusMap, wsHealthMap,
             const actCell = document.createElement('td');
             actCell.className = 'workspace-actions-cell';
 
-            const isStable = ws.id === 'STABLE';
+            const isStable = ws.id === STABLE_WS_ID;
 
             if (!isStable) {
                 const deleteBtn = document.createElement('button');

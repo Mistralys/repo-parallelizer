@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.0.0 - Repository Overview Screen
+> First stable release
+
+- GUI: Added dedicated repository detail view with branch info, status, and last-refreshed display.
+- GUI: Added `RepoStatusCells` component for reusable repository status cell rendering.
+- GUI: Added footer displaying app and GUI version numbers.
+- Server: Added `/api/version` endpoint returning app and GUI version information.
+- Repository: Added `lastRefreshed` timestamp tracking to the manager and types.
+- CLI: Fixed Windows cmd launcher script path.
+
 ## v0.5.0 - Branch Quick-Switch and Browse Button
 - GUI: Added branch quick-switch popover to switch repo branches from the workspace detail view.
 - GUI: Added "Browse" button per repository row linking to a configurable webserver URL.

@@ -217,6 +217,18 @@ function maskToken(token: string): string {
 }
 
 /**
+ * Extracts and lowercases the scheme from a URL string (the part before the
+ * first `:`). Returns an empty string when no colon is present.
+ *
+ * @example extractScheme('https://example.com') // → 'https'
+ * @example extractScheme('javascript:alert(1)') // → 'javascript'
+ */
+function extractScheme(url: string): string {
+    const colonIdx = url.indexOf(':');
+    return colonIdx !== -1 ? url.slice(0, colonIdx).toLowerCase() : '';
+}
+
+/**
  * Returns a copy of the credentials map with all tokens masked.
  */
 function buildMaskedCredentials(
@@ -265,6 +277,13 @@ export interface ConfigRoutesOptions {
  * |--------|-------------------------|------------------------------------------------------|
  * | GET    | /api/config/polling     | Return current `gitPollingIntervalSeconds`           |
  * | PUT    | /api/config/polling     | Update the polling interval (min 10 s, max 86400 s)  |
+ *
+ * **Webserver URL endpoints:**
+ *
+ * | Method | Path                         | Description                              |
+ * |--------|------------------------------|------------------------------------------|
+ * | GET    | /api/config/webserver-url    | Return current `webserverUrl` (or null)  |
+ * | PUT    | /api/config/webserver-url    | Update the webserver URL                 |
  *
  * Changes take effect immediately (the in-memory `appConfig` is mutated) and
  * are persisted to `config.json` via `saveConfigField()`.
@@ -464,6 +483,68 @@ export function registerConfigRoutes(options: ConfigRoutesOptions): void {
         }
 
         sendJson(res, 200, { gitPollingIntervalSeconds: appConfig.gitPollingIntervalSeconds });
+    });
+
+    // ------------------------------------------------------------------
+    // GET /api/config/webserver-url — return the current webserver URL
+    // ------------------------------------------------------------------
+    router.get('/api/config/webserver-url', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): void => {
+        sendJson(res, 200, { webserverUrl: appConfig.webserverUrl ?? null });
+    });
+
+    // ------------------------------------------------------------------
+    // PUT /api/config/webserver-url — update the webserver URL
+    // ------------------------------------------------------------------
+    router.put('/api/config/webserver-url', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): Promise<void> => {
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { url } = body as { url?: unknown };
+
+        if (typeof url !== 'string') {
+            sendError(res, 400, 'Missing or invalid field "url": must be a string.');
+            return;
+        }
+
+        const trimmed = url.trim();
+
+        if (trimmed !== '') {
+            // Defence-in-depth: reject dangerous URL schemes.
+            const scheme = extractScheme(trimmed);
+            if (['javascript', 'data', 'vbscript'].includes(scheme)) {
+                sendError(res, 400, `URL scheme "${scheme}:" is not permitted.`);
+                return;
+            }
+        }
+
+        // Strip trailing slashes to prevent double-slash in constructed URLs.
+        const cleanUrl = trimmed !== '' ? trimmed.replace(/\/+$/, '') : undefined;
+
+        // Update in-memory config.
+        appConfig.webserverUrl = cleanUrl;
+
+        // Persist to disk.
+        saveConfigField('webserverUrl', cleanUrl, configPath);
+
+        sendJson(res, 200, { webserverUrl: appConfig.webserverUrl ?? null });
     });
 }
 
@@ -1818,6 +1899,6 @@ export function registerWorkspaceRoutes(
 ```
 ---
 **File Statistics**
-- **Size**: 67.35 KB
-- **Lines**: 1738
+- **Size**: 73.68 KB
+- **Lines**: 1905
 File: `modules/server/architecture-routes.md`
