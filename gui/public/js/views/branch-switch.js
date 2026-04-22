@@ -35,8 +35,9 @@
  * @module branch-switch
  */
 
-import { api }      from '../api.js';
-import { showToast } from '../components/toast.js';
+import { api }          from '../api.js';
+import { showToast }    from '../components/toast.js';
+import { clearElement } from '../utils/dom.js';
 
 // ---------------------------------------------------------------------------
 // Router reference — injected from app.js via setRouter()
@@ -165,7 +166,7 @@ function renderStep1(stepContent, projectId, wid, initialBranch, onNext) {
     api.branches.list(projectId, wid).then((data) => {
         if (!stepContent.isConnected) return;
 
-        stepContent.innerHTML = '';
+        clearElement(stepContent);
 
         const { suggestions = [], branches: branchMap = {} } = data || {};
 
@@ -304,7 +305,7 @@ function renderStep1(stepContent, projectId, wid, initialBranch, onNext) {
 
     }).catch((err) => {
         if (!stepContent.isConnected) return;
-        stepContent.innerHTML = '';
+        clearElement(stepContent);
 
         const errEl = document.createElement('div');
         errEl.className = 'empty-state';
@@ -435,7 +436,7 @@ function buildAssignmentRow(repoId, branchInfos, chosenBranch) {
  *   `{ repoId: branchName }` assignments.
  */
 function renderStep2(stepContent, chosenBranch, branchData, onBack, onConfirm) {
-    stepContent.innerHTML = '';
+    clearElement(stepContent);
 
     const { branches: branchMap = {} } = branchData || {};
     const repoIds = Object.keys(branchMap);
@@ -623,7 +624,7 @@ function buildResultRow(repoId, result) {
  * @param {Record<string, { success: boolean, conflict: boolean, error?: string }>} results
  */
 function renderResultsTable(stepContent, projectId, wid, results) {
-    stepContent.innerHTML = '';
+    clearElement(stepContent);
 
     const repoIds = Object.keys(results || {});
 
@@ -722,7 +723,7 @@ function renderStep3(stepContent, projectId, wid, assignments) {
 
     }).catch((err) => {
         if (!stepContent.isConnected) return;
-        stepContent.innerHTML = '';
+        clearElement(stepContent);
 
         const errEl = document.createElement('div');
         errEl.className = 'empty-state';
@@ -772,7 +773,7 @@ function renderStep3(stepContent, projectId, wid, assignments) {
  * @param {string}      wid
  */
 function renderWizard(container, projectId, wid) {
-    container.innerHTML = '';
+    clearElement(container);
 
     // ---- Page header with breadcrumb ----
     const header = document.createElement('div');

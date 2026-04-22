@@ -5,18 +5,20 @@
  * listening for navigation events.
  *
  * Route registry:
- *   #/                                           → Dashboard        (WP-013)
- *   #/repositories                               → Repositories     (WP-015)
- *   #/projects/:id                               → Project Detail   (WP-014)
- *   #/projects/:id/workspaces/:wid               → Workspace Detail (WP-016)
- *   #/projects/:id/workspaces/:wid/branch-switch → Branch Switch    (WP-017)
- *   #/settings                                   → Settings         (WP-009)
- *   #/error-log                                  → Error Log        (WP-011)
+ *   #/                                           → Dashboard           (WP-013)
+ *   #/repositories                               → Repositories        (WP-015)
+ *   #/repositories/:id                           → Repository Detail   (WP-003)
+ *   #/projects/:id                               → Project Detail      (WP-014)
+ *   #/projects/:id/workspaces/:wid               → Workspace Detail    (WP-016)
+ *   #/projects/:id/workspaces/:wid/branch-switch → Branch Switch       (WP-017)
+ *   #/settings                                   → Settings            (WP-009)
+ *   #/error-log                                  → Error Log           (WP-011)
  */
 
 import { Router }                                        from './router.js';
 import { renderDashboard, setRouter }                    from './views/dashboard.js';
 import { renderRepositories }                            from './views/repositories.js';
+import { renderRepositoryDetail, setRouter as setRepositoryDetailRouter } from './views/repository-detail.js';
 import { renderProjectDetail, setRouter as setProjectDetailRouter } from './views/project-detail.js';
 import { renderWorkspaceDetail, setRouter as setWorkspaceDetailRouter } from './views/workspace-detail.js';
 import { renderBranchSwitch, setRouter as setBranchSwitchRouter } from './views/branch-switch.js';
@@ -34,6 +36,7 @@ const router = new Router();
 
 // Inject router into views that need programmatic navigation.
 setRouter(router);
+setRepositoryDetailRouter(router);
 setProjectDetailRouter(router);
 setWorkspaceDetailRouter(router);
 setBranchSwitchRouter(router);
@@ -43,6 +46,9 @@ router.register('#/', renderDashboard);
 
 // Repositories list (WP-015)
 router.register('#/repositories', renderRepositories);
+
+// Repository detail (WP-003)
+router.register('#/repositories/:id', renderRepositoryDetail);
 
 // Project detail (WP-014)
 router.register('#/projects/:id', renderProjectDetail);

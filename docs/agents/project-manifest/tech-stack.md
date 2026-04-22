@@ -74,6 +74,7 @@ The frontend is a **vanilla JavaScript SPA** (no framework) using:
 | `dev` | `tsc --watch` | Watch mode — recompile on save |
 | `start` | `node dist/index.js` | Run compiled CLI |
 | `test` | `tsc && node --test dist/tests/*.test.js dist/server/__tests__/*.test.js dist/server/__tests__/**/*.test.js` | Compile then run all tests with Node.js built-in test runner |
+| `test:gui` | `node --test 'gui/public/js/**/*.test.mjs'` | Run all GUI frontend unit tests (auto-discovers all `.test.mjs` files under `gui/public/js/`) |
 | `copy-vendor` | `mkdir -p gui/public/css/vendor && cp ...pico.classless.min.css gui/public/css/vendor/` | Copy Pico CSS from node_modules to gui vendor directory |
 | `postinstall` | `npm run copy-vendor` | Auto-runs `copy-vendor` after `npm install` |
 

@@ -781,7 +781,7 @@ function registerConfigRoutes(router: Router, appConfig: AppConfig, configPath?:
 
 ## GUI Client (`gui/public/js/api.js`)
 
-Vanilla JS HTTP client for the SPA frontend. All methods return Promises and throw an `Error` (with `message` taken from the `error` field in the JSON body) on non-2xx responses.
+Vanilla JS HTTP client for the SPA frontend. All methods return Promises and throw an `Error` (with `message` taken from the `error` field in the JSON body, and an `err.status` property set to the HTTP status code) on non-2xx responses.
 
 **Import:** `import { api } from './api.js';`
 
@@ -825,3 +825,27 @@ api.config.polling.set(seconds)
 ```
 
 **Validation:** `set()` rejects with HTTP 400 when `seconds` is non-numeric, fractional, infinite, NaN, or below 10. On success the new interval is persisted to `config.json` and the live polling loop is restarted immediately.
+
+---
+
+## GUI Utilities (`gui/public/js/utils/`)
+
+### `utils/constants.js`
+
+| Export | Type | Value | Description |
+|---|---|---|---|
+| `STABLE_WS_ID` | `string` | `'STABLE'` | The workspace ID that is always treated as the stable reference workspace. Enforced at the storage layer. Import from here — do not hardcode `'STABLE'` in views or components. |
+
+### `utils/dom.js`
+
+| Export | Signature | Description |
+|---|---|---|
+| `clearElement` | `(el: Element) => void` | Removes all child nodes from a DOM element via a `removeChild` loop. Preferred over `el.innerHTML = ''` — avoids invoking the HTML parser and is safe when children hold event listeners. |
+
+### `utils/normalise.js`
+
+| Export | Signature | Description |
+|---|---|---|
+| `normaliseRepo` | `(raw) => { id, name, url }` | Maps PascalCase/camelCase backend keys to a consistent camelCase shape. |
+| `normaliseProject` | `(raw) => { id, name, description, repositories }` | Normalises project objects. |
+| `normaliseWorkspace` | `(raw) => { id, description, initialized, folderPath }` | Normalises workspace objects including `folderPath`. |

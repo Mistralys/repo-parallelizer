@@ -22,6 +22,7 @@
 
 import { api }       from '../api.js';
 import { showToast } from './toast.js';
+import { clearElement } from '../utils/dom.js';
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -152,7 +153,7 @@ export function showBranchQuickSwitch({ anchorEl, projectId, wid, repoId, curren
         // ------------------------------------------------------------------
         api.branches.list(projectId, wid).then((branchData) => {
             // Clear loading spinner
-            popover.innerHTML = '';
+            clearElement(popover);
 
             // Only show local branches in the list; typing still allows any name.
             const allBranches   = (branchData && branchData.branches && branchData.branches[repoId]) || [];
@@ -179,7 +180,7 @@ export function showBranchQuickSwitch({ anchorEl, projectId, wid, repoId, curren
              * @param {string} filter
              */
             function renderList(filter) {
-                list.innerHTML = '';
+                clearElement(list);
                 const f       = filter.toLowerCase();
                 const visible = f
                     ? localBranches.filter((b) => b.name.toLowerCase().includes(f))
@@ -295,7 +296,7 @@ export function showBranchQuickSwitch({ anchorEl, projectId, wid, repoId, curren
             });
         }).catch((err) => {
             // Show error state inside the popover
-            popover.innerHTML = '';
+            clearElement(popover);
 
             const errMsg = document.createElement('p');
             errMsg.className   = 'text-secondary text-sm';

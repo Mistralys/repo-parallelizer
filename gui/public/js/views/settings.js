@@ -19,6 +19,7 @@ import { api } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { showConfirm } from '../components/confirm-dialog.js';
 import { createFormField, validateRequired } from '../components/form-helpers.js';
+import { clearElement } from '../utils/dom.js';
 
 // ---------------------------------------------------------------------------
 // Table rendering
@@ -139,7 +140,7 @@ async function renderCredentialsTable(tableContainer) {
     try {
         credentials = await api.config.credentials.list();
     } catch (err) {
-        tableContainer.innerHTML = '';
+        clearElement(tableContainer);
         const errorP = document.createElement('p');
         errorP.className = 'error-message';
         errorP.setAttribute('role', 'alert');
@@ -173,7 +174,7 @@ async function renderCredentialsTable(tableContainer) {
     }
 
     table.appendChild(tbody);
-    tableContainer.innerHTML = '';
+    clearElement(tableContainer);
     tableContainer.appendChild(table);
 }
 
@@ -489,7 +490,7 @@ function buildWebserverUrlSection() {
  * @returns {void}
  */
 export function renderSettings(container, _params) {
-    container.innerHTML = '';
+    clearElement(container);
 
     // Page heading
     const heading = document.createElement('h1');

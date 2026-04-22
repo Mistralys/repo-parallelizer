@@ -60,7 +60,9 @@ async function request(method, url, body) {
     if (!response.ok) {
         const message =
             (json && json.error) ? json.error : response.statusText;
-        throw new Error(message);
+        const err = new Error(message);
+        err.status = response.status;
+        throw err;
     }
 
     return json;
