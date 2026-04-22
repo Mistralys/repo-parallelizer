@@ -90,6 +90,9 @@ export function loadConfig(configPath?: string): AppConfig {
                 ? raw['gitPollingIntervalSeconds']
                 : DEFAULTS.gitPollingIntervalSeconds,
         gitCredentials: parseGitCredentials(raw['gitCredentials']),
+        webserverUrl: typeof raw['webserverUrl'] === 'string' && raw['webserverUrl'].trim() !== ''
+            ? raw['webserverUrl'].trim().replace(/\/+$/, '')
+            : undefined,
     };
 }
 
@@ -222,11 +225,21 @@ export interface AppConfig {
      * @default 500
      */
     maxErrorLogEntries?: number;
+
+    /**
+     * Base URL of the local webserver serving the workspace repositories.
+     * When set, a "Browse" button appears in the workspace-detail view for
+     * each repository, opening `{webserverUrl}/{projectId}/{workspaceId}/{repoId}/`
+     * in the default browser.
+     *
+     * Leave empty or omit to hide the Browse button entirely.
+     */
+    webserverUrl?: string;
 }
 
 ```
 ---
 **File Statistics**
-- **Size**: 7.27 KB
-- **Lines**: 233
+- **Size**: 7.82 KB
+- **Lines**: 246
 File: `modules/config/architecture-core.md`

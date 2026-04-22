@@ -38,14 +38,19 @@
     │       └── api.workspaces.launch.test.mjs
     │       └── app.js
     │       └── components/
+    │           ├── branch-quick-switch.js
     │           ├── confirm-dialog.js
     │           ├── form-helpers.js
     │           ├── nav-badge.js
+    │           ├── repo-status-cells.js
+    │           ├── repo-status-cells.test.mjs
     │           ├── status-badge.js
     │           ├── theme-toggle.js
     │           ├── toast.js
     │       └── router.js
     │       └── utils/
+    │           ├── constants.js
+    │           ├── dom.js
     │           ├── nav-highlight.js
     │           ├── normalise.js
     │           ├── time.js
@@ -55,6 +60,9 @@
     │           └── error-log.js
     │           └── project-detail.js
     │           └── repositories.js
+    │           └── repositories.test.mjs
+    │           └── repository-detail.js
+    │           └── repository-detail.test.mjs
     │           └── settings.js
     │           └── workspace-detail.js
     │           └── workspace-detail.open-button.test.mjs
@@ -186,6 +194,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 6.58 KB
-- **Lines**: 191
+- **Size**: 7 KB
+- **Lines**: 200
 File: `project-folder-structure.md`

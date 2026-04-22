@@ -7,16 +7,341 @@ _SOURCE: Reusable UI components and utilities_
     └── public/
         └── js/
             └── components/
+                ├── branch-quick-switch.js
                 ├── confirm-dialog.js
                 ├── form-helpers.js
                 ├── nav-badge.js
+                ├── repo-status-cells.js
                 ├── status-badge.js
                 ├── theme-toggle.js
                 ├── toast.js
             └── utils/
+                └── constants.js
+                └── dom.js
                 └── nav-highlight.js
                 └── normalise.js
                 └── time.js
+
+```
+###  Path: `/gui/public/js/components/branch-quick-switch.js`
+
+```js
+/**
+ * Branch Quick Switch Component.
+ *
+ * Shows an inline popover anchored below a branch cell, letting the user pick
+ * an existing local branch or type a new name, then switch that single
+ * repository immediately — without navigating to the full branch-switch wizard.
+ *
+ * Usage:
+ *   import { showBranchQuickSwitch } from './components/branch-quick-switch.js';
+ *
+ *   const result = await showBranchQuickSwitch({
+ *     anchorEl: triggerButton,
+ *     projectId: 'my-project',
+ *     wid: 'DEV',
+ *     repoId: 'my-repo',
+ *     currentBranch: 'main',
+ *   });
+ *   if (result.switched) doRefresh();
+ *
+ * @module branch-quick-switch
+ */
+
+import { api }       from '../api.js';
+import { showToast } from './toast.js';
+import { clearElement } from '../utils/dom.js';
+
+// ---------------------------------------------------------------------------
+// Implementation
+// ---------------------------------------------------------------------------
+
+/**
+ * Show the branch quick-switch popover anchored below `anchorEl`.
+ *
+ * Fetches available branches for the workspace via `api.branches.list()`,
+ * renders a filterable list with an editable input, and calls
+ * `api.branches.switch()` when the user confirms.
+ *
+ * @param {object}      options
+ * @param {HTMLElement} options.anchorEl      - Element below which the popover is anchored.
+ * @param {string}      options.projectId     - Parent project ID.
+ * @param {string}      options.wid           - Workspace ID.
+ * @param {string}      options.repoId        - Repository ID to switch.
+ * @param {string}      options.currentBranch - Currently checked-out branch name.
+ * @returns {Promise<{ switched: boolean, newBranch?: string }>}
+ *   Resolves with `{ switched: true, newBranch }` on a successful switch,
+ *   or `{ switched: false }` when cancelled or on error.
+ */
+export function showBranchQuickSwitch({ anchorEl, projectId, wid, repoId, currentBranch }) {
+    return new Promise((resolve) => {
+        // ------------------------------------------------------------------
+        // Backdrop — transparent fixed overlay that catches outside clicks
+        // ------------------------------------------------------------------
+        const backdrop = document.createElement('div');
+        backdrop.className = 'branch-quick-switch-backdrop';
+
+        // ------------------------------------------------------------------
+        // Popover container
+        // ------------------------------------------------------------------
+        const popover = document.createElement('div');
+        popover.className = 'branch-quick-switch';
+        popover.setAttribute('role', 'dialog');
+        popover.setAttribute('aria-modal', 'true');
+        popover.setAttribute('aria-label', 'Quick branch switch');
+
+        document.body.appendChild(backdrop);
+        document.body.appendChild(popover);
+
+        // Reposition on scroll (any ancestor) and window resize.
+        window.addEventListener('scroll', positionPopover, { capture: true, passive: true });
+        window.addEventListener('resize', positionPopover, { passive: true });
+
+        // Position below anchor immediately (re-positioned after content loads)
+        positionPopover();
+
+        // Show loading spinner while branch data is fetched
+        const loadingSpinner = document.createElement('span');
+        loadingSpinner.className = 'spinner';
+        loadingSpinner.setAttribute('aria-hidden', 'true');
+        popover.appendChild(loadingSpinner);
+
+        // ------------------------------------------------------------------
+        // Helpers
+        // ------------------------------------------------------------------
+
+        /**
+         * Position the popover below the anchor element.
+         * Flips above when there is not enough space below the viewport.
+         */
+        function positionPopover() {
+            const rect        = anchorEl.getBoundingClientRect();
+            const scrollY     = window.scrollY || document.documentElement.scrollTop;
+            const scrollX     = window.scrollX || document.documentElement.scrollLeft;
+            const popoverH    = popover.offsetHeight || 280; // estimate before content
+            const spaceBelow  = window.innerHeight - rect.bottom;
+
+            if (spaceBelow < popoverH + 8 && rect.top > popoverH + 8) {
+                // Flip above anchor
+                popover.style.top = `${rect.top + scrollY - popoverH - 4}px`;
+            } else {
+                popover.style.top = `${rect.bottom + scrollY + 4}px`;
+            }
+            popover.style.left = `${rect.left + scrollX}px`;
+        }
+
+        /** Remove popover and backdrop from the DOM; detach global listeners. */
+        function cleanup() {
+            document.removeEventListener('keydown', onKeydown);
+            window.removeEventListener('scroll', positionPopover, { capture: true });
+            window.removeEventListener('resize', positionPopover);
+            if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
+            if (popover.parentNode) popover.parentNode.removeChild(popover);
+        }
+
+        /** Dismiss without switching. */
+        function dismiss() {
+            cleanup();
+            resolve({ switched: false });
+        }
+
+        function onKeydown(e) {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                dismiss();
+                return;
+            }
+            // Tab focus trap — keep focus cycling within the popover.
+            if (e.key === 'Tab') {
+                const focusable = Array.from(
+                    popover.querySelectorAll('button:not([disabled]), input:not([disabled])'),
+                );
+                if (focusable.length === 0) return;
+                const first = focusable[0];
+                const last  = focusable[focusable.length - 1];
+                if (e.shiftKey) {
+                    if (document.activeElement === first) {
+                        e.preventDefault();
+                        last.focus();
+                    }
+                } else {
+                    if (document.activeElement === last) {
+                        e.preventDefault();
+                        first.focus();
+                    }
+                }
+            }
+        }
+
+        backdrop.addEventListener('click', dismiss);
+        document.addEventListener('keydown', onKeydown);
+
+        // ------------------------------------------------------------------
+        // Fetch available branches
+        // ------------------------------------------------------------------
+        api.branches.list(projectId, wid).then((branchData) => {
+            // Clear loading spinner
+            clearElement(popover);
+
+            // Only show local branches in the list; typing still allows any name.
+            const allBranches   = (branchData && branchData.branches && branchData.branches[repoId]) || [];
+            const localBranches = allBranches.filter((b) => !b.isRemote);
+
+            // ---- Text input (pre-filled with current branch) ----
+            const input = document.createElement('input');
+            input.type  = 'text';
+            input.className = 'form-input';
+            input.value = currentBranch;
+            input.setAttribute('spellcheck', 'false');
+            input.setAttribute('autocomplete', 'off');
+            input.setAttribute('aria-label', 'Branch name');
+
+            // ---- Filterable branch list ----
+            const list = document.createElement('ul');
+            list.className = 'branch-quick-switch-list';
+            list.setAttribute('aria-label', 'Available branches');
+
+            /**
+             * Re-render the branch list applying a case-insensitive substring
+             * filter. Shows all branches when `filter` is empty.
+             *
+             * @param {string} filter
+             */
+            function renderList(filter) {
+                clearElement(list);
+                const f       = filter.toLowerCase();
+                const visible = f
+                    ? localBranches.filter((b) => b.name.toLowerCase().includes(f))
+                    : localBranches;
+
+                visible.forEach((branch) => {
+                    const li = document.createElement('li');
+                    if (branch.name === currentBranch) {
+                        li.className = 'current';
+                    }
+
+                    const nameSpan = document.createElement('span');
+                    nameSpan.textContent = branch.name;
+                    li.appendChild(nameSpan);
+
+                    if (branch.name === currentBranch) {
+                        const hint = document.createElement('span');
+                        hint.className   = 'branch-current-hint';
+                        hint.textContent = ' (current)';
+                        li.appendChild(hint);
+                    }
+
+                    // Clicking a list item populates the input
+                    li.addEventListener('click', () => {
+                        input.value = branch.name;
+                        input.focus();
+                    });
+
+                    list.appendChild(li);
+                });
+            }
+
+            renderList('');
+
+            // Keep list in sync with typed input
+            input.addEventListener('input', () => renderList(input.value));
+
+            // ---- Inline error message ----
+            const errorEl = document.createElement('div');
+            errorEl.className = 'form-error';
+            errorEl.setAttribute('aria-live', 'polite');
+            errorEl.hidden = true;
+
+            // ---- Action buttons ----
+            const actions   = document.createElement('div');
+            actions.className = 'form-actions';
+
+            const switchBtn = document.createElement('button');
+            switchBtn.type      = 'button';
+            switchBtn.className = 'btn btn-primary btn-sm';
+            switchBtn.textContent = 'Switch';
+
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type      = 'button';
+            cancelBtn.className = 'btn btn-secondary btn-sm';
+            cancelBtn.textContent = 'Cancel';
+
+            actions.appendChild(switchBtn);
+            actions.appendChild(cancelBtn);
+
+            // Assemble popover content
+            popover.appendChild(input);
+            popover.appendChild(list);
+            popover.appendChild(errorEl);
+            popover.appendChild(actions);
+
+            // Re-position now that the full height is known
+            requestAnimationFrame(positionPopover);
+
+            input.focus();
+            input.select();
+
+            cancelBtn.addEventListener('click', dismiss);
+
+            // ---- Switch handler ----
+            switchBtn.addEventListener('click', async () => {
+                errorEl.hidden = true;
+
+                const newBranch = input.value.trim();
+                if (!newBranch) {
+                    errorEl.textContent = 'Branch name is required.';
+                    errorEl.hidden = false;
+                    return;
+                }
+
+                switchBtn.disabled    = true;
+                cancelBtn.disabled    = true;
+                switchBtn.textContent = 'Switching\u2026';
+
+                try {
+                    const result     = await api.branches.switch(projectId, wid, { [repoId]: newBranch });
+                    const repoResult = result && result.results && result.results[repoId];
+
+                    if (repoResult && repoResult.success) {
+                        if (repoResult.conflict) {
+                            showToast(`Switched to "${newBranch}" (conflicts detected).`, 'warning');
+                        } else {
+                            showToast(`Switched to "${newBranch}".`, 'success');
+                        }
+                        cleanup();
+                        resolve({ switched: true, newBranch });
+                    } else {
+                        const msg = (repoResult && repoResult.error) || 'Failed to switch branch.';
+                        showToast(msg, 'error');
+                        cleanup();
+                        resolve({ switched: false });
+                    }
+                } catch (err) {
+                    showToast(err.message || 'Failed to switch branch.', 'error');
+                    cleanup();
+                    resolve({ switched: false });
+                }
+            });
+        }).catch((err) => {
+            // Show error state inside the popover
+            clearElement(popover);
+
+            const errMsg = document.createElement('p');
+            errMsg.className   = 'text-secondary text-sm';
+            errMsg.textContent = err.message || 'Failed to load branches.';
+            popover.appendChild(errMsg);
+
+            const closeBtn = document.createElement('button');
+            closeBtn.type       = 'button';
+            closeBtn.className  = 'btn btn-secondary btn-sm';
+            closeBtn.textContent = 'Close';
+            closeBtn.addEventListener('click', dismiss);
+            popover.appendChild(closeBtn);
+
+            requestAnimationFrame(positionPopover);
+        });
+    });
+}
 
 ```
 ###  Path: `/gui/public/js/components/confirm-dialog.js`
@@ -515,6 +840,220 @@ export function refreshNavBadge() {
 }
 
 ```
+###  Path: `/gui/public/js/components/repo-status-cells.js`
+
+```js
+/**
+ * Repo Status Cells Component — Repo Parallelizer GUI.
+ *
+ * Encapsulates the reusable Branch, Status badge, and Actions `<td>` cell-building
+ * logic shared between the workspace-detail and repository-detail views.
+ *
+ * ## Exported functions
+ *
+ * - `buildRepoStatusCells`   — Build the three `<td>` elements for a single
+ *   repository row (branch, badge, actions). Callers assemble the full `<tr>`.
+ * - `makeBranchTrigger`      — Build a `<button class="branch-switch-trigger">`.
+ * - `updateRepoStatusCells`  — Update branch and badge cells in-place within a
+ *   `<tr>`, locating them by CSS class (`.repo-branch-cell`,
+ *   `div[data-repo-id]`) rather than by hardcoded cell indices. The
+ *   branch-trigger aria-label is sourced from `row.dataset.repoName`
+ *   when present, falling back to `repoId` when the attribute is absent.
+ *
+ * @module repo-status-cells
+ */
+
+import { api }               from '../api.js';
+import { createStatusBadge } from './status-badge.js';
+import { clearElement }      from '../utils/dom.js';
+
+// ---------------------------------------------------------------------------
+// Public exports
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a branch-switch trigger `<button>` styled as inline text.
+ *
+ * Extracted to avoid duplicating the element setup in both `buildRepoStatusCells`
+ * (initial render) and `updateRepoStatusCells` (polling updates). The click
+ * handler is wired by the caller so it can close over a fresh `trigger`
+ * reference.
+ *
+ * @param {string} branchName - Branch name shown as the button label.
+ * @param {string} ariaLabel  - Accessible label for screen-readers.
+ * @returns {HTMLButtonElement}
+ */
+export function makeBranchTrigger(branchName, ariaLabel) {
+    const btn = document.createElement('button');
+    btn.type        = 'button';
+    btn.className   = 'branch-switch-trigger';
+    btn.textContent = branchName;
+    btn.setAttribute('aria-label', ariaLabel);
+    return btn;
+}
+
+/**
+ * Build the three shared status `<td>` cells for a single repository row.
+ *
+ * Returns a plain object with `branchCell`, `badgeCell`, and `actionsCell`
+ * so the caller can insert them into whatever `<tr>` it is constructing,
+ * interleaving its own cells (e.g. a repository name cell) as needed.
+ *
+ * @param {Object} opts
+ * @param {string}      opts.repoId      - Unique repository identifier.
+ * @param {string}      opts.repoName    - Human-readable display name; used in
+ *                                         aria-labels. Falls back to `repoId` when
+ *                                         the caller has no richer name.
+ * @param {Object|null} opts.statusInfo  - GitStatusInfo object from the API, or
+ *                                         `null` when no status data is yet available.
+ * @param {string}      opts.projectId   - ID of the parent project.
+ * @param {string}      opts.wid         - ID of the parent workspace.
+ * @param {boolean}    [opts.isStable]   - When `true`, the branch cell is rendered
+ *                                         as plain text (no clickable trigger).
+ * @param {function(HTMLElement, string, string): void} [opts.onBranchCellClick]
+ *                                         Callback invoked with `(anchorEl, repoId,
+ *                                         currentBranch)` when the branch trigger is
+ *                                         clicked. Only wired when `isStable` is falsy.
+ * @param {string|null} [opts.webserverUrl] - Base URL of the local webserver. When
+ *                                         truthy, a "Browse" button is inserted
+ *                                         before the "Git GUI" button inside
+ *                                         `actionsCell`.
+ * @param {function(string): void} [opts.onError] - Optional callback invoked with
+ *                                         an error message string when the Git GUI
+ *                                         button click handler fails. When omitted
+ *                                         the error is silently swallowed.
+ * @returns {{ branchCell: HTMLTableCellElement, badgeCell: HTMLTableCellElement, actionsCell: HTMLTableCellElement }}
+ */
+export function buildRepoStatusCells({ repoId, repoName, statusInfo, projectId, wid, isStable, onBranchCellClick, webserverUrl, onError }) {
+    // ------------------------------------------------------------------
+    // Branch cell
+    // ------------------------------------------------------------------
+    const branchCell = document.createElement('td');
+    branchCell.className = 'repo-branch-cell';
+
+    const currentBranch = (statusInfo && statusInfo.currentBranch) ? statusInfo.currentBranch : null;
+
+    if (!isStable && currentBranch && onBranchCellClick) {
+        const trigger = makeBranchTrigger(currentBranch, `Switch branch for ${repoName}`);
+        trigger.addEventListener('click', () => onBranchCellClick(trigger, repoId, currentBranch));
+        branchCell.appendChild(trigger);
+    } else {
+        branchCell.textContent = currentBranch || '—';
+    }
+
+    // ------------------------------------------------------------------
+    // Badge cell — wrapper <div> keeps data-repo-id so polling updates can
+    // locate and replace badge contents without touching the rest of the row.
+    // ------------------------------------------------------------------
+    const badgeCell = document.createElement('td');
+    badgeCell.className = 'repo-badge-cell';
+
+    const badgeWrapper = document.createElement('div');
+    badgeWrapper.dataset.repoId = repoId;
+    badgeWrapper.appendChild(createStatusBadge(statusInfo || null));
+    badgeCell.appendChild(badgeWrapper);
+
+    // ------------------------------------------------------------------
+    // Actions cell — "Git GUI" button (always present) + optional "Browse"
+    // ------------------------------------------------------------------
+    const actionsCell = document.createElement('td');
+    actionsCell.className = 'repo-actions-cell';
+
+    const openBtn = document.createElement('button');
+    openBtn.type        = 'button';
+    openBtn.className   = 'btn btn-secondary btn-sm';
+    openBtn.textContent = 'Git GUI';
+    openBtn.title       = 'Open this repository in GitHub Desktop.';
+
+    openBtn.addEventListener('click', async () => {
+        openBtn.disabled    = true;
+        openBtn.textContent = 'Opening…';
+        try {
+            await api.workspaces.launch.githubDesktop(projectId, wid, repoId);
+        } catch (err) {
+            if (onError) {
+                onError(err.message || 'Failed to open GitHub Desktop.');
+            }
+        } finally {
+            openBtn.disabled    = false;
+            openBtn.textContent = 'Git GUI';
+        }
+    });
+
+    actionsCell.appendChild(openBtn);
+
+    // Browse button — shown only when webserverUrl is configured.
+    if (webserverUrl) {
+        const browseBtn = document.createElement('button');
+        browseBtn.type        = 'button';
+        browseBtn.className   = 'btn btn-secondary btn-sm';
+        browseBtn.textContent = 'Browse';
+        browseBtn.title       = 'Open this repository in the browser via the configured webserver URL.';
+
+        browseBtn.addEventListener('click', () => {
+            const url = `${webserverUrl}/${encodeURIComponent(projectId)}/${encodeURIComponent(wid)}/${encodeURIComponent(repoId)}/`;
+            window.open(url, '_blank');
+        });
+
+        // Insert Browse before Git GUI so the visual order is: Browse → Git GUI.
+        actionsCell.insertBefore(browseBtn, openBtn);
+    }
+
+    return { branchCell, badgeCell, actionsCell };
+}
+
+/**
+ * Update an existing repository row's branch and badge cells in-place.
+ *
+ * Cells are located by CSS class (`.repo-branch-cell`) and by the badge
+ * wrapper's `data-repo-id` attribute — **not** by hardcoded cell indices —
+ * so callers are free to add additional cells before or between the shared
+ * cells without breaking this function.
+ *
+ * @param {HTMLTableRowElement} row          - The `<tr>` to update.
+ * @param {string}              repoId       - Repository identifier (used to
+ *                                             find the badge wrapper div).
+ * @param {Object|null}         statusInfo   - New GitStatusInfo from the API,
+ *                                             or `null` when no data is available.
+ * @param {boolean}            [isStable]    - When `true`, the branch cell is
+ *                                             rebuilt as plain text.
+ * @param {function(HTMLElement, string, string): void} [onBranchCellClick]
+ *                                             Wired to the branch trigger button
+ *                                             in non-STABLE workspaces.
+ *
+ * @remarks
+ * The aria-label for the branch trigger button is constructed as
+ * `"Switch branch for <name>"` where `<name>` is `row.dataset.repoName`
+ * when that attribute is present on the `<tr>`, falling back to `repoId`
+ * when the attribute is absent or empty.
+ */
+export function updateRepoStatusCells(row, repoId, statusInfo, isStable, onBranchCellClick) {
+    // Update branch cell — locate by class, not by index.
+    const branchCell = row.querySelector('.repo-branch-cell');
+    if (branchCell) {
+        const currentBranch = (statusInfo && statusInfo.currentBranch) ? statusInfo.currentBranch : null;
+        // Clear existing content before rebuilding.
+        clearElement(branchCell);
+        if (!isStable && currentBranch && onBranchCellClick) {
+            const repoName = row.dataset.repoName || repoId;
+            const trigger  = makeBranchTrigger(currentBranch, `Switch branch for ${repoName}`);
+            trigger.addEventListener('click', () => onBranchCellClick(trigger, repoId, currentBranch));
+            branchCell.appendChild(trigger);
+        } else {
+            branchCell.textContent = currentBranch || '—';
+        }
+    }
+
+    // Update badge wrapper — locate the <div data-repo-id="..."> inside the row.
+    const badgeWrapper = row.querySelector(`div[data-repo-id="${CSS.escape(repoId)}"]`);
+    if (badgeWrapper) {
+        // Clear existing badge before replacing.
+        clearElement(badgeWrapper);
+        badgeWrapper.appendChild(createStatusBadge(statusInfo || null));
+    }
+}
+
+```
 ###  Path: `/gui/public/js/components/status-badge.js`
 
 ```js
@@ -888,6 +1427,50 @@ export function showToast(message, type, duration = TOAST_DISPLAY_MS) {
 }
 
 ```
+###  Path: `/gui/public/js/utils/constants.js`
+
+```js
+/**
+ * Shared GUI constants — Repo Parallelizer.
+ *
+ * Centralises values that must remain consistent across multiple views and
+ * components. Import from here instead of re-declaring inline.
+ *
+ * @module utils/constants
+ */
+
+/**
+ * The workspace ID that is always treated as the stable reference workspace.
+ * This value is enforced at the storage layer and must never be changed here.
+ *
+ * @type {string}
+ */
+export const STABLE_WS_ID = 'STABLE';
+
+```
+###  Path: `/gui/public/js/utils/dom.js`
+
+```js
+/**
+ * Shared DOM utilities — Repo Parallelizer GUI.
+ *
+ * @module utils/dom
+ */
+
+/**
+ * Remove all child nodes from a DOM element without using `innerHTML`.
+ *
+ * Preferred over `el.innerHTML = ''` because it avoids invoking the HTML
+ * parser and is safe even when the element's children hold event listeners
+ * that should be GC'd cleanly.
+ *
+ * @param {Element} el - The element to empty.
+ */
+export function clearElement(el) {
+    while (el.firstChild) el.removeChild(el.firstChild);
+}
+
+```
 ###  Path: `/gui/public/js/utils/nav-highlight.js`
 
 ```js
@@ -1115,6 +1698,6 @@ export function formatLastActivity(isoTimestamp) {
 ```
 ---
 **File Statistics**
-- **Size**: 37.66 KB
-- **Lines**: 1121
+- **Size**: 60.78 KB
+- **Lines**: 1657
 File: `modules/gui/architecture-components.md`
