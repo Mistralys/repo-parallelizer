@@ -44,6 +44,14 @@ export interface ProjectData {
      */
     Workspaces: Record<string, ProjectWorkspace>;
 
+    /**
+     * ISO 8601 timestamp of the most recent activity recorded against this
+     * project (e.g. a branch push or workspace operation). Updated by
+     * `ProjectManager.updateLastActivity()`. Does NOT affect `DateModified`.
+     */
+    LastActivity?: string;
+
+    /** @see BaseStore.SchemaVersion for versioning policy. */
     SchemaVersion: number;
 }
 

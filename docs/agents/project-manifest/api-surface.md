@@ -244,6 +244,7 @@ interface ProjectData {
     DateModified: string;
     Repositories: string[];
     Workspaces: Record<string, ProjectWorkspace>;
+    LastActivity?: string;  // ISO 8601 — most recent activity timestamp; updated by updateLastActivity(), does NOT affect DateModified
     SchemaVersion: number;
 }
 
@@ -271,6 +272,7 @@ class ProjectManager {
     remove(id: string): void
     addRepository(projectId: string, repositoryId: string): ProjectData
     removeRepository(projectId: string, repositoryId: string): ProjectData
+    updateLastActivity(id: string, value: string): void  // Sets LastActivity (ISO 8601 string from git commit timestamp) without touching DateModified; no-ops silently when id not found or value unchanged
     addWorkspace(projectId: string, workspaceId: string, workspace: ProjectWorkspace): ProjectData
     updateWorkspace(projectId: string, workspaceId: string, changes: Partial<{ Description: string; DateModified: string }>): ProjectData
     removeWorkspace(projectId: string, workspaceId: string): ProjectData
@@ -444,6 +446,14 @@ function checkWorkspaceHealth(
 type SchemaVersion = number;
 
 interface BaseStore {
+    /**
+     * Monotonically incrementing integer that tracks structural changes to the
+     * persisted JSON shape. Versioning policy: adding an optional field is
+     * backward-compatible (do NOT bump); bump SCHEMA_VERSION only for breaking
+     * changes (removing/renaming a required field, or changing an existing
+     * field's type). All concrete store types inherit this field and policy
+     * via BaseStore.
+     */
     SchemaVersion: SchemaVersion;
 }
 ```

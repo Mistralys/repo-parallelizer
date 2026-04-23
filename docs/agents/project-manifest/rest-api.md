@@ -21,7 +21,7 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 | Method | Path | Success | Error Codes | Description |
 |---|---|---|---|---|
 | `GET` | `/api/projects` | 200 | — | List all projects (index entries). |
-| `GET` | `/api/projects/:id` | 200 | 404 | Get full project data by ID. |
+| `GET` | `/api/projects/:id` | 200 | 404 | Get full project data by ID. Response includes an optional `LastActivity?: string` field (ISO 8601) when the project has recorded git activity via the polling layer; absent on projects that have never been polled. |
 | `POST` | `/api/projects` | 201 | 400 | Create a new project. Body: `{ name, repositoryIds, description?, id? }`. |
 | `PUT` | `/api/projects/:id` | 200 | 404 | Update project metadata. Body: `{ Name?, Description? }`. |
 | `PUT` | `/api/projects/:id/rename` | 200 | 400, 404 | Rename project (change ID). Body: `{ newId }`. |
