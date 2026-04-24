@@ -97,7 +97,7 @@ export async function serveStatic(
     };
 
     if (contentType.startsWith('text/html')) {
-        headers['Content-Security-Policy'] = "default-src 'self'";
+        headers['Content-Security-Policy'] = "default-src 'self'; img-src 'self' data:";
     }
 
     res.writeHead(200, headers);
