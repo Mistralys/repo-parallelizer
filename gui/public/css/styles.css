@@ -692,6 +692,9 @@ td.mono {
     width: auto;
     min-width: 200px;
     flex: 1 1 200px;
+    height: auto !important;
+    padding-top: 6px !important;
+    padding-bottom: 6px !important;
 }
 
 .project-filter-toolbar .project-filter-repo,
