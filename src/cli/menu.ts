@@ -184,6 +184,12 @@ async function checkAndRepairInstall(): Promise<void> {
             return;
         }
         printSuccess('Build complete.');
+
+        // The current process loaded the old dist/ into memory at startup.
+        // Re-exec so the fresh build is picked up before the server is started.
+        printInfo('Restarting to apply the updated build...');
+        const reexec = cp.spawnSync(process.execPath, process.argv.slice(1), { stdio: 'inherit' });
+        process.exit(reexec.status ?? 0);
     }
 
     if (!needsInstall && !needsBuild) {
