@@ -480,11 +480,15 @@ export function applyFiltersAndSort(filterState, allProjects) {
         }
 
         // Repository filter — project must contain the selected repo.
+        // Repositories is stored as string[] (repo IDs) on the server, but
+        // guard against object entries for defensive compatibility.
         if (repoId) {
             const repos = Array.isArray(fullProject.Repositories)
                 ? fullProject.Repositories
                 : (Array.isArray(fullProject.repositories) ? fullProject.repositories : []);
-            const hasRepo = repos.some((r) => (r.id || r.Id || '') === repoId);
+            const hasRepo = repos.some((r) =>
+                (typeof r === 'string' ? r : (r.id || r.Id || '')) === repoId,
+            );
             if (!hasRepo) return false;
         }
 

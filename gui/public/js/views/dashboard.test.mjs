@@ -69,7 +69,7 @@ const PROJECT_ALPHA = {
     Id: 'alpha',
     Name: 'Alpha Project',
     Description: 'The first project',
-    Repositories: [REPO_A],
+    Repositories: [REPO_A.Id],
     LastActivity: '2024-03-01T00:00:00Z',
 };
 
@@ -77,7 +77,7 @@ const PROJECT_BETA = {
     Id: 'beta',
     Name: 'Beta Project',
     Description: 'Second project with search keyword',
-    Repositories: [REPO_A, REPO_B],
+    Repositories: [REPO_A.Id, REPO_B.Id],
     LastActivity: '2024-01-15T00:00:00Z',
 };
 
@@ -85,7 +85,7 @@ const PROJECT_ZETA = {
     Id: 'zeta',
     Name: 'Zeta Search',
     Description: 'Third project, no activity',
-    Repositories: [REPO_B],
+    Repositories: [REPO_B.Id],
     LastActivity: null,
 };
 
