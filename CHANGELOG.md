@@ -1,13 +1,13 @@
 # Changelog
 
-## v1.0.0 - Repository Overview Screen
+## v1.0.0 - Project Filtering & Repositories Overview
 > First stable release
 
-- GUI: Added dedicated repository detail view with branch info, status, and last-refreshed display.
-- GUI: Added `RepoStatusCells` component for reusable repository status cell rendering.
+- GUI: Added filtering and sorting controls to the projects list.
+- GUI: Added dedicated repository detail view.
 - GUI: Added footer displaying app and GUI version numbers.
-- Server: Added `/api/version` endpoint returning app and GUI version information.
-- Repository: Added `lastRefreshed` timestamp tracking to the manager and types.
+- CLI: Added staleness check with auto-rebuild.
+- CLI: Added menu refresh after a successful build.
 - CLI: Fixed Windows cmd launcher script path.
 
 ## v0.5.0 - Branch Quick-Switch and Browse Button
