@@ -77,6 +77,34 @@ menu.cmd
 | `paralizer setup` | Run the setup wizard |
 | `paralizer docs` | Generate project documentation |
 
+## Start with Windows
+
+1. Press `Win + R`, type the following command to open your user Startup folder, and press **Enter**:
+   ```
+   shell:startup
+   ```
+   *(This opens the folder: `C:\Users\<YourUsername>\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup`)*
+
+2. In that folder, right-click an empty area and select **New** > **Text Document**.
+3. Name it `start-repo-parallelizer.vbs` (ensure you delete the `.txt` extension!).
+4. Right-click the new file, select **Edit** (or open it with Notepad/VS Code), and paste the following code into it:
+
+   ```vbscript
+   Set WshShell = CreateObject("WScript.Shell")
+   ' 0 means the window will be hidden, so you don't have a lingering terminal
+   WshShell.Run "cmd /c paralizer serve", 0
+   Set WshShell = Nothing
+   ```
+
+   > **Requires `npm link`** — run `npm link` once in the project folder so `paralizer` is available globally.
+
+5. Save and close the file.
+
+### How it works:
+Every time you log into Windows, this script will seamlessly launch the server in the background without leaving an unused command prompt window taking up space on your taskbar. The background Node.js process will execute exactly as it normally does. 
+
+*(If you ever want to stop it from starting automatically, just delete the `start-repo-parallelizer.vbs` file from that Startup folder.)*
+
 ## Learn More
 
 | Resource | Description |
