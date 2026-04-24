@@ -336,6 +336,35 @@ export class ProjectManager {
         return project;
     }
 
+    /**
+     * Updates the `LastActivity` timestamp on a project without touching
+     * `DateModified`.
+     *
+     * - Short-circuits (no disk write) when `value` already equals the stored
+     *   `LastActivity`.
+     * - Silently returns when the project ID does not exist (no error thrown).
+     *
+     * @param id    The project ID to update.
+     * @param value An ISO 8601 timestamp string (e.g. `"2024-03-15T12:34:56.000Z"`).
+     *   In practice this value is always sourced from `GitStatusInfo.lastActivity`,
+     *   which is derived from a git commit timestamp and normalised to a consistent
+     *   UTC offset by the git layer.  No format validation is performed here — the
+     *   caller is responsible for passing a well-formed ISO 8601 string.
+     * @returns void — intentionally does not return the updated project.
+     *   Use `getById()` if you need the full project data after the update.
+     */
+    updateLastActivity(id: string, value: string): void {
+        const project = this.loadProject(id);
+        if (!project) {
+            return;
+        }
+        if (project.LastActivity === value) {
+            return;
+        }
+        project.LastActivity = value;
+        this.saveProject(project);
+    }
+
     // -------------------------------------------------------------------------
     // Workspace storage helpers (used exclusively by WorkspaceManager)
     // -------------------------------------------------------------------------

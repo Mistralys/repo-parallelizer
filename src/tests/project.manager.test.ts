@@ -612,3 +612,71 @@ test('rename trims whitespace from newId before validation', () => {
     const renamed = projectManager.rename('my-project', '  new-id  ');
     assert.strictEqual(renamed.Id, 'new-id');
 });
+
+// ─── updateLastActivity ───────────────────────────────────────────────────────
+
+test('updateLastActivity sets LastActivity on the project JSON file', () => {
+    const base = makeTempDir();
+    const { repoManager, projectManager } = makeManagers(base);
+    repoManager.add({ url: 'https://github.com/user/repo.git' });
+    projectManager.create('My Project', ['repo'], undefined, 'my-project');
+    const ts = '2025-06-01T12:00:00.000Z';
+    projectManager.updateLastActivity('my-project', ts);
+    const project = projectManager.getById('my-project');
+    assert.strictEqual(project?.LastActivity, ts);
+});
+
+test('updateLastActivity does NOT modify DateModified', () => {
+    const base = makeTempDir();
+    const { repoManager, projectManager } = makeManagers(base);
+    repoManager.add({ url: 'https://github.com/user/repo.git' });
+    const created = projectManager.create('My Project', ['repo'], undefined, 'my-project');
+    projectManager.updateLastActivity('my-project', '2025-06-01T12:00:00.000Z');
+    const after = projectManager.getById('my-project');
+    assert.strictEqual(after?.DateModified, created.DateModified);
+});
+
+test('updateLastActivity short-circuits without writing to disk when value equals existing LastActivity', () => {
+    const base = makeTempDir();
+    const { config, repoManager, projectManager } = makeManagers(base);
+    repoManager.add({ url: 'https://github.com/user/repo.git' });
+    projectManager.create('My Project', ['repo'], undefined, 'my-project');
+    const ts = '2025-06-01T12:00:00.000Z';
+    projectManager.updateLastActivity('my-project', ts);
+
+    // Record the mtime after the first write
+    const filePath = path.join(config.storageFolder, 'projects', 'my-project.json');
+    const mtimeBefore = fs.statSync(filePath).mtimeMs;
+
+    // Probe filesystem mtime granularity: write twice in rapid succession and
+    // compare mtimes. On FAT-backed or tmpfs volumes (2-second resolution) the
+    // two writes may produce the same mtime, making a mtime-based no-write
+    // assertion unreliable. Detect this condition and fall back to a content
+    // comparison instead.
+    const probeFile = path.join(base, 'mtime-probe.tmp');
+    fs.writeFileSync(probeFile, 'a');
+    const probeA = fs.statSync(probeFile).mtimeMs;
+    fs.writeFileSync(probeFile, 'b');
+    const probeB = fs.statSync(probeFile).mtimeMs;
+    const fineGranularity = probeA !== probeB;
+
+    // Read content snapshot before the second (no-op) call
+    const contentBefore = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Record<string, unknown>;
+
+    // Call again with the same value — must NOT write
+    projectManager.updateLastActivity('my-project', ts);
+    const mtimeAfter = fs.statSync(filePath).mtimeMs;
+
+    if (fineGranularity) {
+        assert.strictEqual(mtimeBefore, mtimeAfter, 'file should not be written when value is unchanged');
+    } else {
+        // Coarse-granularity filesystem: verify content is unchanged instead
+        const contentAfter = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Record<string, unknown>;
+        assert.deepStrictEqual(contentBefore, contentAfter, 'file content should be unchanged when value is unchanged');
+    }
+});
+
+test('updateLastActivity silently returns when called with a project ID that does not exist', () => {
+    const { projectManager } = makeManagers(makeTempDir());
+    assert.doesNotThrow(() => projectManager.updateLastActivity('nonexistent', '2025-06-01T12:00:00.000Z'));
+});

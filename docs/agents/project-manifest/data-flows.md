@@ -93,7 +93,14 @@ PollingManager.start(intervalSeconds)
               For each repository in project.Repositories:
                 fetchAndGetStatus(repoPath)    # git fetch + status snapshot
                 └→ Store result in internal Map keyed by repoPath
+       └→ persistLastActivity()               # post-sweep: compute max lastActivity per
+                                              # project and call updateLastActivity(); no-ops
+                                              # for projects with all-null lastActivity values
 ```
+
+`refreshWorkspace()` (on-demand polling) also calls `persistLastActivity()` after its fetch sweep so that `ProjectData.LastActivity` stays current after any single-workspace refresh.
+
+> **Timestamp comparison note:** `persistLastActivity()` finds the maximum `lastActivity` via lexicographic string comparison, which is correct only when all ISO 8601 timestamps share a consistent timezone offset (always `Z` for git commit timestamps normalised by the git layer). Do not mix timezone offsets without updating this method.
 
 ```
 User → GET /api/projects/:id/workspaces/:wid/status

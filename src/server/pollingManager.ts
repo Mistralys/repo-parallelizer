@@ -173,6 +173,7 @@ export class PollingManager {
     async refreshWorkspace(projectId: string, workspaceId: string): Promise<void> {
         const repoPaths = this.getRepoPaths(projectId, workspaceId);
         await this.fetchWithStagger(repoPaths);
+        this.persistLastActivity();
     }
 
     // -------------------------------------------------------------------------
@@ -230,6 +231,55 @@ export class PollingManager {
     }
 
     /**
+     * Iterates the current cache, computes the maximum `lastActivity` ISO
+     * timestamp for each project, and calls `projectManager.updateLastActivity()`
+     * for every project that has at least one cached entry with a non-null
+     * `lastActivity`.
+     *
+     * Projects where every cached entry has `null` `lastActivity` are skipped.
+     * Cache entries whose repo path cannot be parsed by `extractContext()` (i.e.
+     * the function returns an empty object with no `ProjectId`) are ignored
+     * silently.
+     *
+     * @remarks
+     * The "maximum" timestamp is determined by lexicographic string comparison,
+     * which is correct for ISO 8601 strings that share a **consistent timezone
+     * offset** (e.g. all `Z`).  All `lastActivity` values originate from git
+     * commit timestamps that the git layer normalises to a single offset, so
+     * this comparison is safe.  Introducing mixed offsets (e.g. `'Z'` alongside
+     * `'+05:00'`) would produce incorrect max results — do not relax the
+     * normalisation constraint in the git layer without updating this method.
+     */
+    private persistLastActivity(): void {
+        // Build a per-project map of the maximum lastActivity timestamp.
+        const maxByProject = new Map<string, string>();
+
+        for (const [repoPath, status] of this.cache) {
+            if (status.lastActivity === null) {
+                continue;
+            }
+            const context = extractContext(repoPath, this.config.projectsFolder);
+            if (!context.ProjectId) {
+                continue;
+            }
+            const projectId = context.ProjectId;
+            const existing = maxByProject.get(projectId);
+            // ISO 8601 strings with a consistent timezone offset (e.g. always 'Z')
+            // sort correctly with lexicographic comparison.  All lastActivity values
+            // originate from git commit timestamps normalised to a single offset, so
+            // this comparison is safe.  Mixed offsets (e.g. 'Z' vs '+05:00') would
+            // produce incorrect results — do not relax the normalisation constraint.
+            if (existing === undefined || status.lastActivity > existing) {
+                maxByProject.set(projectId, status.lastActivity);
+            }
+        }
+
+        for (const [projectId, maxTimestamp] of maxByProject) {
+            this.projectManager.updateLastActivity(projectId, maxTimestamp);
+        }
+    }
+
+    /**
      * Fetches status for each repo path sequentially with a `STAGGER_MS` delay
      * between calls.  Errors from individual fetches are caught and, when an
      * `ErrorLogManager` is configured, logged at warning severity with
@@ -274,6 +324,7 @@ export class PollingManager {
     private async runSweep(): Promise<void> {
         const repoPaths = this.getAllRepoPaths();
         await this.fetchWithStagger(repoPaths);
+        this.persistLastActivity();
     }
 }
 

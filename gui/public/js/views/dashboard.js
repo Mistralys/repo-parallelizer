@@ -14,6 +14,26 @@ import { createFormField, validateRequired } from '../components/form-helpers.js
 import { clearElement } from '../utils/dom.js';
 
 // ---------------------------------------------------------------------------
+// Debounce helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Return a debounced version of `fn` that delays invocation by `wait` ms.
+ *
+ * @template {(...args: unknown[]) => void} T
+ * @param {T} fn
+ * @param {number} wait - Delay in milliseconds.
+ * @returns {T}
+ */
+function debounce(fn, wait) {
+    let timer;
+    return function (...args) {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn.apply(this, args), wait);
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Router instance — imported lazily to avoid circular-dependency issues.
 // app.js sets this via setRouter() immediately after instantiation.
 // ---------------------------------------------------------------------------
@@ -117,12 +137,178 @@ function buildProjectCard(project, workspaceCount) {
  * @param {HTMLElement} el
  */
 function showLoading(el) {
-    el.innerHTML = `
-        <div class="loading-indicator" aria-live="polite" aria-label="Loading projects…">
-            <span class="spinner" aria-hidden="true"></span>
-            <span>Loading projects…</span>
-        </div>
-    `;
+    clearElement(el);
+    const wrapper = document.createElement('div');
+    wrapper.className = 'loading-indicator';
+    wrapper.setAttribute('aria-live', 'polite');
+    wrapper.setAttribute('aria-label', 'Loading projects\u2026');
+
+    const spinner = document.createElement('span');
+    spinner.className = 'spinner';
+    spinner.setAttribute('aria-hidden', 'true');
+
+    const label = document.createElement('span');
+    label.textContent = 'Loading projects\u2026';
+
+    wrapper.appendChild(spinner);
+    wrapper.appendChild(label);
+    el.appendChild(wrapper);
+}
+
+// ---------------------------------------------------------------------------
+// Filter / Sort toolbar
+// ---------------------------------------------------------------------------
+
+/**
+ * Represents the current filter and sort state for the project list toolbar.
+ *
+ * This object flows between {@link renderDashboard}, {@link buildFilterToolbar},
+ * {@link applyFiltersAndSort}, and {@link renderProjectGrid} — covering both
+ * toolbar control rendering and the filter/sort logic applied to the project list.
+ *
+ * @typedef {Object} FilterState
+ * @property {string} search - Free-text search query matched against project names
+ *   and descriptions. Empty string means "no search filter applied".
+ * @property {string} repoId - ID of the repository to filter by, or `''` to show
+ *   projects from all repositories ("All repositories" option). Matches `repo.id`
+ *   / `repo.Id` values returned by `api.repositories.list()`.
+ * @property {'alpha'|'activity'} sort - Sort order for the project list.
+ *   - `'alpha'`    — alphabetical by project name (A → Z). This is the default.
+ *   - `'activity'` — most recently active project first (Last Activity order).
+ *
+ * @example
+ * // Default state — no filter, alphabetical sort
+ * const filterState = { search: '', repoId: '', sort: 'alpha' };
+ *
+ * @example
+ * // Filter to a specific repo, sorted by last activity
+ * const filterState = { search: 'api', repoId: 'backend-repo', sort: 'activity' };
+ */
+
+/**
+ * Build the filter/sort toolbar for the project list.
+ *
+ * Fetches `api.repositories.list()` to populate the repository dropdown.
+ * If the fetch fails the toolbar renders without the repository dropdown and
+ * shows a toast error.
+ *
+ * @param {FilterState} initialState      - The current filter/sort values.
+ * @param {function(FilterState): void} onFilterChange - Callback fired when any
+ *   control value changes.
+ * @returns {Promise<HTMLElement>}
+ */
+async function buildFilterToolbar(initialState, onFilterChange) {
+    const bar = document.createElement('div');
+    bar.className = 'project-filter-toolbar';
+
+    // ---- Current state (mutated as controls change) ----
+    const state = { ...initialState };
+
+    // ---- Helper: notify caller ----
+    const notify = () => onFilterChange({ ...state });
+
+    // ---- Search label + input ----
+    const searchLabel = document.createElement('label');
+    searchLabel.className = 'filter-label';
+    searchLabel.textContent = 'Search:';
+    searchLabel.setAttribute('for', 'project-filter-search');
+
+    const searchInput = document.createElement('input');
+    searchInput.type        = 'search';
+    searchInput.id          = 'project-filter-search';
+    searchInput.className   = 'form-input project-filter-search';
+    searchInput.placeholder = 'Search projects\u2026';
+    searchInput.value       = state.search;
+    searchInput.setAttribute('aria-label', 'Search projects');
+
+    const debouncedSearch = debounce(() => {
+        state.search = searchInput.value;
+        notify();
+    }, 250);
+    searchInput.addEventListener('input', debouncedSearch);
+
+    bar.appendChild(searchLabel);
+    bar.appendChild(searchInput);
+
+    // ---- Repository filter label + dropdown ----
+    let repos = [];
+    try {
+        repos = await api.repositories.list();
+    } catch (err) {
+        showToast(err.message || 'Failed to load repositories for filter.', 'error');
+    }
+
+    const repoLabel = document.createElement('label');
+    repoLabel.className = 'filter-label';
+    repoLabel.textContent = 'Repository:';
+    repoLabel.setAttribute('for', 'project-filter-repo');
+
+    const repoSelect = document.createElement('select');
+    repoSelect.id = 'project-filter-repo';
+    repoSelect.className = 'form-select project-filter-repo';
+    repoSelect.setAttribute('aria-label', 'Filter by repository');
+
+    if (Array.isArray(repos) && repos.length > 0) {
+        const allOpt = document.createElement('option');
+        allOpt.value       = '';
+        allOpt.textContent = 'All repositories';
+        repoSelect.appendChild(allOpt);
+
+        repos.forEach((repo) => {
+            const opt = document.createElement('option');
+            opt.value       = repo.id || repo.Id || '';
+            opt.textContent = repo.name || repo.Name || opt.value;
+            if (opt.value === state.repoId) opt.selected = true;
+            repoSelect.appendChild(opt);
+        });
+
+        repoSelect.addEventListener('change', () => {
+            state.repoId = repoSelect.value;
+            notify();
+        });
+    } else {
+        const noReposOpt = document.createElement('option');
+        noReposOpt.textContent = 'No repositories';
+        repoSelect.appendChild(noReposOpt);
+        repoSelect.disabled = true;
+    }
+
+    bar.appendChild(repoLabel);
+    bar.appendChild(repoSelect);
+
+    // ---- Sort label + selector ----
+    const sortLabel = document.createElement('label');
+    sortLabel.className = 'filter-label';
+    sortLabel.textContent = 'Sort:';
+    sortLabel.setAttribute('for', 'project-filter-sort');
+
+    const sortSelect = document.createElement('select');
+    sortSelect.id = 'project-filter-sort';
+    sortSelect.className = 'form-select project-filter-sort';
+    sortSelect.setAttribute('aria-label', 'Sort projects');
+
+    const sortOptions = [
+        { value: 'alpha',    label: 'Alphabetical' },
+        { value: 'activity', label: 'Last Activity' },
+    ];
+
+    sortOptions.forEach(({ value, label }) => {
+        const opt = document.createElement('option');
+        opt.value       = value;
+        opt.textContent = label;
+        if (value === state.sort) opt.selected = true;
+        sortSelect.appendChild(opt);
+    });
+
+    sortSelect.addEventListener('change', () => {
+        state.sort = sortSelect.value;
+        notify();
+    });
+
+    bar.appendChild(sortLabel);
+    bar.appendChild(sortSelect);
+
+    return bar;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,18 +429,175 @@ function buildCreateProjectSection(onSuccess) {
 }
 
 // ---------------------------------------------------------------------------
-// Project list
+// Project list — data cache
 // ---------------------------------------------------------------------------
 
 /**
- * Fetch and render the project list into `listContainer`.
+ * Module-level cache of fully-enriched project detail objects.
+ * Each entry is `{ fullProject, wsCount }` as returned by the API fetch.
+ * Populated by `renderProjectList()` and consumed by `applyFiltersAndSort()`.
+ *
+ * @type {Array<{ fullProject: Object, wsCount: number }>}
+ */
+let _allProjects = [];
+
+// ---------------------------------------------------------------------------
+// Filter / sort logic
+// ---------------------------------------------------------------------------
+
+/**
+ * Apply the current filter/sort state to `_allProjects` and return the
+ * matching subset in the requested order.
+ *
+ * Filter rules (all applied together — AND semantics):
+ *   - `search`  — case-insensitive substring match against name, ID, and
+ *                 description. Empty string means no filter.
+ *   - `repoId`  — project must contain a repository whose `id`/`Id` equals
+ *                 `repoId`. Empty string means no filter.
+ *
+ * Sort rules:
+ *   - `'alpha'`    — ascending by name (case-insensitive); tiebreaker: project
+ *                    ID ascending.
+ *   - `'activity'` — descending by `LastActivity` / `lastActivity`; entries
+ *                    with `null`/`undefined` activity sort last; tiebreaker:
+ *                    name ascending (case-insensitive).
+ *
+ * @param {FilterState} filterState
+ * @returns {Array<{ fullProject: Object, wsCount: number }>}
+ */
+export function applyFiltersAndSort(filterState, allProjects) {
+    const { search, repoId, sort } = filterState;
+    const needle = search.trim().toLowerCase();
+
+    let result = allProjects.filter(({ fullProject }) => {
+        const id   = (fullProject.Id   || fullProject.id          || '').toLowerCase();
+        const name = (fullProject.Name || fullProject.name        || '').toLowerCase();
+        const desc = (fullProject.Description || fullProject.description || '').toLowerCase();
+
+        // Search filter — substring match across name, ID, description.
+        if (needle && !name.includes(needle) && !id.includes(needle) && !desc.includes(needle)) {
+            return false;
+        }
+
+        // Repository filter — project must contain the selected repo.
+        // Repositories is stored as string[] (repo IDs) on the server, but
+        // guard against object entries for defensive compatibility.
+        if (repoId) {
+            const repos = Array.isArray(fullProject.Repositories)
+                ? fullProject.Repositories
+                : (Array.isArray(fullProject.repositories) ? fullProject.repositories : []);
+            const hasRepo = repos.some((r) =>
+                (typeof r === 'string' ? r : (r.id || r.Id || '')) === repoId,
+            );
+            if (!hasRepo) return false;
+        }
+
+        return true;
+    });
+
+    // Sort
+    if (sort === 'activity') {
+        result = result.slice().sort((a, b) => {
+            const aTime = a.fullProject.LastActivity || a.fullProject.lastActivity || null;
+            const bTime = b.fullProject.LastActivity || b.fullProject.lastActivity || null;
+
+            // null/undefined sorts last
+            if (aTime === null && bTime === null) {
+                // tiebreaker: name ascending
+                return (a.fullProject.Name || a.fullProject.name || '')
+                    .toLowerCase()
+                    .localeCompare((b.fullProject.Name || b.fullProject.name || '').toLowerCase());
+            }
+            if (aTime === null) return 1;
+            if (bTime === null) return -1;
+
+            // Descending by activity timestamp
+            if (aTime > bTime) return -1;
+            if (aTime < bTime) return 1;
+
+            // tiebreaker: name ascending
+            return (a.fullProject.Name || a.fullProject.name || '')
+                .toLowerCase()
+                .localeCompare((b.fullProject.Name || b.fullProject.name || '').toLowerCase());
+        });
+    } else {
+        // 'alpha' — ascending by name (case-insensitive); tiebreaker: project ID ascending.
+        // Uses localeCompare() for consistency with the activity-sort tiebreaker above.
+        result = result.slice().sort((a, b) => {
+            const aName = (a.fullProject.Name || a.fullProject.name || '').toLowerCase();
+            const bName = (b.fullProject.Name || b.fullProject.name || '').toLowerCase();
+            const nameCmp = aName.localeCompare(bName);
+            if (nameCmp !== 0) return nameCmp;
+            // tiebreaker: ID ascending
+            const aId = (a.fullProject.Id || a.fullProject.id || '').toLowerCase();
+            const bId = (b.fullProject.Id || b.fullProject.id || '').toLowerCase();
+            return aId.localeCompare(bId);
+        });
+    }
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Project grid renderer
+// ---------------------------------------------------------------------------
+
+/**
+ * Render a (possibly empty) array of project detail objects into
+ * `listContainer`.
+ *
+ * Shows "No projects match the current filters." when `filtered` is empty but
+ * `hasAnyProjects` is `true` (i.e. filters excluded everything).
+ * Shows the original "No projects yet." message when there are no projects at all.
+ * Otherwise renders the project cards inside a `.project-grid` wrapper.
+ *
+ * @param {HTMLElement}                                  listContainer
+ * @param {Array<{ fullProject: Object, wsCount: number }>} filtered
+ * @param {boolean} hasAnyProjects - Whether the unfiltered project list is
+ *   non-empty. Used to choose the correct empty-state message.
+ */
+function renderProjectGrid(listContainer, filtered, hasAnyProjects) {
+    clearElement(listContainer);
+
+    if (filtered.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-state';
+        if (!hasAnyProjects) {
+            empty.textContent = 'No projects yet. Use the "Create Project" button to add one.';
+        } else {
+            empty.textContent = 'No projects match the current filters.';
+        }
+        listContainer.appendChild(empty);
+        return;
+    }
+
+    const grid = document.createElement('div');
+    grid.className = 'project-grid';
+
+    filtered.forEach(({ fullProject, wsCount }) => {
+        grid.appendChild(buildProjectCard(fullProject, wsCount));
+    });
+
+    listContainer.appendChild(grid);
+}
+
+// ---------------------------------------------------------------------------
+// Project list — fetch + render
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch all project data from the API, update `_allProjects`, then apply
+ * the current `filterState` and render the result into `listContainer`.
  *
  * Workspace counts are fetched in parallel for each project.  If a workspace
- * fetch fails the count is shown as "0 workspaces" rather than breaking the whole list.
+ * fetch fails the count is shown as "0 workspaces" rather than breaking the
+ * whole list.
  *
  * @param {HTMLElement} listContainer - Element to render the list into.
+ * @param {FilterState} filterState   - Current filter/sort state to apply
+ *   after the data is loaded.
  */
-async function renderProjectList(listContainer) {
+async function renderProjectList(listContainer, filterState) {
     showLoading(listContainer);
 
     let projects;
@@ -270,13 +613,9 @@ async function renderProjectList(listContainer) {
         return;
     }
 
-    clearElement(listContainer);
-
     if (!Array.isArray(projects) || projects.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'empty-state';
-        empty.textContent = 'No projects yet. Use the "Create Project" button to add one.';
-        listContainer.appendChild(empty);
+        _allProjects = [];
+        renderProjectGrid(listContainer, [], false);
         return;
     }
 
@@ -300,14 +639,10 @@ async function renderProjectList(listContainer) {
         }),
     );
 
-    const grid = document.createElement('div');
-    grid.className = 'project-grid';
+    _allProjects = projectDetails;
 
-    projectDetails.forEach(({ fullProject, wsCount }) => {
-        grid.appendChild(buildProjectCard(fullProject, wsCount));
-    });
-
-    listContainer.appendChild(grid);
+    const filtered = applyFiltersAndSort(filterState, _allProjects);
+    renderProjectGrid(listContainer, filtered, _allProjects.length > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -334,23 +669,48 @@ export async function renderDashboard(container, _params) {
     container.appendChild(header);
 
     // -----------------------------------------------------------------------
-    // Project list section
+    // Project list section (declared early so onFilterChange can reference it)
     // -----------------------------------------------------------------------
     const listContainer = document.createElement('div');
     listContainer.className = 'project-list-container';
+
+    // -----------------------------------------------------------------------
+    // Filter / sort toolbar (inserted between header and project list)
+    // -----------------------------------------------------------------------
+
+    /** @type {FilterState} */
+    const filterState = { search: '', repoId: '', sort: 'alpha' };
+
+    /**
+     * Called whenever a toolbar control changes.  Applies the updated
+     * filter/sort state to the cached project data without re-fetching.
+     *
+     * @param {FilterState} newState
+     */
+    const onFilterChange = (newState) => {
+        Object.assign(filterState, newState);
+        const filtered = applyFiltersAndSort(filterState, _allProjects);
+        renderProjectGrid(listContainer, filtered, _allProjects.length > 0);
+    };
+
+    const toolbar = await buildFilterToolbar(filterState, onFilterChange);
+    container.appendChild(toolbar);
+
+    // Insert list container after toolbar
     container.appendChild(listContainer);
 
     // -----------------------------------------------------------------------
     // Create Project section
     // -----------------------------------------------------------------------
     const createSection = buildCreateProjectSection(() => {
-        // Re-render the project list after a successful creation.
-        renderProjectList(listContainer);
+        // Re-fetch all project data from the API and re-apply the current
+        // filter/sort state so newly created projects appear immediately.
+        renderProjectList(listContainer, filterState);
     });
     container.appendChild(createSection);
 
     // -----------------------------------------------------------------------
     // Initial load
     // -----------------------------------------------------------------------
-    await renderProjectList(listContainer);
+    await renderProjectList(listContainer, filterState);
 }

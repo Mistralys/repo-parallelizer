@@ -14,7 +14,7 @@ Set up a project once, then spin up as many parallel workspaces as you need — 
 - **Parallel workspaces** — create multiple independent workspaces per project, each with its own branch assignments and cloned copies.
 - **One-click branch switching** — switch branches across all repos in a workspace in a single operation, with conflict detection.
 - **VS Code integration** — auto-generated `.code-workspace` files let you open an entire workspace in VS Code instantly.
-- **Web GUI** — a built-in browser UI for managing repositories, projects, workspaces, and branches — no terminal required after setup.
+- **Web GUI** — a built-in browser UI for managing repositories, projects, workspaces, and branches — no terminal required after setup. The project dashboard supports real-time filtering by name/ID/description, repository filtering, and sort by alphabetical or last-activity order.
 - **Live git status** — automatic polling shows current branches, uncommitted changes, and unfetched commits at a glance.
 - **Workspace health checks** — detect and fix configuration drift (missing repos, stale workspace files).
 - **Interactive CLI** — a keyboard-driven terminal menu for quick access to setup, server launch, and documentation generation.

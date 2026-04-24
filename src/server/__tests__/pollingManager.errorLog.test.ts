@@ -50,6 +50,7 @@ function makeProjectManager(repos: string[]): ProjectManager {
     return {
         list: () => [{ Id: 'proj', Name: 'proj' }],
         getById: (id: string) => (id === 'proj' ? project : undefined),
+        updateLastActivity: (_id: string, _value: string) => { /* no-op */ },
     } as unknown as ProjectManager;
 }
 

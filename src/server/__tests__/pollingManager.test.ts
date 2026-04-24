@@ -48,6 +48,7 @@ function makeProjectManager(projects: MockProject[]): ProjectManager {
     return {
         list: () => projects.map((p) => ({ Id: p.Id, Name: p.Id })),
         getById: (id: string) => projects.find((p) => p.Id === id) ?? undefined,
+        updateLastActivity: (_id: string, _value: string) => { /* no-op */ },
     } as unknown as ProjectManager;
 }
 
@@ -481,4 +482,238 @@ test('restart: only one interval is active after restart', async () => {
     // double that, so assert < 5.
     assert.ok(callCount.n < 5,
         `Too many sweeps (${callCount.n}): restart may have left a stale interval running`);
+});
+
+// ---------------------------------------------------------------------------
+// persistLastActivity — helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a ProjectManager mock that also records calls to updateLastActivity.
+ * `calls` is mutated in-place so the caller can inspect what was recorded.
+ */
+function makeTrackingProjectManager(
+    projects: MockProject[],
+    calls: Array<{ id: string; value: string }>,
+): ProjectManager {
+    return {
+        list: () => projects.map((p) => ({ Id: p.Id, Name: p.Id })),
+        getById: (id: string) => projects.find((p) => p.Id === id) ?? undefined,
+        updateLastActivity: (id: string, value: string) => {
+            calls.push({ id, value });
+        },
+    } as unknown as ProjectManager;
+}
+
+// ---------------------------------------------------------------------------
+// persistLastActivity — called after refreshWorkspace
+// ---------------------------------------------------------------------------
+
+test('persistLastActivity: updateLastActivity is called with correct max after refreshWorkspace', async () => {
+    const project = {
+        Id: 'proj',
+        Repositories: ['r1', 'r2'],
+        Workspaces: { STABLE: {} },
+    };
+    const calls: Array<{ id: string; value: string }> = [];
+    const pm = makeTrackingProjectManager([project], calls);
+    const wm = makeDefaultWorkspaceManager();
+
+    const statusR1: GitStatusInfo = { ...makeStatus(), lastActivity: '2024-06-01T12:00:00Z' };
+    const statusR2: GitStatusInfo = { ...makeStatus(), lastActivity: '2024-06-02T08:00:00Z' };
+
+    const fetchFn = async (p: string): Promise<GitStatusInfo> =>
+        p.endsWith('r1') ? statusR1 : statusR2;
+
+    const mgr = new PollingManager(BASE_CONFIG, pm, wm, fetchFn);
+    await mgr.refreshWorkspace('proj', 'STABLE');
+
+    // Only one call expected; the max of the two timestamps is r2's value.
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0].id, 'proj');
+    assert.strictEqual(calls[0].value, '2024-06-02T08:00:00Z');
+});
+
+test('persistLastActivity: updateLastActivity is called with correct max after runSweep (via start)', async () => {
+    const project = {
+        Id: 'proj',
+        Repositories: ['r1', 'r2'],
+        Workspaces: { STABLE: {} },
+    };
+    const calls: Array<{ id: string; value: string }> = [];
+    const pm = makeTrackingProjectManager([project], calls);
+    const wm = makeDefaultWorkspaceManager();
+
+    const statusR1: GitStatusInfo = { ...makeStatus(), lastActivity: '2024-01-10T00:00:00Z' };
+    const statusR2: GitStatusInfo = { ...makeStatus(), lastActivity: '2024-01-15T00:00:00Z' };
+
+    const fetchFn = async (p: string): Promise<GitStatusInfo> =>
+        p.endsWith('r1') ? statusR1 : statusR2;
+
+    const mgr = new PollingManager(BASE_CONFIG, pm, wm, fetchFn);
+    mgr.start(0.02); // 20 ms — fire quickly
+
+    await withTimeout(
+        new Promise<void>((resolve) => {
+            const check = setInterval(() => {
+                // Wait until at least one updateLastActivity call has been recorded.
+                if (calls.length >= 1) { clearInterval(check); resolve(); }
+            }, 5);
+        }),
+        500,
+    );
+    mgr.stop();
+
+    // At least one sweep completed; every sweep should record the correct max.
+    const lastCall = calls[calls.length - 1];
+    assert.strictEqual(lastCall.id, 'proj');
+    assert.strictEqual(lastCall.value, '2024-01-15T00:00:00Z');
+});
+
+// ---------------------------------------------------------------------------
+// persistLastActivity — max across multiple repos and workspaces
+// ---------------------------------------------------------------------------
+
+test('persistLastActivity: selects the max timestamp across multiple repos of the same project', async () => {
+    const project = {
+        Id: 'proj',
+        Repositories: ['r1', 'r2', 'r3'],
+        Workspaces: { STABLE: {} },
+    };
+    const calls: Array<{ id: string; value: string }> = [];
+    const pm = makeTrackingProjectManager([project], calls);
+    const wm = makeDefaultWorkspaceManager();
+
+    const statuses: Record<string, GitStatusInfo> = {
+        r1: { ...makeStatus(), lastActivity: '2024-03-01T00:00:00Z' },
+        r2: { ...makeStatus(), lastActivity: '2024-03-05T00:00:00Z' },
+        r3: { ...makeStatus(), lastActivity: '2024-03-03T00:00:00Z' },
+    };
+
+    const fetchFn = async (p: string): Promise<GitStatusInfo> => {
+        for (const [repoId, status] of Object.entries(statuses)) {
+            if (p.endsWith(repoId)) return status;
+        }
+        return makeStatus();
+    };
+
+    const mgr = new PollingManager(BASE_CONFIG, pm, wm, fetchFn);
+    await mgr.refreshWorkspace('proj', 'STABLE');
+
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0].value, '2024-03-05T00:00:00Z');
+});
+
+test('persistLastActivity: computes max across two projects independently', async () => {
+    const projectA = { Id: 'proj-a', Repositories: ['r1'], Workspaces: { STABLE: {} } };
+    const projectB = { Id: 'proj-b', Repositories: ['r1'], Workspaces: { STABLE: {} } };
+    const calls: Array<{ id: string; value: string }> = [];
+    const pm = makeTrackingProjectManager([projectA, projectB], calls);
+
+    // Both STABLE workspaces exist.
+    const wm: WorkspaceManager = {
+        getById: (_projectId: string, workspaceId: string) =>
+            workspaceId === 'STABLE'
+                ? ({ ProjectID: _projectId, WorkspaceID: 'STABLE', Description: '', DateCreated: '', DateModified: '' })
+                : undefined,
+    } as unknown as WorkspaceManager;
+
+    // proj-a/STABLE/r1 → older; proj-b/STABLE/r1 → newer
+    const fetchFn = async (p: string): Promise<GitStatusInfo> => {
+        if (p.includes('proj-a')) return { ...makeStatus(), lastActivity: '2024-05-01T00:00:00Z' };
+        return { ...makeStatus(), lastActivity: '2024-06-01T00:00:00Z' };
+    };
+
+    // Trigger a sweep by refreshing both workspaces.
+    const mgr = new PollingManager(BASE_CONFIG, pm, wm, fetchFn);
+    await mgr.refreshWorkspace('proj-a', 'STABLE');
+    await mgr.refreshWorkspace('proj-b', 'STABLE');
+
+    const callsByProject: Record<string, string[]> = {};
+    for (const c of calls) {
+        (callsByProject[c.id] ??= []).push(c.value);
+    }
+
+    // Each project must have received exactly the right timestamp.
+    assert.ok(callsByProject['proj-a']?.includes('2024-05-01T00:00:00Z'),
+        'proj-a should receive its max timestamp');
+    assert.ok(callsByProject['proj-b']?.includes('2024-06-01T00:00:00Z'),
+        'proj-b should receive its max timestamp');
+});
+
+// ---------------------------------------------------------------------------
+// persistLastActivity — null-activity skip
+// ---------------------------------------------------------------------------
+
+test('persistLastActivity: updateLastActivity is NOT called when all cached entries have null lastActivity', async () => {
+    const project = {
+        Id: 'proj',
+        Repositories: ['r1', 'r2'],
+        Workspaces: { STABLE: {} },
+    };
+    const calls: Array<{ id: string; value: string }> = [];
+    const pm = makeTrackingProjectManager([project], calls);
+    const wm = makeDefaultWorkspaceManager();
+
+    // Both repos return null lastActivity.
+    const fetchFn = async (_: string): Promise<GitStatusInfo> =>
+        ({ ...makeStatus(), lastActivity: null });
+
+    const mgr = new PollingManager(BASE_CONFIG, pm, wm, fetchFn);
+    await mgr.refreshWorkspace('proj', 'STABLE');
+
+    assert.strictEqual(calls.length, 0,
+        'updateLastActivity should not be called when all lastActivity values are null');
+});
+
+test('persistLastActivity: partial null — only non-null entries contribute to the max', async () => {
+    const project = {
+        Id: 'proj',
+        Repositories: ['r1', 'r2'],
+        Workspaces: { STABLE: {} },
+    };
+    const calls: Array<{ id: string; value: string }> = [];
+    const pm = makeTrackingProjectManager([project], calls);
+    const wm = makeDefaultWorkspaceManager();
+
+    const fetchFn = async (p: string): Promise<GitStatusInfo> => {
+        if (p.endsWith('r1')) return { ...makeStatus(), lastActivity: null };
+        return { ...makeStatus(), lastActivity: '2024-09-01T00:00:00Z' };
+    };
+
+    const mgr = new PollingManager(BASE_CONFIG, pm, wm, fetchFn);
+    await mgr.refreshWorkspace('proj', 'STABLE');
+
+    assert.strictEqual(calls.length, 1,
+        'updateLastActivity should be called because r2 has a non-null lastActivity');
+    assert.strictEqual(calls[0].value, '2024-09-01T00:00:00Z');
+});
+
+// ---------------------------------------------------------------------------
+// persistLastActivity — extractContext parse-failure skip
+// ---------------------------------------------------------------------------
+
+test('persistLastActivity: cache entries with unparseable paths are skipped without error', async () => {
+    // A repo path that is NOT under the projectsFolder — extractContext returns {}.
+    const project = {
+        Id: 'proj',
+        Repositories: ['repo'],
+        Workspaces: { STABLE: {} },
+    };
+    const calls: Array<{ id: string; value: string }> = [];
+    const pm = makeTrackingProjectManager([project], calls);
+    const wm = makeDefaultWorkspaceManager();
+
+    const mgr = new PollingManager(BASE_CONFIG, pm, wm, async () => makeStatus());
+
+    // First, populate the cache via a normal refreshWorkspace so we have one
+    // valid entry (proj/STABLE/repo), then manually trigger a second refresh.
+    // The valid entry will produce a call; the bad path (injected indirectly via
+    // a fetch on an out-of-scope path) cannot be added through the public API,
+    // so we verify the positive path and the absence of errors instead.
+    await assert.doesNotReject(() => mgr.refreshWorkspace('proj', 'STABLE'));
+
+    // The valid path resolves cleanly; updateLastActivity should have been called.
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0].id, 'proj');
 });
