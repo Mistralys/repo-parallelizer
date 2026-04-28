@@ -1447,6 +1447,13 @@ export function showToast(message, type, duration = TOAST_DISPLAY_MS) {
  */
 export const STABLE_WS_ID = 'STABLE';
 
+/**
+ * Short application name used in browser tab titles.
+ *
+ * @type {string}
+ */
+export const APP_NAME_SHORT = 'Paralizer';
+
 ```
 ###  Path: `/gui/public/js/utils/dom.js`
 
@@ -1525,13 +1532,14 @@ export function initNavHighlight() {
  * Normalise a repository object from the backend.
  *
  * @param {Object} repo
- * @returns {{ id: string, name: string, url: string }}
+ * @returns {{ id: string, name: string, url: string, LastRefreshedAt: string|undefined }}
  */
 export function normaliseRepo(repo) {
     return {
-        id:   repo.Id   || repo.id   || '',
-        name: repo.Name || repo.name || '',
-        url:  repo.Url  || repo.url  || repo.URL || '',
+        id:              repo.Id   || repo.id   || '',
+        name:            repo.Name || repo.name || '',
+        url:             repo.Url  || repo.url  || repo.URL || '',
+        LastRefreshedAt: repo.LastRefreshedAt || repo.lastRefreshedAt || undefined,
     };
 }
 
@@ -1698,6 +1706,6 @@ export function formatLastActivity(isoTimestamp) {
 ```
 ---
 **File Statistics**
-- **Size**: 60.78 KB
-- **Lines**: 1657
+- **Size**: 61.93 KB
+- **Lines**: 1704
 File: `modules/gui/architecture-components.md`

@@ -12,6 +12,7 @@ _SOURCE: REST API route handlers_
             └── projects.ts
             └── repositories.ts
             └── status.ts
+            └── version.ts
             └── workspaces.ts
 
 ```
@@ -1052,13 +1053,14 @@ import type { Repository } from '../../models/repository/repository.types.js';
  * All handlers delegate to the supplied `RepositoryManager` and map results
  * or errors to the appropriate HTTP status codes:
  *
- * | Method | Path                    | Success | Failure       |
- * |--------|-------------------------|---------|---------------|
- * | GET    | /api/repositories       | 200     | —             |
- * | GET    | /api/repositories/:id   | 200     | 404           |
- * | POST   | /api/repositories       | 201     | 400           |
- * | PUT    | /api/repositories/:id   | 200     | 404           |
- * | DELETE | /api/repositories/:id   | 204     | 404           |
+ * | Method | Path                                      | Success | Failure |
+ * |--------|-------------------------------------------|---------|---------|
+ * | GET    | /api/repositories                         | 200     | —       |
+ * | GET    | /api/repositories/:id                     | 200     | 404     |
+ * | POST   | /api/repositories                         | 201     | 400     |
+ * | PUT    | /api/repositories/:id                     | 200     | 404     |
+ * | DELETE | /api/repositories/:id                     | 204     | 404     |
+ * | POST   | /api/repositories/:id/refresh-timestamp   | 200     | 404     |
  */
 export function registerRepositoryRoutes(
     router: Router,
@@ -1229,6 +1231,30 @@ export function registerRepositoryRoutes(
         // 204 No Content — no body
         res.writeHead(204, {});
         res.end('');
+    });
+
+    // ------------------------------------------------------------------
+    // POST /api/repositories/:id/refresh-timestamp — record manual refresh
+    //   Writes the current timestamp to LastRefreshedAt for the repository.
+    //   Called by the GUI whenever the user triggers a manual refresh on
+    //   the repository detail screen.
+    // ------------------------------------------------------------------
+    router.post('/api/repositories/:id/refresh-timestamp', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        const id = params['id'];
+        try {
+            const updated = repoManager.touchRefreshTimestamp(id);
+            sendJson(res, 200, updated);
+        } catch (err) {
+            if (err instanceof NotFoundError) {
+                sendError(res, 404, err.message);
+            } else {
+                sendError(res, 500, 'Internal server error.');
+            }
+        }
     });
 }
 
@@ -1407,6 +1433,55 @@ export function registerStatusRoutes(
         }
 
         sendJson(res, 200, statusMap);
+    });
+}
+
+```
+###  Path: `/src/server/routes/version.ts`
+
+```ts
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import type { Router } from '../router.js';
+import { sendJson } from '../requestUtils.js';
+import { getToolRoot } from '../../utils/paths.js';
+
+// ---------------------------------------------------------------------------
+// Version resolution — read both package.json files once at module load time.
+// ---------------------------------------------------------------------------
+
+function readVersion(pkgPath: string): string {
+    try {
+        const raw = fs.readFileSync(pkgPath, 'utf8');
+        const pkg = JSON.parse(raw) as { version?: unknown };
+        return typeof pkg.version === 'string' && pkg.version.length > 0
+            ? pkg.version
+            : 'unknown';
+    } catch {
+        return 'unknown';
+    }
+}
+
+const toolRoot = getToolRoot();
+const appVersion  = readVersion(path.join(toolRoot, 'package.json'));
+const guiVersion  = readVersion(path.join(toolRoot, 'gui', 'package.json'));
+
+// ---------------------------------------------------------------------------
+// Route registration
+// ---------------------------------------------------------------------------
+
+/**
+ * Registers the version endpoint.
+ *
+ * | Method | Path          | Description                                      |
+ * |--------|---------------|--------------------------------------------------|
+ * | GET    | /api/version  | Return app and GUI version strings from package.json. |
+ *
+ * Response shape: `{ appVersion: string, guiVersion: string }`
+ */
+export function registerVersionRoute(router: Router): void {
+    router.get('/api/version', (_req, res) => {
+        sendJson(res, 200, { appVersion, guiVersion });
     });
 }
 

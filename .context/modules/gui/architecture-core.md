@@ -166,6 +166,16 @@ const repositories = {
     delete(id) {
         return request('DELETE', `/api/repositories/${encodeURIComponent(id)}`);
     },
+
+    /**
+     * Record a manual refresh timestamp for a repository.
+     * Writes the current server-side UTC timestamp to `LastRefreshedAt`.
+     * @param {string} id
+     * @returns {Promise<Object>} The updated repository.
+     */
+    touchRefreshTimestamp(id) {
+        return request('POST', `/api/repositories/${encodeURIComponent(id)}/refresh-timestamp`);
+    },
 };
 
 /**
@@ -682,6 +692,7 @@ const config = {
  *   status:       typeof status,
  *   config:       typeof config,
  *   errorLog:     typeof errorLog,
+ *   version:      { get: () => Promise<{ appVersion: string, guiVersion: string }> },
  * }}
  */
 export const api = {
@@ -692,6 +703,16 @@ export const api = {
     status,
     config,
     errorLog,
+    version: {
+        /**
+         * Fetch the application and GUI version strings from the server.
+         *
+         * @returns {Promise<{ appVersion: string, guiVersion: string }>}
+         */
+        get() {
+            return request('GET', '/api/version');
+        },
+    },
 };
 
 ```
@@ -727,6 +748,7 @@ import { renderErrorLog }                                from './views/error-log
 import { createThemeToggle }                             from './components/theme-toggle.js';
 import { initNavHighlight }                              from './utils/nav-highlight.js';
 import { initNavBadge }                                  from './components/nav-badge.js';
+import { api }                                           from './api.js';
 
 // ---------------------------------------------------------------------------
 // Router instantiation & route registration
@@ -792,6 +814,17 @@ initNavHighlight();
 
 initNavBadge();
 
+// ---------------------------------------------------------------------------
+// Footer version — fetch from server and inject into the footer spans
+// ---------------------------------------------------------------------------
+
+api.version.get().then(({ appVersion, guiVersion }) => {
+    const appEl = document.getElementById('footer-app-version');
+    const guiEl = document.getElementById('footer-gui-version');
+    if (appEl) appEl.textContent = `v${appVersion}`;
+    if (guiEl) guiEl.textContent = `GUI v${guiVersion}`;
+}).catch(() => { /* non-critical — footer stays empty on failure */ });
+
 ```
 ###  Path: `/gui/public/js/router.js`
 
@@ -810,6 +843,8 @@ initNavBadge();
  *   router.register('#/projects/:id', projectDetailView);
  *   router.start();
  */
+
+import { APP_NAME_SHORT } from './utils/constants.js';
 
 /**
  * @typedef {Object} Route
@@ -970,6 +1005,7 @@ export class Router {
     _render(viewFn, params) {
         this._runCleanup();
         if (this._container) {
+            document.title = APP_NAME_SHORT;
             this._container.innerHTML = '';
             const result = viewFn(this._container, params);
             // If the view returns a function, store it as cleanup.
@@ -1000,6 +1036,6 @@ export class Router {
 ```
 ---
 **File Statistics**
-- **Size**: 30.9 KB
-- **Lines**: 1004
+- **Size**: 30.97 KB
+- **Lines**: 1006
 File: `modules/gui/architecture-core.md`

@@ -37,7 +37,7 @@ import { api }               from '../api.js';
 import { showToast }         from '../components/toast.js';
 import { buildRepoStatusCells, updateRepoStatusCells } from '../components/repo-status-cells.js';
 import { normaliseRepo, normaliseProject, normaliseWorkspace } from '../utils/normalise.js';
-import { STABLE_WS_ID } from '../utils/constants.js';
+import { STABLE_WS_ID, APP_NAME_SHORT } from '../utils/constants.js';
 import { clearElement } from '../utils/dom.js';
 
 // ---------------------------------------------------------------------------
@@ -512,6 +512,7 @@ export function renderRepositoryDetail(container, params) {
         if (!container.isConnected) return;
 
         const repo = normaliseRepo(rawRepo);
+        document.title = `${repo.name || repoId} - ${APP_NAME_SHORT}`;
 
         // Resolve webserver URL (null when not configured or fetch failed).
         const webserverUrl = (

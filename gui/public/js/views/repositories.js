@@ -17,6 +17,7 @@ import { showConfirm } from '../components/confirm-dialog.js';
 import { createFormField, validateRequired } from '../components/form-helpers.js';
 import { normaliseRepo } from '../utils/normalise.js';
 import { clearElement } from '../utils/dom.js';
+import { APP_NAME_SHORT } from '../utils/constants.js';
 
 // ---------------------------------------------------------------------------
 // Table rendering
@@ -425,6 +426,8 @@ function buildAddRepoSection(onSuccess) {
  * @param {Object}      _params   - Route params (unused).
  */
 export async function renderRepositories(container, _params) {
+    document.title = 'Repositories - ' + APP_NAME_SHORT;
+
     // -----------------------------------------------------------------------
     // Page header
     // -----------------------------------------------------------------------

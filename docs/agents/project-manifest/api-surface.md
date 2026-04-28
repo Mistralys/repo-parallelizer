@@ -845,6 +845,7 @@ api.config.polling.set(seconds)
 | Export | Type | Value | Description |
 |---|---|---|---|
 | `STABLE_WS_ID` | `string` | `'STABLE'` | The workspace ID that is always treated as the stable reference workspace. Enforced at the storage layer. Import from here — do not hardcode `'STABLE'` in views or components. |
+| `APP_NAME_SHORT` | `string` | `'Paralizer'` | Short application name used in browser tab titles. Import from here — do not hardcode the string in views. |
 
 ### `utils/dom.js`
 

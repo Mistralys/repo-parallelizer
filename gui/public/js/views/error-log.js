@@ -23,6 +23,7 @@ import { showConfirm }  from '../components/confirm-dialog.js';
 import { normaliseErrorEntry } from '../utils/normalise.js';
 import { relativeTime } from '../utils/time.js';
 import { refreshNavBadge } from '../components/nav-badge.js';
+import { APP_NAME_SHORT } from '../utils/constants.js';
 
 // ---------------------------------------------------------------------------
 // Severity options — kept in one place so filters and dropdowns stay in sync.
@@ -294,6 +295,8 @@ function buildEmptyRow() {
  * @param {Object}      _params   - Route params (none for this route).
  */
 export async function renderErrorLog(container, _params) {
+    document.title = 'Error Log - ' + APP_NAME_SHORT;
+
     // ---- Active filter state ----
     const filters = {
         severity: 'all',

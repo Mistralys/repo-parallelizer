@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.0.1 - Page Titles
+- GUI: The browser page title now displays helpful titles.
+
 ## v1.0.0 - Project Filtering & Repositories Overview
 > First stable release
 

@@ -45,7 +45,7 @@ import { showToast } from '../components/toast.js';
 import { showConfirm } from '../components/confirm-dialog.js';
 import { createFormField, validateRequired, WORKSPACE_ID_PATTERN } from '../components/form-helpers.js';
 import { normaliseProject, normaliseRepo, normaliseWorkspace } from '../utils/normalise.js';
-import { STABLE_WS_ID } from '../utils/constants.js';
+import { STABLE_WS_ID, APP_NAME_SHORT } from '../utils/constants.js';
 
 // ---------------------------------------------------------------------------
 // Router reference — injected from app.js via setRouter()
@@ -864,6 +864,7 @@ export async function renderProjectDetail(container, params) {
     }
 
     const normProject    = normaliseProject(project);
+    document.title = `${normProject.name || projectId} - ${APP_NAME_SHORT}`;
     const normWorkspaces = Array.isArray(workspaces)
         ? workspaces.map(normaliseWorkspace)
         : [];

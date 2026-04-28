@@ -173,7 +173,7 @@ Cells are located by CSS class (`.repo-branch-cell`) and badge wrapper attribute
 | Utility | File | Export | Purpose |
 |---|---|---|---|
 | Normalise | `utils/normalise.js` | `normaliseRepo()`, `normaliseProject()`, `normaliseWorkspace()` | Maps PascalCase backend keys to camelCase frontend keys. `normaliseWorkspace` now includes `folderPath` (from `FolderPath` in the API response). |
-| Constants | `utils/constants.js` | `STABLE_WS_ID` | Shared GUI constants. `STABLE_WS_ID = 'STABLE'` is the canonical definition; import from here instead of hardcoding the string in views. |
+| Constants | `utils/constants.js` | `STABLE_WS_ID`, `APP_NAME_SHORT` | Shared GUI constants. `STABLE_WS_ID = 'STABLE'` is the canonical definition; `APP_NAME_SHORT = 'Paralizer'` is the short app name used in browser tab titles. Import from here instead of hardcoding the strings in views. |
 | DOM | `utils/dom.js` | `clearElement(el)` | DOM utility — removes all children from an element via `removeChild` loop (preferred over `innerHTML = ''`). |
 
 ## Theme Switching
@@ -198,6 +198,24 @@ Views using router injection: `dashboard.js`, `project-detail.js`, `workspace-de
 Views with side-effects (e.g. `setInterval` polling) return a synchronous cleanup function from their entry point. The router calls it before rendering the next view. The cleanup must be returned **before** any async operations, so the router can register it immediately.
 
 Views returning cleanup: `workspace-detail.js` (clears 1-second countdown interval).
+
+### Page Title Convention
+
+Every view sets `document.title` using `APP_NAME_SHORT` from `utils/constants.js`. The router's `_render()` method resets the title to `APP_NAME_SHORT` before calling each view, preventing stale titles from carrying over during async data loads.
+
+- **Static views** (dashboard, repositories, settings, error-log, branch-switch): Set `document.title` synchronously at the top of the render function using the pattern `'{Section Name} - ' + APP_NAME_SHORT`.
+- **Entity-detail views** (project-detail, repository-detail, workspace-detail): Set `document.title` inside the `.then()` callback after the data fetch resolves, once the entity name is available.
+
+| View | Title format |
+|---|---|
+| Dashboard | `Dashboard - Paralizer` |
+| Repositories | `Repositories - Paralizer` |
+| Repository Detail | `{repo.name} - Paralizer` |
+| Project Detail | `{project.name} - Paralizer` |
+| Workspace Detail | `{project.name} {wid} - Paralizer` |
+| Branch Switch | `Branch Switch - Paralizer` |
+| Settings | `Settings - Paralizer` |
+| Error Log | `Error Log - Paralizer` |
 
 ### Workspace Detail View (`workspace-detail.js`)
 

@@ -357,6 +357,35 @@ export class ProjectManager {
         return project;
     }
 
+    /**
+     * Updates the `LastActivity` timestamp on a project without touching
+     * `DateModified`.
+     *
+     * - Short-circuits (no disk write) when `value` already equals the stored
+     *   `LastActivity`.
+     * - Silently returns when the project ID does not exist (no error thrown).
+     *
+     * @param id    The project ID to update.
+     * @param value An ISO 8601 timestamp string (e.g. `"2024-03-15T12:34:56.000Z"`).
+     *   In practice this value is always sourced from `GitStatusInfo.lastActivity`,
+     *   which is derived from a git commit timestamp and normalised to a consistent
+     *   UTC offset by the git layer.  No format validation is performed here — the
+     *   caller is responsible for passing a well-formed ISO 8601 string.
+     * @returns void — intentionally does not return the updated project.
+     *   Use `getById()` if you need the full project data after the update.
+     */
+    updateLastActivity(id: string, value: string): void {
+        const project = this.loadProject(id);
+        if (!project) {
+            return;
+        }
+        if (project.LastActivity === value) {
+            return;
+        }
+        project.LastActivity = value;
+        this.saveProject(project);
+    }
+
     // -------------------------------------------------------------------------
     // Workspace storage helpers (used exclusively by WorkspaceManager)
     // -------------------------------------------------------------------------
@@ -519,6 +548,14 @@ export interface ProjectData {
      */
     Workspaces: Record<string, ProjectWorkspace>;
 
+    /**
+     * ISO 8601 timestamp of the most recent activity recorded against this
+     * project (e.g. a branch push or workspace operation). Updated by
+     * `ProjectManager.updateLastActivity()`. Does NOT affect `DateModified`.
+     */
+    LastActivity?: string;
+
+    /** @see BaseStore.SchemaVersion for versioning policy. */
     SchemaVersion: number;
 }
 
@@ -737,6 +774,29 @@ export class RepositoryManager {
         store.Repositories.splice(index, 1);
         this.save(store);
     }
+
+    /**
+     * Writes the current UTC timestamp to `LastRefreshedAt` for the given
+     * repository. Called when the user triggers a manual refresh from the
+     * repository detail view.
+     *
+     * @throws {NotFoundError} If no repository with the given ID exists.
+     */
+    touchRefreshTimestamp(id: string): Repository {
+        const store = this.load();
+        const index = store.Repositories.findIndex((r) => r.Id === id);
+
+        if (index === -1) {
+            throw new NotFoundError(`Cannot update refresh timestamp: repository with ID "${id}" does not exist.`);
+        }
+
+        store.Repositories[index] = {
+            ...store.Repositories[index],
+            LastRefreshedAt: new Date().toISOString(),
+        };
+        this.save(store);
+        return store.Repositories[index];
+    }
 }
 
 ```
@@ -767,6 +827,13 @@ export interface Repository {
      * that this property is runtime-only and excluded from the data schema.
      */
     credentialsStripped?: boolean;
+
+    /**
+     * ISO 8601 timestamp of the last manual status refresh triggered from the
+     * repository detail view. Written by `RepositoryManager.touchRefreshTimestamp()`.
+     * Undefined when the repository has never been manually refreshed.
+     */
+    LastRefreshedAt?: string;
 }
 
 /**

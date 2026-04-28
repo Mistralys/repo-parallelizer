@@ -18,6 +18,7 @@
 import { api } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { showConfirm } from '../components/confirm-dialog.js';
+import { APP_NAME_SHORT } from '../utils/constants.js';
 import { createFormField, validateRequired } from '../components/form-helpers.js';
 import { clearElement } from '../utils/dom.js';
 
@@ -490,6 +491,7 @@ function buildWebserverUrlSection() {
  * @returns {void}
  */
 export function renderSettings(container, _params) {
+    document.title = 'Settings - ' + APP_NAME_SHORT;
     clearElement(container);
 
     // Page heading

@@ -284,6 +284,7 @@ interface ProjectData {
     DateModified: string;
     Repositories: string[];
     Workspaces: Record<string, ProjectWorkspace>;
+    LastActivity?: string;  // ISO 8601 — most recent activity timestamp; updated by updateLastActivity(), does NOT affect DateModified
     SchemaVersion: number;
 }
 
@@ -311,6 +312,7 @@ class ProjectManager {
     remove(id: string): void
     addRepository(projectId: string, repositoryId: string): ProjectData
     removeRepository(projectId: string, repositoryId: string): ProjectData
+    updateLastActivity(id: string, value: string): void  // Sets LastActivity (ISO 8601 string from git commit timestamp) without touching DateModified; no-ops silently when id not found or value unchanged
     addWorkspace(projectId: string, workspaceId: string, workspace: ProjectWorkspace): ProjectData
     updateWorkspace(projectId: string, workspaceId: string, changes: Partial<{ Description: string; DateModified: string }>): ProjectData
     removeWorkspace(projectId: string, workspaceId: string): ProjectData
@@ -484,6 +486,14 @@ function checkWorkspaceHealth(
 type SchemaVersion = number;
 
 interface BaseStore {
+    /**
+     * Monotonically incrementing integer that tracks structural changes to the
+     * persisted JSON shape. Versioning policy: adding an optional field is
+     * backward-compatible (do NOT bump); bump SCHEMA_VERSION only for breaking
+     * changes (removing/renaming a required field, or changing an existing
+     * field's type). All concrete store types inherit this field and policy
+     * via BaseStore.
+     */
     SchemaVersion: SchemaVersion;
 }
 ```
@@ -875,6 +885,7 @@ api.config.polling.set(seconds)
 | Export | Type | Value | Description |
 |---|---|---|---|
 | `STABLE_WS_ID` | `string` | `'STABLE'` | The workspace ID that is always treated as the stable reference workspace. Enforced at the storage layer. Import from here — do not hardcode `'STABLE'` in views or components. |
+| `APP_NAME_SHORT` | `string` | `'Paralizer'` | Short application name used in browser tab titles. Import from here — do not hardcode the string in views. |
 
 ### `utils/dom.js`
 
@@ -1098,7 +1109,14 @@ PollingManager.start(intervalSeconds)
               For each repository in project.Repositories:
                 fetchAndGetStatus(repoPath)    # git fetch + status snapshot
                 └→ Store result in internal Map keyed by repoPath
+       └→ persistLastActivity()               # post-sweep: compute max lastActivity per
+                                              # project and call updateLastActivity(); no-ops
+                                              # for projects with all-null lastActivity values
 ```
+
+`refreshWorkspace()` (on-demand polling) also calls `persistLastActivity()` after its fetch sweep so that `ProjectData.LastActivity` stays current after any single-workspace refresh.
+
+> **Timestamp comparison note:** `persistLastActivity()` finds the maximum `lastActivity` via lexicographic string comparison, which is correct only when all ISO 8601 timestamps share a consistent timezone offset (always `Z` for git commit timestamps normalised by the git layer). Do not mix timezone offsets without updating this method.
 
 ```
 User → GET /api/projects/:id/workspaces/:wid/status
@@ -1270,7 +1288,7 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 
 | Hash Pattern | View | Description |
 |---|---|---|
-| `#/` | `dashboard.js` | Project listing with creation form. |
+| `#/` | `dashboard.js` | Project listing with a filter/sort toolbar and a "Create Project" form. The toolbar (`.project-filter-toolbar`) sits between the page header and the project list and contains three labelled controls — each has a visible `<label class="filter-label">` with a `for`/`id` binding: a debounced search input (`id="project-filter-search"`, `type="search"`, ~250 ms), a repository filter `<select id="project-filter-repo">` populated from `api.repositories.list()` (always rendered; disabled with a "No repositories" placeholder when no repos exist or when the fetch fails — a toast is shown on failure), and a sort `<select id="project-filter-sort">` with `alpha` (Alphabetical, default) and `activity` (Last Activity) options. All three controls fire an `onFilterChange(FilterState)` callback on change. The current filter state (`{ search, repoId, sort }`) is maintained in `renderDashboard` and flows into `buildFilterToolbar`, `applyFiltersAndSort`, and `renderProjectGrid`. `applyFiltersAndSort(filterState, allProjects)` is a pure exported function — it receives the project list as an explicit parameter (no closure over module state) and can be unit-tested without DOM involvement. Filter changes re-apply the current state to the in-memory `_allProjects` cache without re-fetching; creating a new project re-fetches all project data from the API and re-applies the current filter/sort state. An empty-state message — "No projects match the current filters." vs "No projects yet." — distinguishes filtered-empty from truly-empty lists. |
 | `#/repositories` | `repositories.js` | Repository CRUD table. Each row's **Name** column renders as a clickable `<a class="repo-name-display repo-name-link">` element linking to `#/repositories/${encodeURIComponent(repo.id)}`. Clicking Edit switches the Name cell to an inline `<input>` for in-place editing; Save/Cancel restore the link with updated or original text. |
 | `#/repositories/:id` | `repository-detail.js` | Repository overview: table of every workspace across every project that contains the given repository. Each row shows Project (link to `#/projects/:pid`), Workspace (link to `#/projects/:pid/workspaces/:wid`), and the shared Branch/Status/Actions cells from `buildRepoStatusCells`. STABLE workspace rows show plain-text branch names; all other rows have a clickable branch-switch trigger. A "Refresh" button re-discovers the full project/workspace set (calls `api.projects.list()` + the full fan-out) and diffs against the existing rows: new rows are appended, removed rows are dropped, and existing rows are updated in-place via `api.status.refresh()` — protected by a `refreshInProgress` mutex. A 404 response for the repository renders a "not found" message with a link back to `#/repositories`. An empty-state message is shown when no projects contain the repository. Individual project/workspace fetch failures are handled gracefully via `Promise.allSettled` — partial results are displayed and a warning toast is shown when any fetch failed. The webserver URL is fetched once during initial load; the "Browse" button is shown only when `webserverUrl` is configured. `buildRepoStatusCells` is called with an `onError` callback (`(msg) => showToast(msg, 'error')`) so Git GUI button failures are surfaced as toasts without a dynamic `import('./toast.js')` inside the component. |
 | `#/projects/:id` | `project-detail.js` | Project metadata, tabbed repo/workspace/danger-zone management. The workspace table includes a **Health** column: initialized workspaces with health issues show a warning badge with issue count; healthy and uninitialized workspaces show an empty cell. Health is fetched in parallel with status for all initialized workspaces via `Promise.allSettled` (graceful degradation — fetch failures leave the health cell empty). |
@@ -1419,7 +1437,7 @@ Cells are located by CSS class (`.repo-branch-cell`) and badge wrapper attribute
 | Utility | File | Export | Purpose |
 |---|---|---|---|
 | Normalise | `utils/normalise.js` | `normaliseRepo()`, `normaliseProject()`, `normaliseWorkspace()` | Maps PascalCase backend keys to camelCase frontend keys. `normaliseWorkspace` now includes `folderPath` (from `FolderPath` in the API response). |
-| Constants | `utils/constants.js` | `STABLE_WS_ID` | Shared GUI constants. `STABLE_WS_ID = 'STABLE'` is the canonical definition; import from here instead of hardcoding the string in views. |
+| Constants | `utils/constants.js` | `STABLE_WS_ID`, `APP_NAME_SHORT` | Shared GUI constants. `STABLE_WS_ID = 'STABLE'` is the canonical definition; `APP_NAME_SHORT = 'Paralizer'` is the short app name used in browser tab titles. Import from here instead of hardcoding the strings in views. |
 | DOM | `utils/dom.js` | `clearElement(el)` | DOM utility — removes all children from an element via `removeChild` loop (preferred over `innerHTML = ''`). |
 
 ## Theme Switching
@@ -1444,6 +1462,24 @@ Views using router injection: `dashboard.js`, `project-detail.js`, `workspace-de
 Views with side-effects (e.g. `setInterval` polling) return a synchronous cleanup function from their entry point. The router calls it before rendering the next view. The cleanup must be returned **before** any async operations, so the router can register it immediately.
 
 Views returning cleanup: `workspace-detail.js` (clears 1-second countdown interval).
+
+### Page Title Convention
+
+Every view sets `document.title` using `APP_NAME_SHORT` from `utils/constants.js`. The router's `_render()` method resets the title to `APP_NAME_SHORT` before calling each view, preventing stale titles from carrying over during async data loads.
+
+- **Static views** (dashboard, repositories, settings, error-log, branch-switch): Set `document.title` synchronously at the top of the render function using the pattern `'{Section Name} - ' + APP_NAME_SHORT`.
+- **Entity-detail views** (project-detail, repository-detail, workspace-detail): Set `document.title` inside the `.then()` callback after the data fetch resolves, once the entity name is available.
+
+| View | Title format |
+|---|---|
+| Dashboard | `Dashboard - Paralizer` |
+| Repositories | `Repositories - Paralizer` |
+| Repository Detail | `{repo.name} - Paralizer` |
+| Project Detail | `{project.name} - Paralizer` |
+| Workspace Detail | `{project.name} {wid} - Paralizer` |
+| Branch Switch | `Branch Switch - Paralizer` |
+| Settings | `Settings - Paralizer` |
+| Error Log | `Error Log - Paralizer` |
 
 ### Workspace Detail View (`workspace-detail.js`)
 
@@ -1510,7 +1546,7 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 | Method | Path | Success | Error Codes | Description |
 |---|---|---|---|---|
 | `GET` | `/api/projects` | 200 | — | List all projects (index entries). |
-| `GET` | `/api/projects/:id` | 200 | 404 | Get full project data by ID. |
+| `GET` | `/api/projects/:id` | 200 | 404 | Get full project data by ID. Response includes an optional `LastActivity?: string` field (ISO 8601) when the project has recorded git activity via the polling layer; absent on projects that have never been polled. |
 | `POST` | `/api/projects` | 201 | 400 | Create a new project. Body: `{ name, repositoryIds, description?, id? }`. |
 | `PUT` | `/api/projects/:id` | 200 | 404 | Update project metadata. Body: `{ Name?, Description? }`. |
 | `PUT` | `/api/projects/:id/rename` | 200 | 400, 404 | Rename project (change ID). Body: `{ newId }`. |
@@ -1930,6 +1966,6 @@ Both scripts `cd` to their own directory before invoking `node dist/index.js men
 ```
 ---
 **File Statistics**
-- **Size**: 90.97 KB
-- **Lines**: 1908
+- **Size**: 93.65 KB
+- **Lines**: 1936
 File: `project-manifest.md`

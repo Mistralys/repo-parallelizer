@@ -15,6 +15,7 @@
             ├── projects.ts
             ├── repositories.ts
             ├── status.ts
+            ├── version.ts
             ├── workspaces.ts
         └── staticServer.ts
 

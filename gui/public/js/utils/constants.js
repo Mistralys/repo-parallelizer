@@ -14,3 +14,10 @@
  * @type {string}
  */
 export const STABLE_WS_ID = 'STABLE';
+
+/**
+ * Short application name used in browser tab titles.
+ *
+ * @type {string}
+ */
+export const APP_NAME_SHORT = 'Paralizer';

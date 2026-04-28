@@ -12,6 +12,7 @@ import { api } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { createFormField, validateRequired } from '../components/form-helpers.js';
 import { clearElement } from '../utils/dom.js';
+import { APP_NAME_SHORT } from '../utils/constants.js';
 
 // ---------------------------------------------------------------------------
 // Debounce helper
@@ -656,6 +657,8 @@ async function renderProjectList(listContainer, filterState) {
  * @param {Object}      _params   - Route params (unused).
  */
 export async function renderDashboard(container, _params) {
+    document.title = 'Dashboard - ' + APP_NAME_SHORT;
+
     // -----------------------------------------------------------------------
     // Page header
     // -----------------------------------------------------------------------

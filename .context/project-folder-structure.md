@@ -8,17 +8,20 @@
 └── LICENSE/
 └── README.md
 └── config.dist.json
+└── config.json
 └── context.yaml
 └── docs/
     ├── agents/
     │   ├── project-manifest/
-    │   │   └── README.md
-    │   │   └── api-surface.md
-    │   │   └── constraints.md
-    │   │   └── data-flows.md
-    │   │   └── gui-frontend.md
-    │   │   └── rest-api.md
-    │   │   └── tech-stack.md
+    │   │   ├── README.md
+    │   │   ├── api-surface.md
+    │   │   ├── constraints.md
+    │   │   ├── data-flows.md
+    │   │   ├── gui-frontend.md
+    │   │   ├── rest-api.md
+    │   │   ├── tech-stack.md
+    │   ├── research/
+    │   │   └── 2026-04-23-project-list-filtering-sorting.md
     ├── projects/
     │   └── tool-description.md
 └── gui/
@@ -32,6 +35,9 @@
     │       │   └── pico.classless.min.css
     │   └── index.html
     │   └── js/
+    │       └── __tests__/
+    │           ├── dashboard.test.mjs
+    │           ├── test-setup.mjs
     │       └── api.config.test.mjs
     │       └── api.errorLog.test.mjs
     │       └── api.js
@@ -57,6 +63,7 @@
     │       └── views/
     │           └── branch-switch.js
     │           └── dashboard.js
+    │           └── dashboard.test.mjs
     │           └── error-log.js
     │           └── project-detail.js
     │           └── repositories.js
@@ -154,6 +161,7 @@
     │   │   ├── projects.ts
     │   │   ├── repositories.ts
     │   │   ├── status.ts
+    │   │   ├── version.ts
     │   │   ├── workspaces.ts
     │   ├── staticServer.ts
     ├── storage/
@@ -194,6 +202,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 7 KB
+- **Size**: 6.98 KB
 - **Lines**: 200
 File: `project-folder-structure.md`

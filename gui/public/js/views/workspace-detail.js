@@ -42,7 +42,7 @@ import { showConfirm }       from '../components/confirm-dialog.js';
 import { buildRepoStatusCells, makeBranchTrigger, updateRepoStatusCells } from '../components/repo-status-cells.js';
 import { createFormField, validateRequired, WORKSPACE_ID_PATTERN } from '../components/form-helpers.js';
 import { normaliseProject, normaliseWorkspace } from '../utils/normalise.js';
-import { STABLE_WS_ID } from '../utils/constants.js';
+import { STABLE_WS_ID, APP_NAME_SHORT } from '../utils/constants.js';
 import { clearElement } from '../utils/dom.js';
 
 // ---------------------------------------------------------------------------
@@ -797,6 +797,7 @@ export function renderWorkspaceDetail(container, params) {
 
         const workspace = normaliseWorkspace(rawWorkspace);
         const project   = normaliseProject(rawProject);
+        document.title = `${project.name || projectId} ${wid} - ${APP_NAME_SHORT}`;
 
         // Build repo list: [{ repoId, repoName }, …]
         const repos = project.repositories.map((r) => ({

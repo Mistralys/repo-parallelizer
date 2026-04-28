@@ -138,8 +138,11 @@ function seedJsonFile<T>(filePath: string, defaultData: T): void {
 
 ```ts
 /**
- * SchemaVersion is used to tag stored JSON objects with a numeric schema version,
+ * Numeric schema version tag attached to every persisted JSON store file,
  * enabling forward-compatible migration logic in future releases.
+ *
+ * @see BaseStore.SchemaVersion for the versioning policy that governs when
+ * this value must be incremented.
  */
 export type SchemaVersion = number;
 
@@ -148,6 +151,19 @@ export type SchemaVersion = number;
  * `SchemaVersion` field for forward-compatible migration logic.
  */
 export interface BaseStore {
+    /**
+     * Monotonically incrementing integer that tracks structural changes to the
+     * persisted JSON shape.
+     *
+     * **Versioning policy:**
+     * - Adding an **optional** field is backward-compatible — existing JSON
+     *   files that lack the field are still valid. Do **not** bump
+     *   `SCHEMA_VERSION` for these changes.
+     * - **Do** bump `SCHEMA_VERSION` (and add a migration step) when making a
+     *   breaking change: removing a required field, renaming a field, or
+     *   changing the type of an existing field in a way that would cause older
+     *   JSON files to fail validation or produce incorrect behaviour.
+     */
     SchemaVersion: SchemaVersion;
 }
 

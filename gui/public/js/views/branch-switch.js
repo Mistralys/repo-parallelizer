@@ -38,6 +38,7 @@
 import { api }          from '../api.js';
 import { showToast }    from '../components/toast.js';
 import { clearElement } from '../utils/dom.js';
+import { APP_NAME_SHORT } from '../utils/constants.js';
 
 // ---------------------------------------------------------------------------
 // Router reference — injected from app.js via setRouter()
@@ -920,5 +921,6 @@ export function renderBranchSwitch(container, params) {
     const projectId = params.id;
     const wid       = params.wid;
 
+    document.title = 'Branch Switch - ' + APP_NAME_SHORT;
     renderWizard(container, projectId, wid);
 }

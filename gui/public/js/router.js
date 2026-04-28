@@ -13,6 +13,8 @@
  *   router.start();
  */
 
+import { APP_NAME_SHORT } from './utils/constants.js';
+
 /**
  * @typedef {Object} Route
  * @property {string}   pattern  - The raw hash pattern (e.g., '#/projects/:id').
@@ -172,6 +174,7 @@ export class Router {
     _render(viewFn, params) {
         this._runCleanup();
         if (this._container) {
+            document.title = APP_NAME_SHORT;
             this._container.innerHTML = '';
             const result = viewFn(this._container, params);
             // If the view returns a function, store it as cleanup.

@@ -9,6 +9,9 @@
             │   └── pico.classless.min.css
         └── index.html
         └── js/
+            └── __tests__/
+                ├── dashboard.test.mjs
+                ├── test-setup.mjs
             └── api.config.test.mjs
             └── api.errorLog.test.mjs
             └── api.js
@@ -34,6 +37,7 @@
             └── views/
                 └── branch-switch.js
                 └── dashboard.js
+                └── dashboard.test.mjs
                 └── error-log.js
                 └── project-detail.js
                 └── repositories.js
@@ -48,6 +52,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 1.72 KB
-- **Lines**: 52
+- **Size**: 1.79 KB
+- **Lines**: 54
 File: `modules/gui/file-structure.md`
