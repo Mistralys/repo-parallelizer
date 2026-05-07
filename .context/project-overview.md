@@ -491,6 +491,6 @@ Shared helper functions used across all layers.
 ```
 ---
 **File Statistics**
-- **Size**: 21.95 KB
-- **Lines**: 469
+- **Size**: 23.39 KB
+- **Lines**: 497
 File: `project-overview.md`

@@ -234,6 +234,7 @@ interface ProjectWorkspace {
     Description: string;
     DateCreated: string;
     DateModified: string;
+    Notes?: string;         // Optional free-text notes. Absent on pre-existing records — reads as '' via WorkspaceManager.
 }
 
 interface ProjectData {
@@ -274,7 +275,7 @@ class ProjectManager {
     removeRepository(projectId: string, repositoryId: string): ProjectData
     updateLastActivity(id: string, value: string): void  // Sets LastActivity (ISO 8601 string from git commit timestamp) without touching DateModified; no-ops silently when id not found or value unchanged
     addWorkspace(projectId: string, workspaceId: string, workspace: ProjectWorkspace): ProjectData
-    updateWorkspace(projectId: string, workspaceId: string, changes: Partial<{ Description: string; DateModified: string }>): ProjectData
+    updateWorkspace(projectId: string, workspaceId: string, changes: Partial<Pick<ProjectWorkspace, 'Description' | 'DateModified' | 'Notes'>>): ProjectData
     removeWorkspace(projectId: string, workspaceId: string): ProjectData
     renameWorkspace(projectId: string, oldId: string, newId: string, dateModified: string): ProjectData
 }
@@ -293,6 +294,7 @@ interface WorkspaceInfo {
     Description: string;
     DateCreated: string;
     DateModified: string;
+    Notes: string;          // Free-text notes. Always present as a string; defaults to '' when Notes is absent on the stored record.
 }
 
 // Re-exported from project.types.ts:
@@ -308,7 +310,7 @@ class WorkspaceManager {
     list(projectId: string): WorkspaceInfo[]
     getById(projectId: string, workspaceId: string): WorkspaceInfo | undefined
     create(projectId: string, workspaceId: string, description?: string): WorkspaceInfo
-    update(projectId: string, workspaceId: string, changes: { Description?: string }): WorkspaceInfo
+    update(projectId: string, workspaceId: string, changes: { Description?: string; Notes?: string }): WorkspaceInfo
     rename(projectId: string, oldId: string, newId: string): WorkspaceInfo
     remove(projectId: string, workspaceId: string): void
     isStable(workspaceId: string): boolean
@@ -838,6 +840,16 @@ api.config.polling.set(seconds)
 
 ---
 
+## GUI Views (`gui/public/js/views/`)
+
+View functions follow the router contract: `async function render*(container, params)`. Each function populates `container` with DOM elements and may return a cleanup function. All view functions are registered in `gui/public/js/app.js`.
+
+| Export | Module | Signature | Description |
+|---|---|---|---|
+| `renderNotesCollected` | `views/notes-collected.js` | `async (container: Element, _params: {}) => void` | Renders the two-panel Notes Collected view. Left sidebar lists all workspaces grouped by collapsible project groups (uses `api.notes.list()` + `normaliseNotesResponse()`); workspaces with notes carry `.has-notes`. Right panel shows editable note cards — one per workspace with a non-empty note on initial load. Clicking a sidebar item for an existing card scrolls to it; clicking one without a card creates a new empty card and focuses the textarea. Each card auto-saves after 1000 ms of inactivity via `api.workspaces.update()`; saving empty text removes the card and clears the sidebar indicator. Route: `#/notes`. |
+
+---
+
 ## GUI Utilities (`gui/public/js/utils/`)
 
 ### `utils/constants.js`
@@ -859,4 +871,5 @@ api.config.polling.set(seconds)
 |---|---|---|
 | `normaliseRepo` | `(raw) => { id, name, url }` | Maps PascalCase/camelCase backend keys to a consistent camelCase shape. |
 | `normaliseProject` | `(raw) => { id, name, description, repositories }` | Normalises project objects. |
-| `normaliseWorkspace` | `(raw) => { id, description, initialized, folderPath }` | Normalises workspace objects including `folderPath`. |
+| `normaliseWorkspace` | `(raw) => { id, description, initialized, folderPath, notes }` | Normalises workspace objects. `notes` maps `raw.Notes ?? raw.notes ?? ''`. |
+| `normaliseNotesResponse` | `(response) => { projects: Array<{ projectId, projectName, workspaces: Array<{ workspaceId, notes }> }> }` | Transforms the PascalCase `GET /api/notes` response into a camelCase structure grouped by project. |

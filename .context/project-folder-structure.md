@@ -37,6 +37,7 @@
     │   └── js/
     │       └── __tests__/
     │           ├── dashboard.test.mjs
+    │           ├── normalise.test.mjs
     │           ├── test-setup.mjs
     │       └── api.config.test.mjs
     │       └── api.errorLog.test.mjs
@@ -65,6 +66,8 @@
     │           └── dashboard.js
     │           └── dashboard.test.mjs
     │           └── error-log.js
+    │           └── notes-collected.js
+    │           └── notes-collected.test.mjs
     │           └── project-detail.js
     │           └── repositories.js
     │           └── repositories.test.mjs
@@ -72,6 +75,7 @@
     │           └── repository-detail.test.mjs
     │           └── settings.js
     │           └── workspace-detail.js
+    │           └── workspace-detail.notes.test.mjs
     │           └── workspace-detail.open-button.test.mjs
     │           └── workspace-detail.vscode-button.test.mjs
 └── menu.cmd
@@ -141,6 +145,7 @@
     │   │   │   ├── branches.test.ts
     │   │   │   ├── config.test.ts
     │   │   │   ├── error-log.test.ts
+    │   │   │   ├── notes.test.ts
     │   │   │   ├── projects.test.ts
     │   │   │   ├── repositories.test.ts
     │   │   │   ├── status.test.ts
@@ -158,6 +163,7 @@
     │   │   ├── branches.ts
     │   │   ├── config.ts
     │   │   ├── error-log.ts
+    │   │   ├── notes.ts
     │   │   ├── projects.ts
     │   │   ├── repositories.ts
     │   │   ├── status.ts
@@ -202,6 +208,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 6.98 KB
-- **Lines**: 200
+- **Size**: 7.58 KB
+- **Lines**: 214
 File: `project-folder-structure.md`

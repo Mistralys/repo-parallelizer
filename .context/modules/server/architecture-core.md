@@ -101,6 +101,7 @@ import { registerBranchRoutes } from './routes/branches.js';
 import { registerStatusRoutes } from './routes/status.js';
 import { registerConfigRoutes } from './routes/config.js';
 import { registerErrorLogRoutes } from './routes/error-log.js';
+import { registerNotesRoutes } from './routes/notes.js';
 import { registerVersionRoute } from './routes/version.js';
 import { migrateWorkspaceFiles } from '../orchestration/vscode-workspace.js';
 
@@ -221,6 +222,7 @@ export function startServer(config: ServerConfig): Promise<void> {
     registerStatusRoutes(router, pollingManager, projectManager, workspaceManager, config.appConfig);
     registerConfigRoutes({ router, appConfig: config.appConfig, pollingManager });
     registerErrorLogRoutes(router, errorLogManager);
+    registerNotesRoutes(router, projectManager, workspaceManager);
     registerVersionRoute(router);
 
     // ------------------------------------------------------------------
@@ -1078,6 +1080,6 @@ export async function serveStatic(
 ```
 ---
 **File Statistics**
-- **Size**: 37.89 KB
-- **Lines**: 1031
+- **Size**: 40.59 KB
+- **Lines**: 1086
 File: `modules/server/architecture-core.md`

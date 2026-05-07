@@ -678,6 +678,85 @@ const config = {
 };
 
 // ---------------------------------------------------------------------------
+// Notes type definition
+// ---------------------------------------------------------------------------
+
+/**
+ * A workspace entry within a {@link NotesResponse} project group.
+ *
+ * The Go backend serialises struct fields using their Go-style capitalised
+ * names (`WorkspaceId`, `Notes`). Future serialiser changes may emit
+ * lowercase equivalents (`workspaceId`, `notes`). View code **must**
+ * normalise both casings:
+ *
+ * ```js
+ * const wid   = ws.WorkspaceId || ws.workspaceId || '';
+ * const notes = ws.Notes       ?? ws.notes       ?? '';
+ * ```
+ *
+ * @typedef {Object} NotesWorkspace
+ * @property {string} [WorkspaceId] - Workspace ID (Go-capitalised key).
+ * @property {string} [workspaceId] - Workspace ID (lowercase key).
+ * @property {string} [Notes]       - Free-text notes; empty string when none (Go-capitalised key).
+ * @property {string} [notes]       - Free-text notes; empty string when none (lowercase key).
+ */
+
+/**
+ * A project entry within a {@link NotesResponse}.
+ *
+ * The Go backend serialises struct fields using their Go-style capitalised
+ * names (`ProjectId`, `ProjectName`, `Workspaces`). Future serialiser changes
+ * may emit lowercase equivalents. View code **must** normalise both casings:
+ *
+ * ```js
+ * const id   = p.ProjectId   || p.projectId   || '';
+ * const name = p.ProjectName || p.projectName || id;
+ * ```
+ *
+ * @typedef {Object} NotesProject
+ * @property {string}           [ProjectId]   - Project ID (Go-capitalised key).
+ * @property {string}           [projectId]   - Project ID (lowercase key).
+ * @property {string}           [ProjectName] - Human-readable project name (Go-capitalised key).
+ * @property {string}           [projectName] - Human-readable project name (lowercase key).
+ * @property {NotesWorkspace[]} [Workspaces]  - Per-workspace note entries (Go-capitalised key).
+ * @property {NotesWorkspace[]} [workspaces]  - Per-workspace note entries (lowercase key).
+ */
+
+/**
+ * Response shape returned by `GET /api/notes`.
+ *
+ * The top-level `Projects` key reflects current Go serialisation. Future
+ * serialiser changes may also emit a lowercase `projects` key. View code
+ * should prefer `normaliseNotesResponse()` from `utils/normalise.js` rather
+ * than accessing these keys directly.
+ *
+ * @typedef {Object} NotesResponse
+ * @property {NotesProject[]} [Projects]  - Array of project groups (Go-capitalised key).
+ * @property {NotesProject[]} [projects]  - Array of project groups (lowercase key).
+ */
+
+/**
+ * Notes endpoints.
+ *
+ * @namespace api.notes
+ */
+const notes = {
+    /**
+     * List all notes across all projects and workspaces.
+     *
+     * Returns a {@link NotesResponse}. All keys in the response are
+     * Go-capitalised (`Projects`, `ProjectId`, `ProjectName`, `WorkspaceId`,
+     * `Notes`). Use `normaliseNotesResponse()` from `utils/normalise.js` to
+     * convert the response to camelCase before passing it to view code.
+     *
+     * @returns {Promise<NotesResponse>}
+     */
+    list() {
+        return request('GET', '/api/notes');
+    },
+};
+
+// ---------------------------------------------------------------------------
 // Public export
 // ---------------------------------------------------------------------------
 
@@ -692,6 +771,7 @@ const config = {
  *   status:       typeof status,
  *   config:       typeof config,
  *   errorLog:     typeof errorLog,
+ *   notes:        typeof notes,
  *   version:      { get: () => Promise<{ appVersion: string, guiVersion: string }> },
  * }}
  */
@@ -703,6 +783,7 @@ export const api = {
     status,
     config,
     errorLog,
+    notes,
     version: {
         /**
          * Fetch the application and GUI version strings from the server.
@@ -734,6 +815,7 @@ export const api = {
  *   #/projects/:id/workspaces/:wid/branch-switch → Branch Switch       (WP-017)
  *   #/settings                                   → Settings            (WP-009)
  *   #/error-log                                  → Error Log           (WP-011)
+ *   #/notes                                      → Notes Collected     (WP-008)
  */
 
 import { Router }                                        from './router.js';
@@ -745,6 +827,7 @@ import { renderWorkspaceDetail, setRouter as setWorkspaceDetailRouter } from './
 import { renderBranchSwitch, setRouter as setBranchSwitchRouter } from './views/branch-switch.js';
 import { renderSettings }                                from './views/settings.js';
 import { renderErrorLog }                                from './views/error-log.js';
+import { renderNotesCollected }                          from './views/notes-collected.js';
 import { createThemeToggle }                             from './components/theme-toggle.js';
 import { initNavHighlight }                              from './utils/nav-highlight.js';
 import { initNavBadge }                                  from './components/nav-badge.js';
@@ -786,6 +869,9 @@ router.register('#/settings', renderSettings);
 
 // Error Log (WP-011)
 router.register('#/error-log', renderErrorLog);
+
+// Notes Collected (WP-008)
+router.register('#/notes', renderNotesCollected);
 
 // ---------------------------------------------------------------------------
 // Theme toggle — apply saved theme before first render to avoid flash
@@ -1036,6 +1122,6 @@ export class Router {
 ```
 ---
 **File Statistics**
-- **Size**: 30.97 KB
-- **Lines**: 1006
+- **Size**: 35.78 KB
+- **Lines**: 1128
 File: `modules/gui/architecture-core.md`

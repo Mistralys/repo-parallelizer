@@ -11,6 +11,7 @@
         └── js/
             └── __tests__/
                 ├── dashboard.test.mjs
+                ├── normalise.test.mjs
                 ├── test-setup.mjs
             └── api.config.test.mjs
             └── api.errorLog.test.mjs
@@ -39,6 +40,8 @@
                 └── dashboard.js
                 └── dashboard.test.mjs
                 └── error-log.js
+                └── notes-collected.js
+                └── notes-collected.test.mjs
                 └── project-detail.js
                 └── repositories.js
                 └── repositories.test.mjs
@@ -46,12 +49,13 @@
                 └── repository-detail.test.mjs
                 └── settings.js
                 └── workspace-detail.js
+                └── workspace-detail.notes.test.mjs
                 └── workspace-detail.open-button.test.mjs
                 └── workspace-detail.vscode-button.test.mjs
 
 ```
 ---
 **File Statistics**
-- **Size**: 1.79 KB
-- **Lines**: 54
+- **Size**: 2.14 KB
+- **Lines**: 62
 File: `modules/gui/file-structure.md`

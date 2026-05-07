@@ -427,7 +427,7 @@ export class ProjectManager {
     updateWorkspace(
         projectId: string,
         workspaceId: string,
-        changes: Partial<Pick<ProjectWorkspace, 'Description' | 'DateModified'>>,
+        changes: Partial<Pick<ProjectWorkspace, 'Description' | 'DateModified' | 'Notes'>>,
     ): ProjectData {
         const project = this.loadProject(projectId);
         if (!project) {
@@ -439,6 +439,9 @@ export class ProjectManager {
         }
         if (changes.Description !== undefined) {
             ws.Description = changes.Description;
+        }
+        if (changes.Notes !== undefined) {
+            ws.Notes = changes.Notes;
         }
         if (changes.DateModified !== undefined) {
             ws.DateModified = changes.DateModified;
@@ -517,6 +520,9 @@ export interface ProjectWorkspace {
 
     /** ISO 8601 timestamp when this workspace was last modified. */
     DateModified: string;
+
+    /** Optional free-text notes about this workspace. */
+    Notes?: string;
 }
 
 /**
@@ -910,6 +916,7 @@ export class WorkspaceManager {
             Description: ws.Description,
             DateCreated: ws.DateCreated,
             DateModified: ws.DateModified,
+            Notes: ws.Notes ?? '',
         }));
     }
 
@@ -935,6 +942,7 @@ export class WorkspaceManager {
             Description: ws.Description,
             DateCreated: ws.DateCreated,
             DateModified: ws.DateModified,
+            Notes: ws.Notes ?? '',
         };
     }
 
@@ -984,17 +992,18 @@ export class WorkspaceManager {
             Description: workspace.Description,
             DateCreated: timestamp,
             DateModified: timestamp,
+            Notes: '',
         };
     }
 
     /**
-     * Updates the `Description` of an existing workspace.
+     * Updates the `Description` and/or `Notes` of an existing workspace.
      * Always updates `DateModified` on the workspace entry.
      *
      * @throws {Error} If the project does not exist.
      * @throws {Error} If the workspace does not exist.
      */
-    update(projectId: string, workspaceId: string, changes: { Description?: string }): WorkspaceInfo {
+    update(projectId: string, workspaceId: string, changes: { Description?: string; Notes?: string }): WorkspaceInfo {
         const project = this.projectManager.getById(projectId);
         if (!project) {
             throw new NotFoundError(
@@ -1011,6 +1020,7 @@ export class WorkspaceManager {
         const dateModified = this.now();
         const updated = this.projectManager.updateWorkspace(projectId, workspaceId, {
             Description: changes.Description,
+            Notes: changes.Notes,
             DateModified: dateModified,
         });
 
@@ -1021,6 +1031,7 @@ export class WorkspaceManager {
             Description: ws.Description,
             DateCreated: ws.DateCreated,
             DateModified: ws.DateModified,
+            Notes: ws.Notes ?? '',
         };
     }
 
@@ -1082,6 +1093,7 @@ export class WorkspaceManager {
             Description: ws.Description,
             DateCreated: ws.DateCreated,
             DateModified: ws.DateModified,
+            Notes: ws.Notes ?? '',
         };
     }
 
@@ -1157,11 +1169,14 @@ export interface WorkspaceInfo {
 
     /** ISO 8601 timestamp when this workspace was last modified. */
     DateModified: string;
+
+    /** Free-text notes about this workspace. Empty string when none have been set. */
+    Notes: string;
 }
 
 ```
 ---
 **File Statistics**
-- **Size**: 37.75 KB
-- **Lines**: 1101
+- **Size**: 40.86 KB
+- **Lines**: 1183
 File: `modules/models/architecture-core.md`

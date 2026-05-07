@@ -185,7 +185,7 @@ export function registerWorkspaceRoutes(
     });
 
     // ------------------------------------------------------------------
-    // PUT /api/projects/:id/workspaces/:wid — update workspace description
+    // PUT /api/projects/:id/workspaces/:wid — update workspace description and/or notes
     // ------------------------------------------------------------------
     router.put('/api/projects/:id/workspaces/:wid', async (
         req: IncomingMessage,
@@ -205,15 +205,22 @@ export function registerWorkspaceRoutes(
             return;
         }
 
-        const { description } = body as { description?: unknown };
+        const { description, notes } = body as { description?: unknown; notes?: unknown };
 
-        if (typeof description !== 'string') {
-            sendError(res, 400, 'Missing required field: description (string).');
+        const hasDescription = typeof description === 'string';
+        const hasNotes = typeof notes === 'string';
+
+        if (!hasDescription && !hasNotes) {
+            sendError(res, 400, 'Request body must include at least one updatable field: description or notes.');
             return;
         }
 
+        const changes: { Description?: string; Notes?: string } = {};
+        if (hasDescription) changes.Description = description as string;
+        if (hasNotes) changes.Notes = notes as string;
+
         try {
-            const updated = workspaceManager.update(params['id'], params['wid'], { Description: description });
+            const updated = workspaceManager.update(params['id'], params['wid'], changes);
             sendJson(res, 200, updated);
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Not found.';

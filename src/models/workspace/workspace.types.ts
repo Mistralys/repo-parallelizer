@@ -27,4 +27,7 @@ export interface WorkspaceInfo {
 
     /** ISO 8601 timestamp when this workspace was last modified. */
     DateModified: string;
+
+    /** Free-text notes about this workspace. Empty string when none have been set. */
+    Notes: string;
 }

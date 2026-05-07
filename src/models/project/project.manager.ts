@@ -406,7 +406,7 @@ export class ProjectManager {
     updateWorkspace(
         projectId: string,
         workspaceId: string,
-        changes: Partial<Pick<ProjectWorkspace, 'Description' | 'DateModified'>>,
+        changes: Partial<Pick<ProjectWorkspace, 'Description' | 'DateModified' | 'Notes'>>,
     ): ProjectData {
         const project = this.loadProject(projectId);
         if (!project) {
@@ -418,6 +418,9 @@ export class ProjectManager {
         }
         if (changes.Description !== undefined) {
             ws.Description = changes.Description;
+        }
+        if (changes.Notes !== undefined) {
+            ws.Notes = changes.Notes;
         }
         if (changes.DateModified !== undefined) {
             ws.DateModified = changes.DateModified;

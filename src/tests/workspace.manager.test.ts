@@ -323,6 +323,56 @@ test('update persists changes so getById() reflects them immediately', () => {
     assert.strictEqual(fetched?.Description, 'Persisted');
 });
 
+test('getById returns Notes as empty string for a workspace without stored Notes', () => {
+    const base = makeTempDir();
+    const { repoManager, projectManager, workspaceManager } = makeManagers(base);
+    const projectId = makeProject(projectManager, repoManager);
+    const ws = workspaceManager.getById(projectId, 'STABLE');
+    assert.ok(ws !== undefined);
+    assert.strictEqual(ws.Notes, '');
+});
+
+test('update persists Notes and getById returns the updated value', () => {
+    const base = makeTempDir();
+    const { repoManager, projectManager, workspaceManager } = makeManagers(base);
+    const projectId = makeProject(projectManager, repoManager);
+    workspaceManager.update(projectId, 'STABLE', { Notes: 'hello' });
+    const fetched = workspaceManager.getById(projectId, 'STABLE');
+    assert.strictEqual(fetched?.Notes, 'hello');
+});
+
+test('update returns the updated Notes value in its return value', () => {
+    const base = makeTempDir();
+    const { repoManager, projectManager, workspaceManager } = makeManagers(base);
+    const projectId = makeProject(projectManager, repoManager);
+    const result = workspaceManager.update(projectId, 'STABLE', { Notes: 'hello' });
+    assert.strictEqual(result.Notes, 'hello');
+});
+
+test('list includes Notes field for every workspace', () => {
+    const base = makeTempDir();
+    const { repoManager, projectManager, workspaceManager } = makeManagers(base);
+    const projectId = makeProject(projectManager, repoManager);
+    workspaceManager.create(projectId, 'DEV');
+    workspaceManager.update(projectId, 'STABLE', { Notes: 'stable notes' });
+    const workspaces = workspaceManager.list(projectId);
+    assert.ok(workspaces.every((w) => typeof w.Notes === 'string'));
+    const stable = workspaces.find((w) => w.WorkspaceID === 'STABLE');
+    assert.strictEqual(stable?.Notes, 'stable notes');
+    const dev = workspaces.find((w) => w.WorkspaceID === 'DEV');
+    assert.strictEqual(dev?.Notes, '');
+});
+
+test('update sets DateModified when Notes is changed', () => {
+    const base = makeTempDir();
+    const { repoManager, projectManager, workspaceManager } = makeManagers(base);
+    const projectId = makeProject(projectManager, repoManager);
+    const original = workspaceManager.getById(projectId, 'STABLE');
+    assert.ok(original !== undefined);
+    const updated = workspaceManager.update(projectId, 'STABLE', { Notes: 'changed' });
+    assert.ok(updated.DateModified >= original.DateModified);
+});
+
 // ─── rename ──────────────────────────────────────────────────────────────────
 
 test('rename throws when attempting to rename the STABLE workspace', () => {

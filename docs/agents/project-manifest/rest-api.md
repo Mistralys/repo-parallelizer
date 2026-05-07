@@ -38,12 +38,27 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 | `GET` | `/api/projects/:id/workspaces` | 200 | 404 | List workspaces in a project. Response includes `Initialized` boolean and `FolderPath` string. |
 | `GET` | `/api/projects/:id/workspaces/:wid` | 200 | 404 | Get a single workspace. Response includes `Initialized` boolean and `FolderPath` string. |
 | `POST` | `/api/projects/:id/workspaces` | 201 | 400, 404 | Create workspace. Body: `{ id, description? }`. |
-| `PUT` | `/api/projects/:id/workspaces/:wid` | 200 | 400, 404 | Update workspace. Body: `{ Description? }`. |
+| `PUT` | `/api/projects/:id/workspaces/:wid` | 200 | 400, 404 | Update workspace description and/or notes. Body: `{ description?, notes? }` — at least one field required. 400 if neither field is present or body is not a valid JSON object. Response includes a `Notes` field on the returned `WorkspaceInfo`. |
 | `PUT` | `/api/projects/:id/workspaces/:wid/rename` | 200 | 400, 404 | Rename workspace. Body: `{ newId }`. |
 | `DELETE` | `/api/projects/:id/workspaces/:wid` | 204 | 404 | Delete workspace (STABLE cannot be deleted). |
 | `POST` | `/api/projects/:id/workspaces/:wid/setup` | 200 | 400, 404, 500 | Initialize workspace on disk (clone repos, generate .code-workspace file). |
 | `POST` | `/api/projects/:id/workspaces/:wid/regenerate-workspace-file` | 200 | 400, 404, 500 | Regenerate the `.code-workspace` file from the current repository list without cloning. Workspace folder must already exist on disk (400 if absent). Body: none. Response: `{ success: true }`. |
 | `GET` | `/api/projects/:id/workspaces/:wid/health` | 200 | 404 | Fetch the health report for a workspace. Returns `{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }`. Uninitialized workspaces return `{ healthy: true, issues: [] }`. 404 if project or workspace ID is unknown. |
+
+### `PUT /api/projects/:id/workspaces/:wid` — Request Body
+
+At least one field is required. Both fields may be sent together.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `description` | `string` | No | Human-readable description for the workspace. |
+| `notes` | `string` | No | Free-text notes for the workspace. |
+
+**400 cases:**
+- Body is not a valid JSON object.
+- Body contains neither a `description` nor a `notes` field (or both values are non-string types).
+
+**200 Response:** the full updated `WorkspaceInfo` object, including the `Notes` field (always present as a string; empty string `""` when no notes have been set).
 
 ---
 
@@ -311,4 +326,37 @@ Returns `null` when not configured:
 **Response:**
 ```json
 { "webserverUrl": null }
+```
+
+---
+
+## Notes
+
+Aggregate endpoint that returns the `Notes` field for every workspace across all projects in a single request. Intended for use by the GUI to display workspace notes without fetching individual workspace records.
+
+| Method | Path | Success | Error Codes | Description |
+|---|---|---|---|---|
+| `GET` | `/api/notes` | 200 | 500 | Return all workspace notes grouped by project. |
+
+**Behaviour:**
+- All projects and all their workspaces are always included unconditionally — there is no filtering by project or workspace.
+- Workspaces with no notes stored have `Notes: ""` in the response.
+- Returns `{ Projects: [] }` when no projects exist.
+- Returns `500` if reading from storage fails (file I/O error, JSON parse failure, etc.).
+
+### `GET /api/notes` Response Shape
+
+```json
+{
+    "Projects": [
+        {
+            "ProjectId": "my-project",
+            "ProjectName": "My Project",
+            "Workspaces": [
+                { "WorkspaceId": "STABLE", "Notes": "" },
+                { "WorkspaceId": "DEV",    "Notes": "some notes" }
+            ]
+        }
+    ]
+}
 ```

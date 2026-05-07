@@ -103,7 +103,7 @@ class MockWorkspaceManager {
         const now = new Date().toISOString();
         const found = this.known.some((k) => k.projectId === projectId && k.workspaceId === workspaceId);
         if (!found) return undefined;
-        return { ProjectID: projectId, WorkspaceID: workspaceId, Description: '', DateCreated: now, DateModified: now };
+        return { ProjectID: projectId, WorkspaceID: workspaceId, Description: '', DateCreated: now, DateModified: now, Notes: '' };
     }
 }
 
