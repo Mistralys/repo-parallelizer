@@ -13,6 +13,9 @@ export interface ProjectWorkspace {
 
     /** ISO 8601 timestamp when this workspace was last modified. */
     DateModified: string;
+
+    /** Optional free-text notes about this workspace. */
+    Notes?: string;
 }
 
 /**
