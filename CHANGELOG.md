@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.0 - Workspace Notes
+- Workspace: Added `notes` field to workspace and project models.
+- Server: Added notes API endpoint for reading and persisting workspace notes.
+- GUI: Added notes textarea to the workspace detail view.
+- GUI: Added "Notes Collected" view aggregating notes across all workspaces.
+
 ## v1.0.1 - Page Titles
 - GUI: The browser page title now displays helpful titles.
 
