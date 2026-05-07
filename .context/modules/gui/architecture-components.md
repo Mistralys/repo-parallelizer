@@ -1568,7 +1568,7 @@ export function normaliseProject(project) {
  * so we must map both naming conventions.
  *
  * @param {Object} ws
- * @returns {{ id: string, description: string, createdAt: string, initialized: boolean }}
+ * @returns {{ id: string, description: string, createdAt: string, initialized: boolean, folderPath: string, notes: string }}
  */
 export function normaliseWorkspace(ws) {
     return {
@@ -1577,6 +1577,45 @@ export function normaliseWorkspace(ws) {
         createdAt:   ws.DateCreated || ws.CreatedAt || ws.createdAt || ws.created_at || '',
         initialized: ws.Initialized != null ? ws.Initialized : (ws.initialized != null ? ws.initialized : true),
         folderPath:  ws.FolderPath  || ws.folderPath  || '',
+        notes:       ws.Notes       ?? ws.notes       ?? '',
+    };
+}
+
+/**
+ * Normalise the response from `GET /api/notes`.
+ *
+ * Transforms the PascalCase backend shape into camelCase for frontend use:
+ *
+ * Backend:
+ * ```json
+ * { "Projects": [{ "ProjectId": "x", "ProjectName": "X",
+ *     "Workspaces": [{ "WorkspaceId": "STABLE", "Notes": "" }] }] }
+ * ```
+ *
+ * Normalised:
+ * ```json
+ * { "projects": [{ "projectId": "x", "projectName": "X",
+ *     "workspaces": [{ "workspaceId": "STABLE", "notes": "" }] }] }
+ * ```
+ *
+ * @param {{ Projects: Array<{ ProjectId: string, ProjectName: string,
+ *   Workspaces: Array<{ WorkspaceId: string, Notes: string }> }> }} response
+ * @returns {{ projects: Array<{ projectId: string, projectName: string,
+ *   workspaces: Array<{ workspaceId: string, notes: string }> }> }}
+ */
+export function normaliseNotesResponse(response) {
+    const rawProjects = Array.isArray(response?.Projects) ? response.Projects : [];
+    return {
+        projects: rawProjects.map((p) => ({
+            projectId:   p.ProjectId   || '',
+            projectName: p.ProjectName || '',
+            workspaces: Array.isArray(p.Workspaces)
+                ? p.Workspaces.map((ws) => ({
+                    workspaceId: ws.WorkspaceId || '',
+                    notes:       ws.Notes ?? '',
+                }))
+                : [],
+        })),
     };
 }
 
@@ -1706,6 +1745,6 @@ export function formatLastActivity(isoTimestamp) {
 ```
 ---
 **File Statistics**
-- **Size**: 61.93 KB
-- **Lines**: 1704
+- **Size**: 63.57 KB
+- **Lines**: 1751
 File: `modules/gui/architecture-components.md`

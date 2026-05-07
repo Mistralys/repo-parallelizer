@@ -9,6 +9,7 @@ _SOURCE: REST API route handlers_
             └── branches.ts
             └── config.ts
             └── error-log.ts
+            └── notes.ts
             └── projects.ts
             └── repositories.ts
             └── status.ts
@@ -723,6 +724,71 @@ export function registerErrorLogRoutes(
         // 204 No Content — no body
         res.writeHead(204, {});
         res.end('');
+    });
+}
+
+```
+###  Path: `/src/server/routes/notes.ts`
+
+```ts
+import type { Router } from '../router.js';
+import type { ProjectManager } from '../../models/project/project.manager.js';
+import type { WorkspaceManager } from '../../models/workspace/workspace.manager.js';
+import { sendJson, sendError } from '../requestUtils.js';
+
+// ---------------------------------------------------------------------------
+// Route registration
+// ---------------------------------------------------------------------------
+
+/**
+ * Registers the notes aggregate endpoint on the provided `Router` instance.
+ *
+ * | Method | Path        | Success | Failure |
+ * |--------|-------------|---------|---------|
+ * | GET    | /api/notes  | 200     | 500     |
+ *
+ * Response shape:
+ * ```json
+ * {
+ *   "Projects": [
+ *     {
+ *       "ProjectId": "my-project",
+ *       "ProjectName": "My Project",
+ *       "Workspaces": [
+ *         { "WorkspaceId": "STABLE", "Notes": "" },
+ *         { "WorkspaceId": "DEV",    "Notes": "some notes" }
+ *       ]
+ *     }
+ *   ]
+ * }
+ * ```
+ *
+ * All projects and all their workspaces are always included.  Workspaces
+ * without stored notes have `Notes: ""`.
+ */
+export function registerNotesRoutes(
+    router: Router,
+    projectManager: ProjectManager,
+    workspaceManager: WorkspaceManager,
+): void {
+    router.get('/api/notes', (_req, res) => {
+        try {
+            const projects = projectManager.list();
+            const result = projects.map((p) => {
+                const workspaces = workspaceManager.list(p.Id);
+                return {
+                    ProjectId: p.Id,
+                    ProjectName: p.Name,
+                    Workspaces: workspaces.map((ws) => ({
+                        WorkspaceId: ws.WorkspaceID,
+                        Notes: ws.Notes,
+                    })),
+                };
+            });
+            sendJson(res, 200, { Projects: result });
+        } catch {
+            sendError(res, 500, 'Internal server error.');
+        }
     });
 }
 
@@ -1676,7 +1742,7 @@ export function registerWorkspaceRoutes(
     });
 
     // ------------------------------------------------------------------
-    // PUT /api/projects/:id/workspaces/:wid — update workspace description
+    // PUT /api/projects/:id/workspaces/:wid — update workspace description and/or notes
     // ------------------------------------------------------------------
     router.put('/api/projects/:id/workspaces/:wid', async (
         req: IncomingMessage,
@@ -1696,15 +1762,22 @@ export function registerWorkspaceRoutes(
             return;
         }
 
-        const { description } = body as { description?: unknown };
+        const { description, notes } = body as { description?: unknown; notes?: unknown };
 
-        if (typeof description !== 'string') {
-            sendError(res, 400, 'Missing required field: description (string).');
+        const hasDescription = typeof description === 'string';
+        const hasNotes = typeof notes === 'string';
+
+        if (!hasDescription && !hasNotes) {
+            sendError(res, 400, 'Request body must include at least one updatable field: description or notes.');
             return;
         }
 
+        const changes: { Description?: string; Notes?: string } = {};
+        if (hasDescription) changes.Description = description as string;
+        if (hasNotes) changes.Notes = notes as string;
+
         try {
-            const updated = workspaceManager.update(params['id'], params['wid'], { Description: description });
+            const updated = workspaceManager.update(params['id'], params['wid'], changes);
             sendJson(res, 200, updated);
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Not found.';
@@ -1974,6 +2047,6 @@ export function registerWorkspaceRoutes(
 ```
 ---
 **File Statistics**
-- **Size**: 73.68 KB
-- **Lines**: 1905
+- **Size**: 78.89 KB
+- **Lines**: 2053
 File: `modules/server/architecture-routes.md`

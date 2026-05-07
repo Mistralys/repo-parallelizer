@@ -12,6 +12,7 @@
             ├── branches.ts
             ├── config.ts
             ├── error-log.ts
+            ├── notes.ts
             ├── projects.ts
             ├── repositories.ts
             ├── status.ts
@@ -22,6 +23,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 637 B
-- **Lines**: 27
+- **Size**: 701 B
+- **Lines**: 29
 File: `modules/server/file-structure.md`

@@ -274,6 +274,7 @@ interface ProjectWorkspace {
     Description: string;
     DateCreated: string;
     DateModified: string;
+    Notes?: string;         // Optional free-text notes. Absent on pre-existing records — reads as '' via WorkspaceManager.
 }
 
 interface ProjectData {
@@ -314,7 +315,7 @@ class ProjectManager {
     removeRepository(projectId: string, repositoryId: string): ProjectData
     updateLastActivity(id: string, value: string): void  // Sets LastActivity (ISO 8601 string from git commit timestamp) without touching DateModified; no-ops silently when id not found or value unchanged
     addWorkspace(projectId: string, workspaceId: string, workspace: ProjectWorkspace): ProjectData
-    updateWorkspace(projectId: string, workspaceId: string, changes: Partial<{ Description: string; DateModified: string }>): ProjectData
+    updateWorkspace(projectId: string, workspaceId: string, changes: Partial<Pick<ProjectWorkspace, 'Description' | 'DateModified' | 'Notes'>>): ProjectData
     removeWorkspace(projectId: string, workspaceId: string): ProjectData
     renameWorkspace(projectId: string, oldId: string, newId: string, dateModified: string): ProjectData
 }
@@ -333,6 +334,7 @@ interface WorkspaceInfo {
     Description: string;
     DateCreated: string;
     DateModified: string;
+    Notes: string;          // Free-text notes. Always present as a string; defaults to '' when Notes is absent on the stored record.
 }
 
 // Re-exported from project.types.ts:
@@ -348,7 +350,7 @@ class WorkspaceManager {
     list(projectId: string): WorkspaceInfo[]
     getById(projectId: string, workspaceId: string): WorkspaceInfo | undefined
     create(projectId: string, workspaceId: string, description?: string): WorkspaceInfo
-    update(projectId: string, workspaceId: string, changes: { Description?: string }): WorkspaceInfo
+    update(projectId: string, workspaceId: string, changes: { Description?: string; Notes?: string }): WorkspaceInfo
     rename(projectId: string, oldId: string, newId: string): WorkspaceInfo
     remove(projectId: string, workspaceId: string): void
     isStable(workspaceId: string): boolean
@@ -878,6 +880,16 @@ api.config.polling.set(seconds)
 
 ---
 
+## GUI Views (`gui/public/js/views/`)
+
+View functions follow the router contract: `async function render*(container, params)`. Each function populates `container` with DOM elements and may return a cleanup function. All view functions are registered in `gui/public/js/app.js`.
+
+| Export | Module | Signature | Description |
+|---|---|---|---|
+| `renderNotesCollected` | `views/notes-collected.js` | `async (container: Element, _params: {}) => void` | Renders the two-panel Notes Collected view. Left sidebar lists all workspaces grouped by collapsible project groups (uses `api.notes.list()` + `normaliseNotesResponse()`); workspaces with notes carry `.has-notes`. Right panel shows editable note cards — one per workspace with a non-empty note on initial load. Clicking a sidebar item for an existing card scrolls to it; clicking one without a card creates a new empty card and focuses the textarea. Each card auto-saves after 1000 ms of inactivity via `api.workspaces.update()`; saving empty text removes the card and clears the sidebar indicator. Route: `#/notes`. |
+
+---
+
 ## GUI Utilities (`gui/public/js/utils/`)
 
 ### `utils/constants.js`
@@ -899,7 +911,8 @@ api.config.polling.set(seconds)
 |---|---|---|
 | `normaliseRepo` | `(raw) => { id, name, url }` | Maps PascalCase/camelCase backend keys to a consistent camelCase shape. |
 | `normaliseProject` | `(raw) => { id, name, description, repositories }` | Normalises project objects. |
-| `normaliseWorkspace` | `(raw) => { id, description, initialized, folderPath }` | Normalises workspace objects including `folderPath`. |
+| `normaliseWorkspace` | `(raw) => { id, description, initialized, folderPath, notes }` | Normalises workspace objects. `notes` maps `raw.Notes ?? raw.notes ?? ''`. |
+| `normaliseNotesResponse` | `(response) => { projects: Array<{ projectId, projectName, workspaces: Array<{ workspaceId, notes }> }> }` | Transforms the PascalCase `GET /api/notes` response into a camelCase structure grouped by project. |
 
 ```
 ###  Path: `/docs/agents/project-manifest/constraints.md`
@@ -1292,14 +1305,15 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 | `#/repositories` | `repositories.js` | Repository CRUD table. Each row's **Name** column renders as a clickable `<a class="repo-name-display repo-name-link">` element linking to `#/repositories/${encodeURIComponent(repo.id)}`. Clicking Edit switches the Name cell to an inline `<input>` for in-place editing; Save/Cancel restore the link with updated or original text. |
 | `#/repositories/:id` | `repository-detail.js` | Repository overview: table of every workspace across every project that contains the given repository. Each row shows Project (link to `#/projects/:pid`), Workspace (link to `#/projects/:pid/workspaces/:wid`), and the shared Branch/Status/Actions cells from `buildRepoStatusCells`. STABLE workspace rows show plain-text branch names; all other rows have a clickable branch-switch trigger. A "Refresh" button re-discovers the full project/workspace set (calls `api.projects.list()` + the full fan-out) and diffs against the existing rows: new rows are appended, removed rows are dropped, and existing rows are updated in-place via `api.status.refresh()` — protected by a `refreshInProgress` mutex. A 404 response for the repository renders a "not found" message with a link back to `#/repositories`. An empty-state message is shown when no projects contain the repository. Individual project/workspace fetch failures are handled gracefully via `Promise.allSettled` — partial results are displayed and a warning toast is shown when any fetch failed. The webserver URL is fetched once during initial load; the "Browse" button is shown only when `webserverUrl` is configured. `buildRepoStatusCells` is called with an `onError` callback (`(msg) => showToast(msg, 'error')`) so Git GUI button failures are surfaced as toasts without a dynamic `import('./toast.js')` inside the component. |
 | `#/projects/:id` | `project-detail.js` | Project metadata, tabbed repo/workspace/danger-zone management. The workspace table includes a **Health** column: initialized workspaces with health issues show a warning badge with issue count; healthy and uninitialized workspaces show an empty cell. Health is fetched in parallel with status for all initialized workspaces via `Promise.allSettled` (graceful degradation — fetch failures leave the health cell empty). |
-| `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with countdown-based polling and manual refresh. Health report fetched in parallel on initial load and on every poll/refresh cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix buttons (`Regenerate File` for `regenerate-workspace-file` issues, `Fix Setup` for `setup-workspace` issues). The header management row includes an **"Open in VS Code"** button (shown only when `workspace.initialized` is `true`; dynamically inserted after a successful Setup without a full re-render). The repository status table has a 4th **"Actions"** column; each repository row contains a **"Browse"** button (shown only when `webserverUrl` is configured, opens `{webserverUrl}/{projectId}/{workspaceId}/{repoId}/` in a new tab via `window.open`) followed by a **"Git GUI"** button that calls `api.workspaces.launch.githubDesktop()`. The webserver URL is fetched once during the initial data load (in parallel with other requests) via `api.config.webserverUrl.get()`. In non-STABLE workspaces, each **Branch** cell is a clickable trigger (`<button class="branch-switch-trigger">`) that opens an inline quick-switch popover via `showBranchQuickSwitch()`. STABLE workspace branch cells remain plain text. `buildRepoStatusCells` is called with an `onError` callback so Git GUI button failures show as toasts. DOM clearing uses `clearElement()` from `utils/dom.js` throughout (no `innerHTML = ''` assignments). |
+| `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with countdown-based polling and manual refresh. Health report fetched in parallel on initial load and on every poll/refresh cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix buttons (`Regenerate File` for `regenerate-workspace-file` issues, `Fix Setup` for `setup-workspace` issues). The header management row includes an **"Open in VS Code"** button (shown only when `workspace.initialized` is `true`; dynamically inserted after a successful Setup without a full re-render). The repository status table has a 4th **"Actions"** column; each repository row contains a **"Browse"** button (shown only when `webserverUrl` is configured, opens `{webserverUrl}/{projectId}/{workspaceId}/{repoId}/` in a new tab via `window.open`) followed by a **"Git GUI"** button that calls `api.workspaces.launch.githubDesktop()`. The webserver URL is fetched once during the initial data load (in parallel with other requests) via `api.config.webserverUrl.get()`. In non-STABLE workspaces, each **Branch** cell is a clickable trigger (`<button class="branch-switch-trigger">`) that opens an inline quick-switch popover via `showBranchQuickSwitch()`. STABLE workspace branch cells remain plain text. `buildRepoStatusCells` is called with an `onError` callback so Git GUI button failures show as toasts. DOM clearing uses `clearElement()` from `utils/dom.js` throughout (no `innerHTML = ''` assignments). A **Notes** section (built by `buildNotesSection()`) is appended below the repository status table: it contains a `<textarea id="workspace-notes-textarea">` pre-populated from `workspace.notes`, a 1000 ms debounced `input` listener that calls `api.workspaces.update()`, and an `aria-live="polite"` status span that shows "Saving…" / "Saved" / "Save failed." feedback. |
 | `#/projects/:id/workspaces/:wid/branch-switch` | `branch-switch.js` | 3-step branch switch wizard. |
 | `#/settings` | `settings.js` | Settings view with three sections: **Git Credentials** (add/delete per-host PATs), **Repositories Refresh Delay** (configurable `gitPollingIntervalSeconds`), and **Webserver URL** (base URL of the local webserver; enables the "Browse" button in the workspace-detail view). All non-credentials sections share a single **"Save Settings"** footer button that calls each section's `save()` function in parallel. |
 | `#/error-log` | `error-log.js` | Paginated, filterable error log table with expandable detail rows and "Clear All" action. |
+| `#/notes` | `notes-collected.js` | Two-panel notes view: a left sidebar listing all workspaces grouped by collapsible project groups (workspaces with notes carry a `.has-notes` class and a blue dot indicator), and a right scrollable main panel of editable note cards. On initial load only workspaces with non-empty notes show cards. Clicking a sidebar item for a workspace with a card scrolls the main panel to it; clicking one without a card creates a new empty card and focuses the textarea. Each card header contains a clickable workspace ID link to `#/projects/:pid/workspaces/:wid`. Textareas auto-save after 1000 ms of inactivity via `api.workspaces.update()`; saving empty text removes the card and clears the sidebar indicator. A `.notes-empty-state` message is shown when no cards are present. |
 
 ## API Client
 
-`api.js` exports a namespaced `api` object with six groups:
+`api.js` exports a namespaced `api` object with eight top-level groups:
 
 - `api.repositories` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `delete(id)`
 - `api.projects` — `list()`, `get(id)`, `create(data)`, `update(id, data)`, `rename(id, newId)`, `delete(id)`, `addRepository(pid, rid)`, `removeRepository(pid, rid)`
@@ -1310,6 +1324,7 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 - `api.config.polling` — `get()`, `set(seconds)`
 - `api.config.webserverUrl` — `get()`, `set(url)`
 - `api.errorLog` — `list(params?)`, `get(id)`, `clear()`, `count()`
+- `api.notes` — `list()`
 
 ### `api.workspaces` — Health & File Methods
 
@@ -1436,7 +1451,7 @@ Cells are located by CSS class (`.repo-branch-cell`) and badge wrapper attribute
 
 | Utility | File | Export | Purpose |
 |---|---|---|---|
-| Normalise | `utils/normalise.js` | `normaliseRepo()`, `normaliseProject()`, `normaliseWorkspace()` | Maps PascalCase backend keys to camelCase frontend keys. `normaliseWorkspace` now includes `folderPath` (from `FolderPath` in the API response). |
+| Normalise | `utils/normalise.js` | `normaliseRepo()`, `normaliseProject()`, `normaliseWorkspace()`, `normaliseNotesResponse()` | Maps PascalCase backend keys to camelCase frontend keys. `normaliseWorkspace` includes `folderPath` (from `FolderPath`) and `notes` (from `Notes ?? notes ?? ''`). `normaliseNotesResponse()` transforms the `GET /api/notes` PascalCase response into a camelCase `{ projects: [...] }` structure. |
 | Constants | `utils/constants.js` | `STABLE_WS_ID`, `APP_NAME_SHORT` | Shared GUI constants. `STABLE_WS_ID = 'STABLE'` is the canonical definition; `APP_NAME_SHORT = 'Paralizer'` is the short app name used in browser tab titles. Import from here instead of hardcoding the strings in views. |
 | DOM | `utils/dom.js` | `clearElement(el)` | DOM utility — removes all children from an element via `removeChild` loop (preferred over `innerHTML = ''`). |
 
@@ -1496,6 +1511,38 @@ The workspace detail view (`#/projects/:id/workspaces/:wid`) renders live git st
 - **Per-repo quick branch switch:** In non-STABLE workspaces, each branch cell in the status table renders a `<button class="branch-switch-trigger">` (styled as inline text with a dotted underline). Clicking it expands an inline popover via `showBranchQuickSwitch()` (dynamically imported from `components/branch-quick-switch.js`), anchored below the clicked cell. The popover shows a filterable list of local branches and a text input pre-filled with the current branch; confirming calls `api.branches.switch()` with a single-entry assignment and triggers `doRefresh()`. STABLE workspace branch cells are plain text with no click behaviour. Both `buildStatusTableSection()` and the inlined polling-update loop receive `isStable` and `onBranchCellClick` parameters so polling updates preserve the clickable style.
 - **Repo status cells:** The Branch, Status badge, and Actions `<td>` cells for each repository row are built and updated via `buildRepoStatusCells()` and `updateRepoStatusCells()` from `components/repo-status-cells.js`. These functions locate cells by CSS class (`.repo-branch-cell`, `div[data-repo-id]`) rather than by hardcoded cell indices, so additional cells can be prepended to a row without breaking polling updates.
 - **Cleanup contract:** The returned cleanup function clears the 1-second countdown interval.
+- **Notes section:** Appended below the repository status table by `buildNotesSection(initialNotes, onSave)`. See [`buildNotesSection()`](#buildnotessection) below.
+
+#### `buildNotesSection(initialNotes, onSave)`
+
+Builds a `<section class="workspace-notes-section">` containing a labelled textarea and a debounced auto-save mechanism. Internal helper — not exported from `workspace-detail.js`.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `initialNotes` | `string` | Pre-populated value from `workspace.notes`; written directly to `textarea.value`. |
+| `onSave` | `(notes: string) => Promise<void>` | Called with the current textarea value after a 1000 ms debounce. Should persist the notes (typically `api.workspaces.update(projectId, wid, { notes })`). |
+
+**Returns:** `HTMLElement` — the `<section>` element ready to be appended to the view container.
+
+**DOM structure:**
+
+```
+<section class="workspace-notes-section">
+  <label for="workspace-notes-textarea" class="workspace-notes-label">Notes</label>
+  <textarea id="workspace-notes-textarea" class="workspace-notes-textarea">…</textarea>
+  <span class="workspace-notes-status" aria-live="polite" hidden>…</span>
+</section>
+```
+
+**Layout:** `.workspace-notes-section` uses a CSS grid (`grid-template-columns: 1fr auto`): the Notes label (`.workspace-notes-label`) and save-status span (`.workspace-notes-status`) share row 1 — label left, status right-aligned — and the textarea spans both columns in row 2. This ensures the save-status indicator is always adjacent to the label rather than appearing below the textarea.
+
+**Behaviour:**
+
+- A `debounceTimer` (closure-scoped) is cleared and rescheduled on every `input` event; the `onSave` call fires after 1000 ms of inactivity.
+- Before `await onSave(...)`: sets `statusEl.textContent = 'Saving…'` and makes the span visible.
+- On success: sets `statusEl.textContent = 'Saved'`; hides the span after 3 seconds.
+- On error: sets `statusEl.textContent = 'Save failed.'` (span remains visible).
+- The `aria-live="polite"` attribute ensures screen readers announce status changes without interrupting current speech.
 
 ### Tabbed Navigation (Project Detail)
 
@@ -1563,12 +1610,27 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 | `GET` | `/api/projects/:id/workspaces` | 200 | 404 | List workspaces in a project. Response includes `Initialized` boolean and `FolderPath` string. |
 | `GET` | `/api/projects/:id/workspaces/:wid` | 200 | 404 | Get a single workspace. Response includes `Initialized` boolean and `FolderPath` string. |
 | `POST` | `/api/projects/:id/workspaces` | 201 | 400, 404 | Create workspace. Body: `{ id, description? }`. |
-| `PUT` | `/api/projects/:id/workspaces/:wid` | 200 | 400, 404 | Update workspace. Body: `{ Description? }`. |
+| `PUT` | `/api/projects/:id/workspaces/:wid` | 200 | 400, 404 | Update workspace description and/or notes. Body: `{ description?, notes? }` — at least one field required. 400 if neither field is present or body is not a valid JSON object. Response includes a `Notes` field on the returned `WorkspaceInfo`. |
 | `PUT` | `/api/projects/:id/workspaces/:wid/rename` | 200 | 400, 404 | Rename workspace. Body: `{ newId }`. |
 | `DELETE` | `/api/projects/:id/workspaces/:wid` | 204 | 404 | Delete workspace (STABLE cannot be deleted). |
 | `POST` | `/api/projects/:id/workspaces/:wid/setup` | 200 | 400, 404, 500 | Initialize workspace on disk (clone repos, generate .code-workspace file). |
 | `POST` | `/api/projects/:id/workspaces/:wid/regenerate-workspace-file` | 200 | 400, 404, 500 | Regenerate the `.code-workspace` file from the current repository list without cloning. Workspace folder must already exist on disk (400 if absent). Body: none. Response: `{ success: true }`. |
 | `GET` | `/api/projects/:id/workspaces/:wid/health` | 200 | 404 | Fetch the health report for a workspace. Returns `{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }`. Uninitialized workspaces return `{ healthy: true, issues: [] }`. 404 if project or workspace ID is unknown. |
+
+### `PUT /api/projects/:id/workspaces/:wid` — Request Body
+
+At least one field is required. Both fields may be sent together.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `description` | `string` | No | Human-readable description for the workspace. |
+| `notes` | `string` | No | Free-text notes for the workspace. |
+
+**400 cases:**
+- Body is not a valid JSON object.
+- Body contains neither a `description` nor a `notes` field (or both values are non-string types).
+
+**200 Response:** the full updated `WorkspaceInfo` object, including the `Notes` field (always present as a string; empty string `""` when no notes have been set).
 
 ---
 
@@ -1838,6 +1900,39 @@ Returns `null` when not configured:
 { "webserverUrl": null }
 ```
 
+---
+
+## Notes
+
+Aggregate endpoint that returns the `Notes` field for every workspace across all projects in a single request. Intended for use by the GUI to display workspace notes without fetching individual workspace records.
+
+| Method | Path | Success | Error Codes | Description |
+|---|---|---|---|---|
+| `GET` | `/api/notes` | 200 | 500 | Return all workspace notes grouped by project. |
+
+**Behaviour:**
+- All projects and all their workspaces are always included unconditionally — there is no filtering by project or workspace.
+- Workspaces with no notes stored have `Notes: ""` in the response.
+- Returns `{ Projects: [] }` when no projects exist.
+- Returns `500` if reading from storage fails (file I/O error, JSON parse failure, etc.).
+
+### `GET /api/notes` Response Shape
+
+```json
+{
+    "Projects": [
+        {
+            "ProjectId": "my-project",
+            "ProjectName": "My Project",
+            "Workspaces": [
+                { "WorkspaceId": "STABLE", "Notes": "" },
+                { "WorkspaceId": "DEV",    "Notes": "some notes" }
+            ]
+        }
+    ]
+}
+```
+
 ```
 ###  Path: `/docs/agents/project-manifest/tech-stack.md`
 
@@ -1879,6 +1974,18 @@ Returns `null` when not configured:
 |---|---|---|
 | Git | >= 2.28 | All repository operations — spawned via `child_process.spawn()` with `shell: false` |
 | npm | >= 9 | Package management |
+
+## GUI Browser Requirements
+
+The web GUI uses `color-mix()` (CSS Color Level 5) in `gui/public/css/styles.css` for focus-state background blending. The following minimum browser versions are required:
+
+| Browser | Minimum version |
+|---|---|
+| Chromium / Chrome / Edge | 111 |
+| Firefox | 113 |
+| Safari | 16.2 |
+
+> The tool targets single-developer local use; no legacy browser support is intended.
 
 ## Architectural Patterns
 
@@ -1966,6 +2073,6 @@ Both scripts `cd` to their own directory before invoking `node dist/index.js men
 ```
 ---
 **File Statistics**
-- **Size**: 93.65 KB
-- **Lines**: 1936
+- **Size**: 104.72 KB
+- **Lines**: 2065
 File: `project-manifest.md`
