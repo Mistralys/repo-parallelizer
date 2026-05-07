@@ -747,6 +747,60 @@ function buildHealthAlertSection(healthReport, callbacks) {
 }
 
 // ---------------------------------------------------------------------------
+// Notes section builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the Notes textarea section with debounced auto-save and status indicator.
+ *
+ * @param {string} initialNotes - Pre-populated notes value from the workspace.
+ * @param {function(string): Promise<void>} onSave - Called with the current
+ *   textarea value after the 1000 ms debounce; should persist the notes.
+ * @returns {HTMLElement}
+ */
+function buildNotesSection(initialNotes, onSave) {
+    const section = document.createElement('section');
+    section.className = 'workspace-notes-section';
+
+    const label = document.createElement('label');
+    label.htmlFor = 'workspace-notes-textarea';
+    label.className = 'workspace-notes-label';
+    label.textContent = 'Notes';
+    section.appendChild(label);
+
+    const textarea = document.createElement('textarea');
+    textarea.id = 'workspace-notes-textarea';
+    textarea.className = 'workspace-notes-textarea';
+    textarea.value = initialNotes;
+    section.appendChild(textarea);
+
+    const statusEl = document.createElement('span');
+    statusEl.className = 'workspace-notes-status';
+    statusEl.setAttribute('aria-live', 'polite');
+    statusEl.hidden = true;
+    section.appendChild(statusEl);
+
+    let debounceTimer = null;
+
+    textarea.addEventListener('input', () => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(async () => {
+            statusEl.textContent = 'Saving\u2026';
+            statusEl.hidden = false;
+            try {
+                await onSave(textarea.value);
+                statusEl.textContent = 'Saved';
+                setTimeout(() => { statusEl.hidden = true; }, 3000);
+            } catch {
+                statusEl.textContent = 'Save failed.';
+            }
+        }, 1000);
+    });
+
+    return section;
+}
+
+// ---------------------------------------------------------------------------
 // Public view entry point
 // ---------------------------------------------------------------------------
 
@@ -1128,6 +1182,11 @@ export function renderWorkspaceDetail(container, params) {
         if (!isStable) {
             container.appendChild(buildSwitchBranchesButton(projectId, wid));
         }
+
+        // Notes section — always shown below the status table.
+        container.appendChild(buildNotesSection(workspace.notes, async (notes) => {
+            await api.workspaces.update(projectId, wid, { notes });
+        }));
 
         // Start polling countdown when there are repos to update.
         if (tbody && repos.length > 0) {

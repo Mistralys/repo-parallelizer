@@ -13,6 +13,7 @@
  *   #/projects/:id/workspaces/:wid/branch-switch → Branch Switch       (WP-017)
  *   #/settings                                   → Settings            (WP-009)
  *   #/error-log                                  → Error Log           (WP-011)
+ *   #/notes                                      → Notes Collected     (WP-008)
  */
 
 import { Router }                                        from './router.js';
@@ -24,6 +25,7 @@ import { renderWorkspaceDetail, setRouter as setWorkspaceDetailRouter } from './
 import { renderBranchSwitch, setRouter as setBranchSwitchRouter } from './views/branch-switch.js';
 import { renderSettings }                                from './views/settings.js';
 import { renderErrorLog }                                from './views/error-log.js';
+import { renderNotesCollected }                          from './views/notes-collected.js';
 import { createThemeToggle }                             from './components/theme-toggle.js';
 import { initNavHighlight }                              from './utils/nav-highlight.js';
 import { initNavBadge }                                  from './components/nav-badge.js';
@@ -65,6 +67,9 @@ router.register('#/settings', renderSettings);
 
 // Error Log (WP-011)
 router.register('#/error-log', renderErrorLog);
+
+// Notes Collected (WP-008)
+router.register('#/notes', renderNotesCollected);
 
 // ---------------------------------------------------------------------------
 // Theme toggle — apply saved theme before first render to avoid flash
