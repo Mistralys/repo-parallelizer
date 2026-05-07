@@ -104,7 +104,7 @@ async function flushAsync(): Promise<void> {
 
 function makeWsInfo(projectId: string, wsId: string): WorkspaceInfo {
     const now = new Date().toISOString();
-    return { ProjectID: projectId, WorkspaceID: wsId, Description: '', DateCreated: now, DateModified: now };
+    return { ProjectID: projectId, WorkspaceID: wsId, Description: '', DateCreated: now, DateModified: now, Notes: '' };
 }
 
 class MockWorkspaceManager {

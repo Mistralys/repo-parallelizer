@@ -74,6 +74,7 @@ function makeDefaultWorkspaceManager(): WorkspaceManager {
                     Description: '',
                     DateCreated: '',
                     DateModified: '',
+                    Notes: '',
                 };
             }
             return undefined;

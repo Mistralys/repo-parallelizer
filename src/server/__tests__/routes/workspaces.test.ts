@@ -63,6 +63,7 @@ interface StoredWorkspace {
     Description: string;
     DateCreated: string;
     DateModified: string;
+    Notes: string;
 }
 
 interface StoredProject {
@@ -71,7 +72,7 @@ interface StoredProject {
 
 function makeWsInfo(projectId: string, wsId: string, description = ''): WorkspaceInfo {
     const now = new Date().toISOString();
-    return { ProjectID: projectId, WorkspaceID: wsId, Description: description, DateCreated: now, DateModified: now };
+    return { ProjectID: projectId, WorkspaceID: wsId, Description: description, DateCreated: now, DateModified: now, Notes: '' };
 }
 
 class MockWorkspaceManager {
@@ -82,7 +83,7 @@ class MockWorkspaceManager {
         const now = new Date().toISOString();
         const workspaces: Record<string, StoredWorkspace> = {};
         for (const wsId of workspaceIds) {
-            workspaces[wsId] = { Description: '', DateCreated: now, DateModified: now };
+            workspaces[wsId] = { Description: '', DateCreated: now, DateModified: now, Notes: '' };
         }
         this.projects[projectId] = { workspaces };
     }
@@ -115,19 +116,20 @@ class MockWorkspaceManager {
             throw new Error(`A workspace with ID "${workspaceId}" already exists in project "${projectId}".`);
         }
         const now = new Date().toISOString();
-        project.workspaces[workspaceId] = { Description: description ?? '', DateCreated: now, DateModified: now };
+        project.workspaces[workspaceId] = { Description: description ?? '', DateCreated: now, DateModified: now, Notes: '' };
         return makeWsInfo(projectId, workspaceId, description ?? '');
     }
 
-    update(projectId: string, workspaceId: string, changes: { Description?: string }): WorkspaceInfo {
+    update(projectId: string, workspaceId: string, changes: { Description?: string; Notes?: string }): WorkspaceInfo {
         const project = this.requireProject(projectId, 'update workspace');
         const ws = project.workspaces[workspaceId];
         if (!ws) {
             throw new NotFoundError(`Cannot update: workspace "${workspaceId}" does not exist in project "${projectId}".`);
         }
         if (changes.Description !== undefined) ws.Description = changes.Description;
+        if (changes.Notes !== undefined) ws.Notes = changes.Notes;
         ws.DateModified = new Date().toISOString();
-        return makeWsInfo(projectId, workspaceId, ws.Description);
+        return { ...makeWsInfo(projectId, workspaceId, ws.Description), Notes: ws.Notes };
     }
 
     rename(projectId: string, oldId: string, newId: string): WorkspaceInfo {
@@ -302,6 +304,69 @@ test('GET /api/projects/:id/workspaces/:wid: returns 404 when project does not e
     router.handle(req, mock.res);
 
     assert.strictEqual(mock.statusCode, 404);
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/projects/:id/workspaces/:wid — update description and/or notes
+// ---------------------------------------------------------------------------
+
+test('PUT /api/projects/:id/workspaces/:wid: returns 200 and persists notes when only notes is provided', async () => {
+    const { router, wm } = buildSut();
+    wm.seedProject('proj-a', ['STABLE', 'DEV']);
+
+    const req = mockRequest('PUT', '/api/projects/proj-a/workspaces/DEV', { notes: 'my notes' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as WorkspaceInfo;
+    assert.strictEqual(updated.Notes, 'my notes');
+    assert.strictEqual(updated.WorkspaceID, 'DEV');
+});
+
+test('PUT /api/projects/:id/workspaces/:wid: returns 200 when only description is provided', async () => {
+    const { router, wm } = buildSut();
+    wm.seedProject('proj-a', ['STABLE', 'DEV']);
+
+    const req = mockRequest('PUT', '/api/projects/proj-a/workspaces/DEV', { description: 'desc only' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as WorkspaceInfo;
+    assert.strictEqual(updated.Description, 'desc only');
+    assert.strictEqual(updated.WorkspaceID, 'DEV');
+});
+
+test('PUT /api/projects/:id/workspaces/:wid: returns 200 and persists both fields when notes and description are provided', async () => {
+    const { router, wm } = buildSut();
+    wm.seedProject('proj-a', ['STABLE', 'DEV']);
+
+    const req = mockRequest('PUT', '/api/projects/proj-a/workspaces/DEV', { notes: 'both notes', description: 'both desc' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as WorkspaceInfo;
+    assert.strictEqual(updated.Notes, 'both notes');
+    assert.strictEqual(updated.Description, 'both desc');
+});
+
+test('PUT /api/projects/:id/workspaces/:wid: returns 400 when body is empty object', async () => {
+    const { router, wm } = buildSut();
+    wm.seedProject('proj-a', ['STABLE', 'DEV']);
+
+    const req = mockRequest('PUT', '/api/projects/proj-a/workspaces/DEV', {});
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 400);
+    const parsed = JSON.parse(mock.body) as { error: string };
+    assert.ok(typeof parsed.error === 'string');
 });
 
 // ---------------------------------------------------------------------------

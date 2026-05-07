@@ -122,6 +122,7 @@ class MockWorkspaceManager {
             Description: '',
             DateCreated: now,
             DateModified: now,
+            Notes: '',
         });
     }
 
