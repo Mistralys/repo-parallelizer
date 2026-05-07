@@ -36,6 +36,18 @@
 | Git | >= 2.28 | All repository operations — spawned via `child_process.spawn()` with `shell: false` |
 | npm | >= 9 | Package management |
 
+## GUI Browser Requirements
+
+The web GUI uses `color-mix()` (CSS Color Level 5) in `gui/public/css/styles.css` for focus-state background blending. The following minimum browser versions are required:
+
+| Browser | Minimum version |
+|---|---|
+| Chromium / Chrome / Edge | 111 |
+| Firefox | 113 |
+| Safari | 16.2 |
+
+> The tool targets single-developer local use; no legacy browser support is intended.
+
 ## Architectural Patterns
 
 ### Layered Architecture
