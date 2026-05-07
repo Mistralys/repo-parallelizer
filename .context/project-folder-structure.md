@@ -136,6 +136,7 @@
     │   ├── README.md
     │   ├── __tests__/
     │   │   ├── app-launcher.test.ts
+    │   │   ├── config.notes-display.test.ts
     │   │   ├── index.test.ts
     │   │   ├── pollingManager.errorLog.test.ts
     │   │   ├── pollingManager.test.ts
@@ -208,6 +209,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 7.58 KB
-- **Lines**: 214
+- **Size**: 7.64 KB
+- **Lines**: 215
 File: `project-folder-structure.md`

@@ -68,6 +68,8 @@ interface AppConfig {
     gitCredentials?: Record<string, string>; // hostname → PAT/password; absent = public repos only
     maxErrorLogEntries?: number;  // default: 500 — FIFO eviction cap for error log
     webserverUrl?: string;  // base URL of local webserver (e.g. http://localhost:8080); absent = Browse button hidden
+    notesCardHeight: number;  // height (px) of each note card; range [MIN_NOTES_CARD_HEIGHT, MAX_NOTES_CARD_HEIGHT]; default: DEFAULT_NOTES_CARD_HEIGHT (220)
+    notesColumns: number;     // column count in the notes view grid; range [MIN_NOTES_COLUMNS, MAX_NOTES_COLUMNS]; default: DEFAULT_NOTES_COLUMNS (2)
 }
 ```
 
@@ -878,6 +880,30 @@ api.config.polling.set(seconds)
 
 **Validation:** `set()` rejects with HTTP 400 when `seconds` is non-numeric, fractional, infinite, NaN, or below 10. On success the new interval is persisted to `config.json` and the live polling loop is restarted immediately.
 
+### `api.config.notesDisplay`
+
+Read and update the notes view display settings. Changes are persisted to `config.json` and take effect immediately.
+
+```js
+// Return the current notes display settings.
+// Returns: Promise<NotesDisplayConfig>  // { notesCardHeight: number, notesColumns: number }
+api.config.notesDisplay.get()
+
+// Update the notes display settings (partial update — all fields optional).
+// data: { notesCardHeight?: number, notesColumns?: number }
+// Returns: Promise<NotesDisplayConfig>  // full settings after applying changes
+api.config.notesDisplay.set(data)
+```
+
+**`NotesDisplayConfig` shape:**
+
+| Field | Type | Range | Default | Description |
+|---|---|---|---|---|
+| `notesCardHeight` | `number` | `[120, 800]` | `220` | Height of each note card in pixels. |
+| `notesColumns` | `number` | `[1, 6]` | `2` | Number of columns in the notes view grid. |
+
+**Validation:** `set()` rejects with HTTP 400 when a provided field is non-numeric, non-integer, or outside its allowed range. Omitting a field leaves its current value unchanged. An empty body `{}` is valid and returns the current settings unchanged.
+
 ---
 
 ## GUI Views (`gui/public/js/views/`)
@@ -1009,6 +1035,21 @@ The `gui/public/css/vendor/` directory contains CSS files copied from `node_modu
 |---|---|---|
 | `CLONE_TIMEOUT_MS` | 120,000 ms (2 min) | `cloneRepository()` via orchestrators |
 | `FETCH_TIMEOUT_MS` | 30,000 ms (30 sec) | `fetchRemote()` via polling and branch operations |
+
+## Config Validation Constants
+
+All validation bounds for `AppConfig` fields are defined in `src/config/config.constants.ts` and imported by route handlers. Route-level validation enforces integer-only values within these ranges; `loadConfig()` applies defaults but does not clamp out-of-range values.
+
+| Constant | Value | Field | Description |
+|---|---|---|---|
+| `MIN_POLLING_INTERVAL_SECONDS` | 10 | `gitPollingIntervalSeconds` | Minimum polling interval (seconds) |
+| `MAX_POLLING_INTERVAL_SECONDS` | 86,400 | `gitPollingIntervalSeconds` | Maximum polling interval (24 hours) |
+| `MIN_NOTES_CARD_HEIGHT` | 120 | `notesCardHeight` | Minimum note card height (px) |
+| `MAX_NOTES_CARD_HEIGHT` | 800 | `notesCardHeight` | Maximum note card height (px) |
+| `DEFAULT_NOTES_CARD_HEIGHT` | 220 | `notesCardHeight` | Default note card height (px) |
+| `MIN_NOTES_COLUMNS` | 1 | `notesColumns` | Minimum column count in the notes view grid |
+| `MAX_NOTES_COLUMNS` | 6 | `notesColumns` | Maximum column count in the notes view grid |
+| `DEFAULT_NOTES_COLUMNS` | 2 | `notesColumns` | Default column count in the notes view grid |
 
 ## Type-Audit Acceptance Criterion
 
@@ -1307,7 +1348,7 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 | `#/projects/:id` | `project-detail.js` | Project metadata, tabbed repo/workspace/danger-zone management. The workspace table includes a **Health** column: initialized workspaces with health issues show a warning badge with issue count; healthy and uninitialized workspaces show an empty cell. Health is fetched in parallel with status for all initialized workspaces via `Promise.allSettled` (graceful degradation — fetch failures leave the health cell empty). |
 | `#/projects/:id/workspaces/:wid` | `workspace-detail.js` | Live git status with countdown-based polling and manual refresh. Health report fetched in parallel on initial load and on every poll/refresh cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix buttons (`Regenerate File` for `regenerate-workspace-file` issues, `Fix Setup` for `setup-workspace` issues). The header management row includes an **"Open in VS Code"** button (shown only when `workspace.initialized` is `true`; dynamically inserted after a successful Setup without a full re-render). The repository status table has a 4th **"Actions"** column; each repository row contains a **"Browse"** button (shown only when `webserverUrl` is configured, opens `{webserverUrl}/{projectId}/{workspaceId}/{repoId}/` in a new tab via `window.open`) followed by a **"Git GUI"** button that calls `api.workspaces.launch.githubDesktop()`. The webserver URL is fetched once during the initial data load (in parallel with other requests) via `api.config.webserverUrl.get()`. In non-STABLE workspaces, each **Branch** cell is a clickable trigger (`<button class="branch-switch-trigger">`) that opens an inline quick-switch popover via `showBranchQuickSwitch()`. STABLE workspace branch cells remain plain text. `buildRepoStatusCells` is called with an `onError` callback so Git GUI button failures show as toasts. DOM clearing uses `clearElement()` from `utils/dom.js` throughout (no `innerHTML = ''` assignments). A **Notes** section (built by `buildNotesSection()`) is appended below the repository status table: it contains a `<textarea id="workspace-notes-textarea">` pre-populated from `workspace.notes`, a 1000 ms debounced `input` listener that calls `api.workspaces.update()`, and an `aria-live="polite"` status span that shows "Saving…" / "Saved" / "Save failed." feedback. |
 | `#/projects/:id/workspaces/:wid/branch-switch` | `branch-switch.js` | 3-step branch switch wizard. |
-| `#/settings` | `settings.js` | Settings view with three sections: **Git Credentials** (add/delete per-host PATs), **Repositories Refresh Delay** (configurable `gitPollingIntervalSeconds`), and **Webserver URL** (base URL of the local webserver; enables the "Browse" button in the workspace-detail view). All non-credentials sections share a single **"Save Settings"** footer button that calls each section's `save()` function in parallel. |
+| `#/settings` | `settings.js` | Settings view with four sections: **Git Credentials** (add/delete per-host PATs), **Repositories Refresh Delay** (configurable `gitPollingIntervalSeconds`), **Webserver URL** (base URL of the local webserver; enables the "Browse" button in the workspace-detail view), and **Notes Display** (card height in px and column count for the notes grid, backed by `GET/PUT /api/config/notes-display`). All non-credentials sections share a single **"Save Settings"** footer button that calls each section's `save()` function in parallel via `Promise.all()`. The Notes Display section is built by `buildNotesDisplaySection()`, which uses CSS classes `notes-display-section` (section wrapper), `notes-display-input-row` (flex row for label + input + unit), `notes-display-label` (label element), `notes-display-input` (number input), and `notes-display-unit` (unit span, e.g. "px"). |
 | `#/error-log` | `error-log.js` | Paginated, filterable error log table with expandable detail rows and "Clear All" action. |
 | `#/notes` | `notes-collected.js` | Two-panel notes view: a left sidebar listing all workspaces grouped by collapsible project groups (workspaces with notes carry a `.has-notes` class and a blue dot indicator), and a right scrollable main panel of editable note cards. On initial load only workspaces with non-empty notes show cards. Clicking a sidebar item for a workspace with a card scrolls the main panel to it; clicking one without a card creates a new empty card and focuses the textarea. Each card header contains a clickable workspace ID link to `#/projects/:pid/workspaces/:wid`. Textareas auto-save after 1000 ms of inactivity via `api.workspaces.update()`; saving empty text removes the card and clears the sidebar indicator. A `.notes-empty-state` message is shown when no cards are present. |
 
@@ -1323,6 +1364,7 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 - `api.config.credentials` — `list()`, `set(data)`, `delete(host)`
 - `api.config.polling` — `get()`, `set(seconds)`
 - `api.config.webserverUrl` — `get()`, `set(url)`
+- `api.config.notesDisplay` — `get()`, `set(data)`
 - `api.errorLog` — `list(params?)`, `get(id)`, `clear()`, `count()`
 - `api.notes` — `list()`
 
@@ -1902,6 +1944,60 @@ Returns `null` when not configured:
 
 ---
 
+## Notes Display (`/api/config/notes-display`)
+
+Read and update the notes view display settings at runtime, without a server restart. Changes take effect immediately (in-memory `appConfig` is mutated) and are persisted to `config.json` via `saveConfigField()`.
+
+| Method | Path | Success | Error Codes | Description |
+|---|---|---|---|---|
+| `GET` | `/api/config/notes-display` | 200 | — | Return the current notes display settings. |
+| `PUT` | `/api/config/notes-display` | 200 | 400 | Update notes display settings. Body: `{ notesCardHeight?, notesColumns? }` — all fields optional (partial update). |
+
+### Validation (PUT)
+
+All fields are optional. Omitting a field leaves the current value unchanged.
+
+| Field | Type | Range | Description |
+|---|---|---|---|
+| `notesCardHeight` | integer | `[120, 800]` | Height of each note card in pixels. |
+| `notesColumns` | integer | `[1, 6]` | Number of columns in the notes view grid. |
+
+**400 cases (per field, when provided):**
+- Value is not a number → `'Field "notesCardHeight" must be a number.'`
+- Value is not a finite integer (e.g. float, `NaN`, `Infinity`) → `'Field "notesCardHeight" must be a finite integer.'`
+- Value below minimum → `'Field "notesCardHeight" must be at least 120. Received: N.'`
+- Value above maximum → `'Field "notesCardHeight" must be at most 800. Received: N.'`
+- Body is not a valid JSON object → `'Request body must be a JSON object.'`
+
+Same error patterns apply to `notesColumns` (range `[1, 6]`).
+
+### `GET /api/config/notes-display` Response
+
+```json
+{ "notesCardHeight": 220, "notesColumns": 2 }
+```
+
+### `PUT /api/config/notes-display` Request / Response
+
+**Full update:**
+```json
+{ "notesCardHeight": 300, "notesColumns": 3 }
+```
+
+**Partial update (height only):**
+```json
+{ "notesCardHeight": 400 }
+```
+
+**Response** (always returns the full current settings after applying changes):
+```json
+{ "notesCardHeight": 400, "notesColumns": 2 }
+```
+
+> **Partial update semantics:** Fields absent from the request body are left unchanged. An empty body `{}` is valid — it returns the current settings with no modifications.
+
+---
+
 ## Notes
 
 Aggregate endpoint that returns the `Notes` field for every workspace across all projects in a single request. Intended for use by the GUI to display workspace notes without fetching individual workspace records.
@@ -2073,6 +2169,6 @@ Both scripts `cd` to their own directory before invoking `node dist/index.js men
 ```
 ---
 **File Statistics**
-- **Size**: 104.72 KB
-- **Lines**: 2065
+- **Size**: 110.59 KB
+- **Lines**: 2175
 File: `project-manifest.md`

@@ -25,6 +25,44 @@ export const MIN_POLLING_INTERVAL_SECONDS = 10;
  */
 export const MAX_POLLING_INTERVAL_SECONDS = 86_400;
 
+// ---------------------------------------------------------------------------
+// Notes view — card height
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimum card height (px) allowed in the notes view.
+ */
+export const MIN_NOTES_CARD_HEIGHT = 120;
+
+/**
+ * Maximum card height (px) allowed in the notes view.
+ */
+export const MAX_NOTES_CARD_HEIGHT = 800;
+
+/**
+ * Default card height (px) used in the notes view when not set by the user.
+ */
+export const DEFAULT_NOTES_CARD_HEIGHT = 220;
+
+// ---------------------------------------------------------------------------
+// Notes view — column count
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimum number of columns allowed in the notes view grid.
+ */
+export const MIN_NOTES_COLUMNS = 1;
+
+/**
+ * Maximum number of columns allowed in the notes view grid.
+ */
+export const MAX_NOTES_COLUMNS = 6;
+
+/**
+ * Default number of columns used in the notes view grid when not set by the user.
+ */
+export const DEFAULT_NOTES_COLUMNS = 2;
+
 ```
 ###  Path: `/src/config/config.ts`
 
@@ -33,13 +71,19 @@ import { chmodSync } from 'node:fs';
 import { getConfigPath } from '../utils/paths.js';
 import { readJsonFile, writeJsonFile, FileNotFoundError } from '../storage/json-storage.js';
 import type { AppConfig } from './config.types.js';
+import {
+    DEFAULT_NOTES_CARD_HEIGHT,
+    DEFAULT_NOTES_COLUMNS,
+} from './config.constants.js';
 
 const REQUIRED_FIELDS: ReadonlyArray<keyof AppConfig> = ['projectsFolder', 'storageFolder'];
 
-const DEFAULTS: Readonly<Pick<AppConfig, 'cloneDepth' | 'serverPort' | 'gitPollingIntervalSeconds'>> = {
+const DEFAULTS: Readonly<Pick<AppConfig, 'cloneDepth' | 'serverPort' | 'gitPollingIntervalSeconds' | 'notesCardHeight' | 'notesColumns'>> = {
     cloneDepth: 50,
     serverPort: 4200,
     gitPollingIntervalSeconds: 30,
+    notesCardHeight: DEFAULT_NOTES_CARD_HEIGHT,
+    notesColumns: DEFAULT_NOTES_COLUMNS,
 };
 
 /**
@@ -93,6 +137,8 @@ export function loadConfig(configPath?: string): AppConfig {
         webserverUrl: typeof raw['webserverUrl'] === 'string' && raw['webserverUrl'].trim() !== ''
             ? raw['webserverUrl'].trim().replace(/\/+$/, '')
             : undefined,
+        notesCardHeight: typeof raw['notesCardHeight'] === 'number' ? raw['notesCardHeight'] : DEFAULTS.notesCardHeight,
+        notesColumns: typeof raw['notesColumns'] === 'number' ? raw['notesColumns'] : DEFAULTS.notesColumns,
     };
 }
 
@@ -235,11 +281,25 @@ export interface AppConfig {
      * Leave empty or omit to hide the Browse button entirely.
      */
     webserverUrl?: string;
+
+    /**
+     * Height (in pixels) of each note card in the notes view.
+     * Must be between {@link MIN_NOTES_CARD_HEIGHT} and {@link MAX_NOTES_CARD_HEIGHT}.
+     * @default DEFAULT_NOTES_CARD_HEIGHT
+     */
+    notesCardHeight: number;
+
+    /**
+     * Number of columns displayed in the notes view grid.
+     * Must be between {@link MIN_NOTES_COLUMNS} and {@link MAX_NOTES_COLUMNS}.
+     * @default DEFAULT_NOTES_COLUMNS
+     */
+    notesColumns: number;
 }
 
 ```
 ---
 **File Statistics**
-- **Size**: 7.82 KB
-- **Lines**: 246
+- **Size**: 9.75 KB
+- **Lines**: 306
 File: `modules/config/architecture-core.md`

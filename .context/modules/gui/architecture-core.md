@@ -112,6 +112,18 @@ async function request(method, url, body) {
  * @property {Array}    [repositories]  - Array of associated repository objects (lowercase key).
  */
 
+/**
+ * Response shape for the notes display configuration endpoints
+ * (`GET /api/config/notes-display` and `PUT /api/config/notes-display`).
+ *
+ * Both fields are always present in the response. `PUT` responses reflect
+ * the full current settings after applying any changes from the request body.
+ *
+ * @typedef {Object} NotesDisplayConfig
+ * @property {number} notesCardHeight - Height of each note card in pixels. Range: [120, 800]. Default: 220.
+ * @property {number} notesColumns    - Number of columns in the notes view grid. Range: [1, 6]. Default: 2.
+ */
+
 // ---------------------------------------------------------------------------
 // API namespaces
 // ---------------------------------------------------------------------------
@@ -675,6 +687,31 @@ const config = {
             return request('PUT', '/api/config/webserver-url', { url });
         },
     },
+
+    notesDisplay: {
+        /**
+         * Get the current notes display settings.
+         *
+         * @returns {Promise<NotesDisplayConfig>} The stored notes display configuration.
+         */
+        get() {
+            return request('GET', '/api/config/notes-display');
+        },
+
+        /**
+         * Update the notes display settings.
+         *
+         * All fields are optional — omitting a field leaves its current value
+         * unchanged. An empty body `{}` is valid and returns the current settings
+         * with no modifications.
+         *
+         * @param {{ notesCardHeight?: number, notesColumns?: number }} data - Display settings to persist.
+         * @returns {Promise<NotesDisplayConfig>} The full updated notes display configuration.
+         */
+        set(data) {
+            return request('PUT', '/api/config/notes-display', data);
+        },
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -1122,6 +1159,6 @@ export class Router {
 ```
 ---
 **File Statistics**
-- **Size**: 35.78 KB
-- **Lines**: 1128
+- **Size**: 37.2 KB
+- **Lines**: 1165
 File: `modules/gui/architecture-core.md`
