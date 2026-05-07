@@ -168,3 +168,84 @@ test('api.config.polling.set(86400) succeeds at the maximum boundary', async () 
     assert.equal(calls[0].body.seconds, 86400);
     assert.deepEqual(result, expected);
 });
+
+// ---------------------------------------------------------------------------
+// api.config.notesDisplay structure
+// ---------------------------------------------------------------------------
+
+test('api.config.notesDisplay is exported as part of the api object', () => {
+    assert.ok(api.config, 'api.config should exist');
+    assert.ok(api.config.notesDisplay, 'api.config.notesDisplay should exist');
+    assert.equal(typeof api.config.notesDisplay.get, 'function', 'api.config.notesDisplay.get should be a function');
+    assert.equal(typeof api.config.notesDisplay.set, 'function', 'api.config.notesDisplay.set should be a function');
+});
+
+// ---------------------------------------------------------------------------
+// api.config.notesDisplay.get()
+// ---------------------------------------------------------------------------
+
+test('api.config.notesDisplay.get() sends GET /api/config/notes-display and returns the parsed response', async () => {
+    const expected = { showEmptyNotes: true, sortOrder: 'alpha' };
+    nextResponse = { status: 200, body: expected, contentType: 'application/json' };
+
+    const result = await api.config.notesDisplay.get();
+
+    assert.equal(calls.length, 1, 'exactly one fetch call expected');
+    assert.equal(calls[0].method, 'GET');
+    assert.equal(calls[0].url, '/api/config/notes-display');
+    assert.deepEqual(result, expected);
+});
+
+test('api.config.notesDisplay.get() throws when response is not ok', async () => {
+    nextResponse = { status: 500, body: { error: 'Internal Server Error' }, contentType: 'application/json' };
+
+    await assert.rejects(
+        () => api.config.notesDisplay.get(),
+        (err) => {
+            assert.ok(err instanceof Error, 'should throw an Error');
+            return true;
+        },
+    );
+});
+
+// ---------------------------------------------------------------------------
+// api.config.notesDisplay.set()
+// ---------------------------------------------------------------------------
+
+test('api.config.notesDisplay.set(data) sends PUT /api/config/notes-display with the provided data', async () => {
+    const payload = { showEmptyNotes: false, sortOrder: 'recent' };
+    const expected = { showEmptyNotes: false, sortOrder: 'recent' };
+    nextResponse = { status: 200, body: expected, contentType: 'application/json' };
+
+    await api.config.notesDisplay.set(payload);
+
+    assert.equal(calls.length, 1, 'exactly one fetch call expected');
+    assert.equal(calls[0].method, 'PUT');
+    assert.equal(calls[0].url, '/api/config/notes-display');
+    assert.deepEqual(calls[0].body, payload);
+});
+
+test('api.config.notesDisplay.set(data) returns the updated config on success', async () => {
+    const expected = { showEmptyNotes: true, sortOrder: 'alpha' };
+    nextResponse = { status: 200, body: expected, contentType: 'application/json' };
+
+    const result = await api.config.notesDisplay.set(expected);
+
+    assert.deepEqual(result, expected);
+});
+
+test('api.config.notesDisplay.set(data) throws when response is not ok', async () => {
+    nextResponse = {
+        status: 400,
+        body: { error: 'Invalid display settings payload.' },
+        contentType: 'application/json',
+    };
+
+    await assert.rejects(
+        () => api.config.notesDisplay.set({ invalid: true }),
+        (err) => {
+            assert.ok(err instanceof Error, 'should throw an Error');
+            return true;
+        },
+    );
+});

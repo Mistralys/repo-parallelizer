@@ -259,8 +259,13 @@ export async function renderNotesCollected(container, _params) {
     container.appendChild(loadingEl);
 
     let rawResponse;
+    /** @type {{ notesColumns?: number, notesCardHeight?: number }} */
+    let displaySettings;
     try {
-        rawResponse = await api.notes.list();
+        [rawResponse, displaySettings] = await Promise.all([
+            api.notes.list(),
+            api.config.notesDisplay.get().catch(() => ({})),
+        ]);
     } catch (err) {
         container.removeChild(loadingEl);
         showToast(`Failed to load notes: ${err.message}`, 'error');
@@ -291,6 +296,17 @@ export async function renderNotesCollected(container, _params) {
     // ---- Main panel ----
     const mainPanel = document.createElement('div');
     mainPanel.className = 'notes-main';
+
+    // Apply display settings from API (gracefully degrade if fetch failed).
+    if (displaySettings.notesColumns) {
+        mainPanel.style.gridTemplateColumns = `repeat(${displaySettings.notesColumns}, 1fr)`;
+    }
+    if (displaySettings.notesCardHeight) {
+        // notesCardHeight is always an integer (pixels) per the NotesDisplayConfig typedef
+        // (see api.js — @property {number} notesCardHeight, range 120–800), so appending
+        // 'px' unconditionally is safe. If the API contract changes to include units, remove the suffix.
+        mainPanel.style.setProperty('--notes-card-height', `${displaySettings.notesCardHeight}px`);
+    }
 
     // Forward-declare sidebar so handlers can reference it after assignment.
     /** @type {HTMLElement} */

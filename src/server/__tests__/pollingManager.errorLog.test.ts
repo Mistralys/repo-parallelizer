@@ -32,6 +32,8 @@ const BASE_CONFIG: AppConfig = {
     cloneDepth: 50,
     serverPort: 4200,
     gitPollingIntervalSeconds: 30,
+    notesCardHeight: 220,
+    notesColumns: 2,
 };
 
 function makeStatus(branch = 'main'): GitStatusInfo {

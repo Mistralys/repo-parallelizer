@@ -9,6 +9,10 @@ import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUti
 import {
     MIN_POLLING_INTERVAL_SECONDS,
     MAX_POLLING_INTERVAL_SECONDS,
+    MIN_NOTES_CARD_HEIGHT,
+    MAX_NOTES_CARD_HEIGHT,
+    MIN_NOTES_COLUMNS,
+    MAX_NOTES_COLUMNS,
 } from '../../config/config.constants.js';
 
 // ---------------------------------------------------------------------------
@@ -92,6 +96,13 @@ export interface ConfigRoutesOptions {
  * |--------|------------------------------|------------------------------------------|
  * | GET    | /api/config/webserver-url    | Return current `webserverUrl` (or null)  |
  * | PUT    | /api/config/webserver-url    | Update the webserver URL                 |
+ *
+ * **Notes display endpoints:**
+ *
+ * | Method | Path                          | Description                                                                                                         |
+ * |--------|-------------------------------|---------------------------------------------------------------------------------------------------------------------|
+ * | GET    | /api/config/notes-display     | Return current `notesCardHeight` and `notesColumns`                                                                 |
+ * | PUT    | /api/config/notes-display     | Update notes display settings (partial updates — all fields optional). Fields: `notesCardHeight` ∈ [120, 800] (integer px), `notesColumns` ∈ [1, 6] (integer) |
  *
  * Changes take effect immediately (the in-memory `appConfig` is mutated) and
  * are persisted to `config.json` via `saveConfigField()`.
@@ -353,5 +364,121 @@ export function registerConfigRoutes(options: ConfigRoutesOptions): void {
         saveConfigField('webserverUrl', cleanUrl, configPath);
 
         sendJson(res, 200, { webserverUrl: appConfig.webserverUrl ?? null });
+    });
+
+    // ------------------------------------------------------------------
+    // GET /api/config/notes-display — return current notes display settings
+    // ------------------------------------------------------------------
+    router.get('/api/config/notes-display', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): void => {
+        sendJson(res, 200, {
+            notesCardHeight: appConfig.notesCardHeight,
+            notesColumns: appConfig.notesColumns,
+        });
+    });
+
+    // ------------------------------------------------------------------
+    // PUT /api/config/notes-display — update notes display settings
+    // Accepts partial updates: only provided fields are modified.
+    // Validates: notesCardHeight ∈ [MIN_NOTES_CARD_HEIGHT, MAX_NOTES_CARD_HEIGHT]
+    //            notesColumns    ∈ [MIN_NOTES_COLUMNS,    MAX_NOTES_COLUMNS]
+    // ------------------------------------------------------------------
+    router.put('/api/config/notes-display', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): Promise<void> => {
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { notesCardHeight, notesColumns } = body as {
+            notesCardHeight?: unknown;
+            notesColumns?: unknown;
+        };
+
+        // Validate notesCardHeight if provided.
+        if (notesCardHeight !== undefined) {
+            if (typeof notesCardHeight !== 'number') {
+                sendError(res, 400, 'Field "notesCardHeight" must be a number.');
+                return;
+            }
+            if (!Number.isFinite(notesCardHeight) || !Number.isInteger(notesCardHeight)) {
+                sendError(res, 400, 'Field "notesCardHeight" must be a finite integer.');
+                return;
+            }
+            if (notesCardHeight < MIN_NOTES_CARD_HEIGHT) {
+                sendError(
+                    res,
+                    400,
+                    `Field "notesCardHeight" must be at least ${MIN_NOTES_CARD_HEIGHT}. Received: ${notesCardHeight}.`,
+                );
+                return;
+            }
+            if (notesCardHeight > MAX_NOTES_CARD_HEIGHT) {
+                sendError(
+                    res,
+                    400,
+                    `Field "notesCardHeight" must be at most ${MAX_NOTES_CARD_HEIGHT}. Received: ${notesCardHeight}.`,
+                );
+                return;
+            }
+        }
+
+        // Validate notesColumns if provided.
+        if (notesColumns !== undefined) {
+            if (typeof notesColumns !== 'number') {
+                sendError(res, 400, 'Field "notesColumns" must be a number.');
+                return;
+            }
+            if (!Number.isFinite(notesColumns) || !Number.isInteger(notesColumns)) {
+                sendError(res, 400, 'Field "notesColumns" must be a finite integer.');
+                return;
+            }
+            if (notesColumns < MIN_NOTES_COLUMNS) {
+                sendError(
+                    res,
+                    400,
+                    `Field "notesColumns" must be at least ${MIN_NOTES_COLUMNS}. Received: ${notesColumns}.`,
+                );
+                return;
+            }
+            if (notesColumns > MAX_NOTES_COLUMNS) {
+                sendError(
+                    res,
+                    400,
+                    `Field "notesColumns" must be at most ${MAX_NOTES_COLUMNS}. Received: ${notesColumns}.`,
+                );
+                return;
+            }
+        }
+
+        // Apply and persist only the fields that were provided.
+        if (notesCardHeight !== undefined) {
+            appConfig.notesCardHeight = notesCardHeight;
+            saveConfigField('notesCardHeight', notesCardHeight, configPath);
+        }
+
+        if (notesColumns !== undefined) {
+            appConfig.notesColumns = notesColumns;
+            saveConfigField('notesColumns', notesColumns, configPath);
+        }
+
+        sendJson(res, 200, {
+            notesCardHeight: appConfig.notesCardHeight,
+            notesColumns: appConfig.notesColumns,
+        });
     });
 }

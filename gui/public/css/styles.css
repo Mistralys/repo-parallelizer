@@ -1314,6 +1314,17 @@ input.refresh-delay-input {
     width: 5rem;
 }
 
+/* Settings view — notes display input rows (card height + columns) */
+.notes-display-input-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+input.notes-display-input {
+    width: 5rem;
+}
+
 /* --------------------------------------------------------------------------
    Health Check — Alert Section (workspace-detail view)
    -------------------------------------------------------------------------- */
@@ -1743,7 +1754,7 @@ input.refresh-delay-input {
     box-shadow: var(--shadow-sm);
     padding: 0;
     overflow-y: auto;
-    height: 220px;
+    height: var(--notes-card-height, 220px); /* --notes-card-height set dynamically by renderNotesCollected(); 220px is the CSS fallback (no :root declaration — absence is intentional) */
     display: flex;
     flex-direction: column;
 }

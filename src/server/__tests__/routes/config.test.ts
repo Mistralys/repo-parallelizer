@@ -101,6 +101,8 @@ function makeAppConfig(overrides: Partial<AppConfig> = {}): AppConfig {
         cloneDepth: 50,
         serverPort: 4200,
         gitPollingIntervalSeconds: 30,
+        notesCardHeight: 220,
+        notesColumns: 2,
         ...overrides,
     };
 }
@@ -982,4 +984,369 @@ test('PUT /api/config/webserver-url: rejects vbscript: scheme with 400', async (
     assert.strictEqual(mock.statusCode, 400);
     const body = JSON.parse(mock.body) as { error: string };
     assert.ok(body.error.includes('vbscript'), 'error must mention the rejected scheme');
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/config/notes-display
+// ---------------------------------------------------------------------------
+
+test('GET /api/config/notes-display: returns 200 with current notesCardHeight and notesColumns', () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig({ notesCardHeight: 220, notesColumns: 2 });
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('GET', '/api/config/notes-display');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { notesCardHeight: number; notesColumns: number };
+    assert.strictEqual(body.notesCardHeight, 220);
+    assert.strictEqual(body.notesColumns, 2);
+});
+
+test('GET /api/config/notes-display: returns overridden in-memory values', () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig({ notesCardHeight: 400, notesColumns: 4 });
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('GET', '/api/config/notes-display');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { notesCardHeight: number; notesColumns: number };
+    assert.strictEqual(body.notesCardHeight, 400);
+    assert.strictEqual(body.notesColumns, 4);
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/config/notes-display — success
+// ---------------------------------------------------------------------------
+
+test('PUT /api/config/notes-display: returns 200 with updated values when both fields provided', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesCardHeight: 350, notesColumns: 3 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { notesCardHeight: number; notesColumns: number };
+    assert.strictEqual(body.notesCardHeight, 350);
+    assert.strictEqual(body.notesColumns, 3);
+});
+
+test('PUT /api/config/notes-display: updates in-memory appConfig when both fields provided', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesCardHeight: 350, notesColumns: 3 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(appConfig.notesCardHeight, 350);
+    assert.strictEqual(appConfig.notesColumns, 3);
+});
+
+test('PUT /api/config/notes-display: persists both fields to config.json', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesCardHeight: 350, notesColumns: 3 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    const saved = readConfigFile(configPath);
+    assert.strictEqual(saved['notesCardHeight'], 350);
+    assert.strictEqual(saved['notesColumns'], 3);
+});
+
+test('PUT /api/config/notes-display: partial update — only notesCardHeight provided', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig({ notesCardHeight: 220, notesColumns: 2 });
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesCardHeight: 500 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.strictEqual(appConfig.notesCardHeight, 500);
+    assert.strictEqual(appConfig.notesColumns, 2, 'notesColumns must remain unchanged');
+    const saved = readConfigFile(configPath);
+    assert.strictEqual(saved['notesCardHeight'], 500);
+    assert.ok(!Object.hasOwn(saved, 'notesColumns'), 'notesColumns should not be written to config file');
+});
+
+test('PUT /api/config/notes-display: partial update — only notesColumns provided', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig({ notesCardHeight: 220, notesColumns: 2 });
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesColumns: 5 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.strictEqual(appConfig.notesColumns, 5);
+    assert.strictEqual(appConfig.notesCardHeight, 220, 'notesCardHeight must remain unchanged');
+    const saved = readConfigFile(configPath);
+    assert.strictEqual(saved['notesColumns'], 5);
+});
+
+test('PUT /api/config/notes-display: accepts minimum valid notesCardHeight (120)', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesCardHeight: 120 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.strictEqual(appConfig.notesCardHeight, 120);
+});
+
+test('PUT /api/config/notes-display: accepts maximum valid notesCardHeight (800)', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesCardHeight: 800 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.strictEqual(appConfig.notesCardHeight, 800);
+});
+
+test('PUT /api/config/notes-display: accepts minimum valid notesColumns (1)', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesColumns: 1 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.strictEqual(appConfig.notesColumns, 1);
+});
+
+test('PUT /api/config/notes-display: accepts maximum valid notesColumns (6)', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesColumns: 6 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.strictEqual(appConfig.notesColumns, 6);
+});
+
+test('PUT /api/config/notes-display: empty body returns 200 without changing any values', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig({ notesCardHeight: 220, notesColumns: 2 });
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', {});
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.strictEqual(appConfig.notesCardHeight, 220);
+    assert.strictEqual(appConfig.notesColumns, 2);
+    const body = JSON.parse(mock.body) as { notesCardHeight: number; notesColumns: number };
+    assert.strictEqual(body.notesCardHeight, 220);
+    assert.strictEqual(body.notesColumns, 2);
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/config/notes-display — validation errors for notesCardHeight
+// ---------------------------------------------------------------------------
+
+test('PUT /api/config/notes-display: returns 400 when notesCardHeight is below minimum (119 < 120)', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesCardHeight: 119 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+    const body = JSON.parse(mock.body) as { error: string };
+    assert.ok(body.error.includes('120'), 'error must mention minimum value');
+    assert.ok(body.error.includes('119'), 'error must echo received value');
+});
+
+test('PUT /api/config/notes-display: returns 400 when notesCardHeight exceeds maximum (801 > 800)', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesCardHeight: 801 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+    const body = JSON.parse(mock.body) as { error: string };
+    assert.ok(body.error.includes('800'), 'error must mention maximum value');
+    assert.ok(body.error.includes('801'), 'error must echo received value');
+});
+
+test('PUT /api/config/notes-display: returns 400 when notesCardHeight is a fractional number', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesCardHeight: 220.5 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+});
+
+test('PUT /api/config/notes-display: returns 400 when notesCardHeight is a string', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesCardHeight: '220' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+    const body = JSON.parse(mock.body) as { error: string };
+    assert.ok(body.error.includes('"notesCardHeight"'), 'error must mention field name');
+});
+
+test('PUT /api/config/notes-display: returns 400 when notesCardHeight is null', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesCardHeight: null });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/config/notes-display — validation errors for notesColumns
+// ---------------------------------------------------------------------------
+
+test('PUT /api/config/notes-display: returns 400 when notesColumns is below minimum (0 < 1)', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesColumns: 0 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+    const body = JSON.parse(mock.body) as { error: string };
+    assert.ok(body.error.includes('1'), 'error must mention minimum value');
+});
+
+test('PUT /api/config/notes-display: returns 400 when notesColumns exceeds maximum (7 > 6)', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesColumns: 7 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+    const body = JSON.parse(mock.body) as { error: string };
+    assert.ok(body.error.includes('6'), 'error must mention maximum value');
+    assert.ok(body.error.includes('7'), 'error must echo received value');
+});
+
+test('PUT /api/config/notes-display: returns 400 when notesColumns is a fractional number', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesColumns: 2.5 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+});
+
+test('PUT /api/config/notes-display: returns 400 when notesColumns is a string', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', { notesColumns: '2' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+    const body = JSON.parse(mock.body) as { error: string };
+    assert.ok(body.error.includes('"notesColumns"'), 'error must mention field name');
+});
+
+test('PUT /api/config/notes-display: returns 400 when body is not a JSON object', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/notes-display', [220, 2]);
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
 });

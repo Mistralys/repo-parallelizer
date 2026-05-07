@@ -330,6 +330,60 @@ Returns `null` when not configured:
 
 ---
 
+## Notes Display (`/api/config/notes-display`)
+
+Read and update the notes view display settings at runtime, without a server restart. Changes take effect immediately (in-memory `appConfig` is mutated) and are persisted to `config.json` via `saveConfigField()`.
+
+| Method | Path | Success | Error Codes | Description |
+|---|---|---|---|---|
+| `GET` | `/api/config/notes-display` | 200 | — | Return the current notes display settings. |
+| `PUT` | `/api/config/notes-display` | 200 | 400 | Update notes display settings. Body: `{ notesCardHeight?, notesColumns? }` — all fields optional (partial update). |
+
+### Validation (PUT)
+
+All fields are optional. Omitting a field leaves the current value unchanged.
+
+| Field | Type | Range | Description |
+|---|---|---|---|
+| `notesCardHeight` | integer | `[120, 800]` | Height of each note card in pixels. |
+| `notesColumns` | integer | `[1, 6]` | Number of columns in the notes view grid. |
+
+**400 cases (per field, when provided):**
+- Value is not a number → `'Field "notesCardHeight" must be a number.'`
+- Value is not a finite integer (e.g. float, `NaN`, `Infinity`) → `'Field "notesCardHeight" must be a finite integer.'`
+- Value below minimum → `'Field "notesCardHeight" must be at least 120. Received: N.'`
+- Value above maximum → `'Field "notesCardHeight" must be at most 800. Received: N.'`
+- Body is not a valid JSON object → `'Request body must be a JSON object.'`
+
+Same error patterns apply to `notesColumns` (range `[1, 6]`).
+
+### `GET /api/config/notes-display` Response
+
+```json
+{ "notesCardHeight": 220, "notesColumns": 2 }
+```
+
+### `PUT /api/config/notes-display` Request / Response
+
+**Full update:**
+```json
+{ "notesCardHeight": 300, "notesColumns": 3 }
+```
+
+**Partial update (height only):**
+```json
+{ "notesCardHeight": 400 }
+```
+
+**Response** (always returns the full current settings after applying changes):
+```json
+{ "notesCardHeight": 400, "notesColumns": 2 }
+```
+
+> **Partial update semantics:** Fields absent from the request body are left unchanged. An empty body `{}` is valid — it returns the current settings with no modifications.
+
+---
+
 ## Notes
 
 Aggregate endpoint that returns the `Notes` field for every workspace across all projects in a single request. Intended for use by the GUI to display workspace notes without fetching individual workspace records.

@@ -4,6 +4,7 @@ import { printHeader, printSuccess, printError, printInfo, askQuestion, askYesNo
 import { getToolRoot, getConfigPath } from '../utils/paths.js';
 import { initializeStorage } from '../storage/json-storage.js';
 import type { AppConfig } from '../config/config.types.js';
+import { DEFAULT_NOTES_CARD_HEIGHT, DEFAULT_NOTES_COLUMNS } from '../config/config.constants.js';
 
 // ---------------------------------------------------------------------------
 // Defaults
@@ -220,6 +221,8 @@ export async function runSetup(io?: SetupIO): Promise<void> {
             cloneDepth,
             serverPort,
             gitPollingIntervalSeconds,
+            notesCardHeight: DEFAULT_NOTES_CARD_HEIGHT,
+            notesColumns: DEFAULT_NOTES_COLUMNS,
         };
 
         fs.writeFileSync(configPath, JSON.stringify(config, null, 4) + '\n', 'utf8');

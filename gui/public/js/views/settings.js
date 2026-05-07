@@ -1,13 +1,15 @@
 /**
  * Settings View — Repo Parallelizer GUI.
  *
- * Renders three settings sections:
+ * Renders four settings sections:
  *   1. **Git Credentials** — table of per-host PATs with add/delete controls.
  *   2. **Repositories Refresh Delay** — number input for `gitPollingIntervalSeconds`
  *      with client-side validation (min 10) and save/feedback.
  *   3. **Webserver URL** — text input for the base URL of the local webserver
  *      that serves the workspace repositories, enabling the "Browse" button in
  *      the workspace-detail view.
+ *   4. **Notes Display** — number inputs for card height (px) and column count
+ *      with client-side range validation and save/feedback.
  *
  * This view has no side-effects (no polling), so it returns no cleanup function.
  *
@@ -475,6 +477,174 @@ function buildWebserverUrlSection() {
 }
 
 // ---------------------------------------------------------------------------
+// Notes Display section
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the "Notes Display" section.
+ *
+ * Fetches the current `notesCardHeight` and `notesColumns` values from
+ * GET /api/config/notes-display on mount, populates number inputs, and
+ * exposes a `save()` function for the shared settings footer button.
+ *
+ * Card height range : 120–800 px (step 10, default 220).
+ * Columns range     : 1–6 (step 1, default 2).
+ *
+ * @returns {{ element: HTMLElement, save: () => Promise<boolean> }}
+ */
+function buildNotesDisplaySection() {
+    const section = document.createElement('section');
+    section.className = 'settings-section notes-display-section';
+
+    const heading = document.createElement('h2');
+    heading.textContent = 'Notes Display';
+    section.appendChild(heading);
+
+    const description = document.createElement('p');
+    description.textContent =
+        'Control how notes are presented in the Notes view. ' +
+        'Card Height sets the pixel height of each note card; ' +
+        'Columns sets how many cards appear side-by-side in the grid.';
+    section.appendChild(description);
+
+    // ---- Card Height input row ----
+    const cardHeightRow = document.createElement('div');
+    cardHeightRow.className = 'notes-display-input-row';
+
+    const cardHeightLabel = document.createElement('label');
+    cardHeightLabel.htmlFor = 'notes-card-height-input';
+    cardHeightLabel.textContent = 'Card Height';
+    cardHeightLabel.className = 'notes-display-label';
+
+    const cardHeightInput = document.createElement('input');
+    cardHeightInput.type = 'number';
+    cardHeightInput.id = 'notes-card-height-input';
+    cardHeightInput.name = 'notesCardHeight';
+    cardHeightInput.className = 'form-input notes-display-input';
+    cardHeightInput.min = '120';
+    cardHeightInput.max = '800';
+    cardHeightInput.step = '10';
+    cardHeightInput.placeholder = '220';
+    cardHeightInput.setAttribute('aria-label', 'Note card height in pixels');
+
+    const cardHeightUnit = document.createElement('span');
+    cardHeightUnit.className = 'notes-display-unit';
+    cardHeightUnit.textContent = 'px';
+
+    cardHeightRow.appendChild(cardHeightLabel);
+    cardHeightRow.appendChild(cardHeightInput);
+    cardHeightRow.appendChild(cardHeightUnit);
+    section.appendChild(cardHeightRow);
+
+    // ---- Card Height inline error ----
+    const cardHeightError = document.createElement('p');
+    cardHeightError.className = 'error-message';
+    cardHeightError.setAttribute('role', 'alert');
+    cardHeightError.hidden = true;
+    section.appendChild(cardHeightError);
+
+    // ---- Columns input row ----
+    const columnsRow = document.createElement('div');
+    columnsRow.className = 'notes-display-input-row';
+
+    const columnsLabel = document.createElement('label');
+    columnsLabel.htmlFor = 'notes-columns-input';
+    columnsLabel.textContent = 'Columns';
+    columnsLabel.className = 'notes-display-label';
+
+    const columnsInput = document.createElement('input');
+    columnsInput.type = 'number';
+    columnsInput.id = 'notes-columns-input';
+    columnsInput.name = 'notesColumns';
+    columnsInput.className = 'form-input notes-display-input';
+    columnsInput.min = '1';
+    columnsInput.max = '6';
+    columnsInput.step = '1';
+    columnsInput.placeholder = '2';
+    columnsInput.setAttribute('aria-label', 'Number of columns in the notes grid');
+
+    columnsRow.appendChild(columnsLabel);
+    columnsRow.appendChild(columnsInput);
+    section.appendChild(columnsRow);
+
+    // ---- Columns inline error ----
+    const columnsError = document.createElement('p');
+    columnsError.className = 'error-message';
+    columnsError.setAttribute('role', 'alert');
+    columnsError.hidden = true;
+    section.appendChild(columnsError);
+
+    // ---- Populate current values on mount ----
+    (async () => {
+        try {
+            const cfg = await api.config.notesDisplay.get();
+            if (cfg && typeof cfg.notesCardHeight === 'number') {
+                cardHeightInput.value = String(cfg.notesCardHeight);
+            }
+            if (cfg && typeof cfg.notesColumns === 'number') {
+                columnsInput.value = String(cfg.notesColumns);
+            }
+        } catch {
+            // Non-fatal — leave the placeholders in place.
+        }
+    })();
+
+    // ---- Save function (called by the shared footer button) ----
+    async function save() {
+        let valid = true;
+
+        // Validate card height
+        const rawHeight  = cardHeightInput.value.trim();
+        const heightVal  = Number(rawHeight);
+
+        if (!rawHeight || !Number.isFinite(heightVal) || !Number.isInteger(heightVal) ||
+            heightVal < 120 || heightVal > 800) {
+            cardHeightError.textContent = 'Please enter a whole number between 120 and 800.';
+            cardHeightError.hidden = false;
+            valid = false;
+        } else {
+            cardHeightError.hidden = true;
+        }
+
+        // Validate columns
+        const rawColumns = columnsInput.value.trim();
+        const columnsVal = Number(rawColumns);
+
+        if (!rawColumns || !Number.isFinite(columnsVal) || !Number.isInteger(columnsVal) ||
+            columnsVal < 1 || columnsVal > 6) {
+            columnsError.textContent = 'Please enter a whole number between 1 and 6.';
+            columnsError.hidden = false;
+            valid = false;
+        } else {
+            columnsError.hidden = true;
+        }
+
+        if (!valid) {
+            // Focus the first invalid field
+            if (!cardHeightError.hidden) {
+                cardHeightInput.focus();
+            } else {
+                columnsInput.focus();
+            }
+            return false;
+        }
+
+        try {
+            await api.config.notesDisplay.set({
+                notesCardHeight: heightVal,
+                notesColumns: columnsVal,
+            });
+            return true;
+        } catch (err) {
+            showToast(err.message || 'Failed to save notes display settings.', 'error');
+            return false;
+        }
+    }
+
+    return { element: section, save };
+}
+
+// ---------------------------------------------------------------------------
 // View entry point
 // ---------------------------------------------------------------------------
 
@@ -529,6 +699,9 @@ export function renderSettings(container, _params) {
     const webserverUrl = buildWebserverUrlSection();
     container.appendChild(webserverUrl.element);
 
+    const notesDisplay = buildNotesDisplaySection();
+    container.appendChild(notesDisplay.element);
+
     // ---- Form footer ----
     const footer = document.createElement('footer');
     footer.className = 'settings-footer';
@@ -548,6 +721,7 @@ export function renderSettings(container, _params) {
             const results = await Promise.all([
                 refreshDelay.save(),
                 webserverUrl.save(),
+                notesDisplay.save(),
             ]);
 
             if (results.every(Boolean)) {

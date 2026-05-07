@@ -28,6 +28,8 @@ interface AppConfig {
     gitCredentials?: Record<string, string>; // hostname → PAT/password; absent = public repos only
     maxErrorLogEntries?: number;  // default: 500 — FIFO eviction cap for error log
     webserverUrl?: string;  // base URL of local webserver (e.g. http://localhost:8080); absent = Browse button hidden
+    notesCardHeight: number;  // height (px) of each note card; range [MIN_NOTES_CARD_HEIGHT, MAX_NOTES_CARD_HEIGHT]; default: DEFAULT_NOTES_CARD_HEIGHT (220)
+    notesColumns: number;     // column count in the notes view grid; range [MIN_NOTES_COLUMNS, MAX_NOTES_COLUMNS]; default: DEFAULT_NOTES_COLUMNS (2)
 }
 ```
 
@@ -837,6 +839,30 @@ api.config.polling.set(seconds)
 ```
 
 **Validation:** `set()` rejects with HTTP 400 when `seconds` is non-numeric, fractional, infinite, NaN, or below 10. On success the new interval is persisted to `config.json` and the live polling loop is restarted immediately.
+
+### `api.config.notesDisplay`
+
+Read and update the notes view display settings. Changes are persisted to `config.json` and take effect immediately.
+
+```js
+// Return the current notes display settings.
+// Returns: Promise<NotesDisplayConfig>  // { notesCardHeight: number, notesColumns: number }
+api.config.notesDisplay.get()
+
+// Update the notes display settings (partial update — all fields optional).
+// data: { notesCardHeight?: number, notesColumns?: number }
+// Returns: Promise<NotesDisplayConfig>  // full settings after applying changes
+api.config.notesDisplay.set(data)
+```
+
+**`NotesDisplayConfig` shape:**
+
+| Field | Type | Range | Default | Description |
+|---|---|---|---|---|
+| `notesCardHeight` | `number` | `[120, 800]` | `220` | Height of each note card in pixels. |
+| `notesColumns` | `number` | `[1, 6]` | `2` | Number of columns in the notes view grid. |
+
+**Validation:** `set()` rejects with HTTP 400 when a provided field is non-numeric, non-integer, or outside its allowed range. Omitting a field leaves its current value unchanged. An empty body `{}` is valid and returns the current settings unchanged.
 
 ---
 

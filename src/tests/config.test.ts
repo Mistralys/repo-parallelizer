@@ -354,3 +354,71 @@ test('loadConfig() trims leading/trailing whitespace from webserverUrl', () => {
     const config = loadConfig(configPath);
     assert.strictEqual(config.webserverUrl, 'http://localhost:8080');
 });
+
+// --- notesCardHeight ---
+
+test('loadConfig() returns notesCardHeight default (220) when field is absent', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.notesCardHeight, 220);
+});
+
+test('loadConfig() preserves an explicit notesCardHeight value', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        notesCardHeight: 350,
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.notesCardHeight, 350);
+});
+
+test('loadConfig() falls back to default notesCardHeight when field is a non-number', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        notesCardHeight: 'tall',
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.notesCardHeight, 220);
+});
+
+// --- notesColumns ---
+
+test('loadConfig() returns notesColumns default (2) when field is absent', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.notesColumns, 2);
+});
+
+test('loadConfig() preserves an explicit notesColumns value', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        notesColumns: 4,
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.notesColumns, 4);
+});
+
+test('loadConfig() falls back to default notesColumns when field is a non-number', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        notesColumns: null,
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.notesColumns, 2);
+});

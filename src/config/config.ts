@@ -2,13 +2,19 @@ import { chmodSync } from 'node:fs';
 import { getConfigPath } from '../utils/paths.js';
 import { readJsonFile, writeJsonFile, FileNotFoundError } from '../storage/json-storage.js';
 import type { AppConfig } from './config.types.js';
+import {
+    DEFAULT_NOTES_CARD_HEIGHT,
+    DEFAULT_NOTES_COLUMNS,
+} from './config.constants.js';
 
 const REQUIRED_FIELDS: ReadonlyArray<keyof AppConfig> = ['projectsFolder', 'storageFolder'];
 
-const DEFAULTS: Readonly<Pick<AppConfig, 'cloneDepth' | 'serverPort' | 'gitPollingIntervalSeconds'>> = {
+const DEFAULTS: Readonly<Pick<AppConfig, 'cloneDepth' | 'serverPort' | 'gitPollingIntervalSeconds' | 'notesCardHeight' | 'notesColumns'>> = {
     cloneDepth: 50,
     serverPort: 4200,
     gitPollingIntervalSeconds: 30,
+    notesCardHeight: DEFAULT_NOTES_CARD_HEIGHT,
+    notesColumns: DEFAULT_NOTES_COLUMNS,
 };
 
 /**
@@ -62,6 +68,8 @@ export function loadConfig(configPath?: string): AppConfig {
         webserverUrl: typeof raw['webserverUrl'] === 'string' && raw['webserverUrl'].trim() !== ''
             ? raw['webserverUrl'].trim().replace(/\/+$/, '')
             : undefined,
+        notesCardHeight: typeof raw['notesCardHeight'] === 'number' ? raw['notesCardHeight'] : DEFAULTS.notesCardHeight,
+        notesColumns: typeof raw['notesColumns'] === 'number' ? raw['notesColumns'] : DEFAULTS.notesColumns,
     };
 }
 

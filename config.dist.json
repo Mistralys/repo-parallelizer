@@ -7,5 +7,7 @@
     "gitPollingIntervalSeconds": 30,
     "maxErrorLogEntries": 500,
     "gitCredentials": {},
-    "webserverUrl": ""
+    "webserverUrl": "",
+    "notesCardHeight": 220,
+    "notesColumns": 2
 }

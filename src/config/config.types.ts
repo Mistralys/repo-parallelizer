@@ -63,4 +63,18 @@ export interface AppConfig {
      * Leave empty or omit to hide the Browse button entirely.
      */
     webserverUrl?: string;
+
+    /**
+     * Height (in pixels) of each note card in the notes view.
+     * Must be between {@link MIN_NOTES_CARD_HEIGHT} and {@link MAX_NOTES_CARD_HEIGHT}.
+     * @default DEFAULT_NOTES_CARD_HEIGHT
+     */
+    notesCardHeight: number;
+
+    /**
+     * Number of columns displayed in the notes view grid.
+     * Must be between {@link MIN_NOTES_COLUMNS} and {@link MAX_NOTES_COLUMNS}.
+     * @default DEFAULT_NOTES_COLUMNS
+     */
+    notesColumns: number;
 }

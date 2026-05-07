@@ -73,6 +73,8 @@ function makeAppConfig(storageDir: string, projectsDir: string): AppConfig {
         cloneDepth: 1,
         serverPort: 4200,
         gitPollingIntervalSeconds: 60,
+        notesCardHeight: 220,
+        notesColumns: 2,
     };
 }
 
