@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.0 - Notes Display Settings
+- GUI: Added Notes Display section to the settings page with card height and column count controls.
+- GUI: Notes Collected view now applies saved card height and column layout.
+- Config: Added `notesColumns` and `notesCardHeight` config fields with range validation.
+- Docs: Updated contributing guide.
+
 ## v1.1.0 - Workspace Notes
 - Workspace: Added `notes` field to workspace and project models.
 - Server: Added notes API endpoint for reading and persisting workspace notes.
