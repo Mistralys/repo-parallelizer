@@ -34,6 +34,8 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 | `#/error-log` | `error-log.js` | Paginated, filterable error log table with expandable detail rows and "Clear All" action. |
 | `#/notes` | `notes-collected.js` | Two-panel notes view: a left sidebar listing all workspaces grouped by collapsible project groups (workspaces with notes carry a `.has-notes` class and a blue dot indicator), and a right scrollable main panel of editable note cards. On initial load only workspaces with non-empty notes show cards. Clicking a sidebar item for a workspace with a card scrolls the main panel to it; clicking one without a card creates a new empty card and focuses the textarea. Each card header contains a clickable workspace ID link to `#/projects/:pid/workspaces/:wid`. Textareas auto-save after 1000 ms of inactivity via `api.workspaces.update()`; saving empty text removes the card and clears the sidebar indicator. A `.notes-empty-state` message is shown when no cards are present. |
 
+> **Maintainer note — Settings sections:** `settings.js` has a module-level JSDoc block (at the top of the file) that lists all active settings sections. When adding or removing a `build*Section()` factory from `settings.js`, update that JSDoc list to keep it in sync with the route description in this table.
+
 ## API Client
 
 `api.js` exports a namespaced `api` object with eight top-level groups:

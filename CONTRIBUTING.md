@@ -57,6 +57,58 @@ process.on('exit', () => {
 });
 ```
 
+### Server-layer test helpers
+
+`src/server/__tests__/helpers/mock-http.ts` provides shared HTTP mock utilities for route-level unit tests:
+
+| Export | Description |
+|---|---|
+| `mockRequest(method, url, bodyJson?)` | Builds a fake `IncomingMessage`. Emits `data` + `end` on the next tick (or just `end` if no body). `.destroy()` emits an `error` event matching real `IncomingMessage` semantics. |
+| `MockResponse` | Interface that captures handler output: `statusCode` (starts `undefined` — not `0`), `body` string, and raw `res` reference. |
+| `mockResponse()` | Builds a `MockResponse` whose `.res` intercepts `writeHead()` and `end()`. Lets tests assert on status codes and response bodies without a real HTTP server. |
+
+Import these in any `src/server/__tests__` test file:
+
+```typescript
+import { mockRequest, mockResponse, MockResponse } from '../helpers/mock-http.js';
+// or from a subdirectory:
+import { mockRequest, mockResponse, MockResponse } from './helpers/mock-http.js';
+```
+
+> **Note:** `statusCode` is intentionally initialised as `undefined`, not `0`. This lets tests distinguish "the handler never called `writeHead()`" from a deliberate `200 OK`.
+
+### Core test helpers (`src/tests/test-helpers.ts`)
+
+`src/tests/test-helpers.ts` provides shared utilities used by test files across the project — including suites in `src/tests/` and server tests in `src/server/__tests__/`:
+
+| Export | Signature | Description |
+|---|---|---|
+| `makeTestConfig` | `(base: string, overrides?: Partial<AppConfig>): AppConfig` | Builds a minimal `AppConfig` rooted at `base`. `storageFolder` and `projectsFolder` are derived from `base`; all other fields use production defaults. Pass `overrides` to adjust individual fields. |
+| `createTempDirTracker` | `(prefix: string): () => string` | Returns a `makeTempDir()` function that creates isolated temp directories under `os.tmpdir()` and registers a `process.on('exit')` cleanup handler to remove them on exit or crash. |
+| `setupFakeGit` | `(dir: string): string` | Installs a fake `git` executable in `dir` that records all invocation arguments to `captured-args.txt` and exits with code 128. Returns the path to the captured-args file. |
+
+Typical usage from `src/tests/`:
+
+```typescript
+import { makeTestConfig, createTempDirTracker } from './test-helpers.js';
+
+const makeTempDir = createTempDirTracker('paralizer-my-test-');
+
+describe('MyManager', () => {
+    it('does something', () => {
+        const base = makeTempDir();
+        const config = makeTestConfig(base, { cloneDepth: 1 });
+        // ...
+    });
+});
+```
+
+From `src/server/__tests__/` (note the deeper relative path):
+
+```typescript
+import { makeTestConfig } from '../../tests/test-helpers.js';
+```
+
 ### Network-dependent tests
 
 Skip tests requiring internet access with:

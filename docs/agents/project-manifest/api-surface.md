@@ -33,6 +33,16 @@ interface AppConfig {
 }
 ```
 
+### Constants (`config.ts`)
+
+```typescript
+const DEFAULTS: Readonly<Pick<AppConfig, 'cloneDepth' | 'serverPort' | 'gitPollingIntervalSeconds' | 'notesCardHeight' | 'notesColumns'>>
+// Values: { cloneDepth: 50, serverPort: 4200, gitPollingIntervalSeconds: 30,
+//           notesCardHeight: 220, notesColumns: 2 }
+```
+
+> **Maintenance note:** The `Pick` union must be extended whenever a new non-optional, non-required `AppConfig` field with a sensible default is added. See the inline comment in `config.ts` and the constraints guide.
+
 ### Functions (`config.ts`)
 
 ```typescript
@@ -587,11 +597,10 @@ Runs the interactive first-time configuration wizard. Guides the user through cr
 **Constants (module-level):**
 
 ```typescript
-const DEFAULTS = {
-    cloneDepth: 50,
-    serverPort: 4200,
-    gitPollingIntervalSeconds: 30,
-    storageFolder: 'data/storage',
+// UI prompt hints only — not AppConfig defaults.
+// Actual config defaults are sourced from DEFAULTS imported from config.ts.
+const SETUP_DEFAULTS = {
+    storageFolder: 'data/storage',  // hint shown in the storage-folder prompt
 }
 ```
 

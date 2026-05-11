@@ -54,6 +54,7 @@ Both `storageFolder` and `projectsFolder` in `config.json` accept relative or ab
 - `config.json` is created by copying `config.dist.json`. It is not committed (gitignored).
 - The `_instructions` key in `config.dist.json` is an editorial note and is not a valid config field. Remove it from `config.json`.
 - `initializeStorage()` is idempotent — re-running it does not overwrite existing files.
+- **`DEFAULTS` Pick maintenance:** The exported `DEFAULTS` constant in `src/config/config.ts` is typed as `Pick<AppConfig, 'cloneDepth' | 'serverPort' | 'gitPollingIntervalSeconds' | 'notesCardHeight' | 'notesColumns'>`. When a new non-optional, non-required `AppConfig` field with a sensible default is added, **three** coordinated changes are required: (1) add the field key to the `Pick` union, (2) add the field's default value to the `DEFAULTS` object literal, and (3) add the fallback guard in `loadConfig()` (e.g. `typeof raw['field'] === 'number' ? raw['field'] : DEFAULTS.field`). Omitting step (1) is a TypeScript compile error; omitting steps (2)–(3) causes the field to be `undefined` at runtime for configs that predate the new field.
 
 ## Test Conventions
 
