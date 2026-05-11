@@ -63,6 +63,34 @@ export const MAX_NOTES_COLUMNS = 6;
  */
 export const DEFAULT_NOTES_COLUMNS = 2;
 
+// ---------------------------------------------------------------------------
+// Git clone depth
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimum clone depth (0 means a full/unlimited clone, which is valid).
+ */
+export const MIN_CLONE_DEPTH = 0;
+
+/**
+ * Maximum clone depth. Git uses 32-bit signed integers for depth.
+ */
+export const MAX_CLONE_DEPTH = 2_147_483_647;
+
+// ---------------------------------------------------------------------------
+// Server port
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimum TCP port number (well-known / system ports start at 1).
+ */
+export const MIN_SERVER_PORT = 1;
+
+/**
+ * Maximum TCP port number (standard 16-bit unsigned range).
+ */
+export const MAX_SERVER_PORT = 65_535;
+
 ```
 ###  Path: `/src/config/config.ts`
 
@@ -80,14 +108,17 @@ import {
     MAX_NOTES_COLUMNS,
     MIN_POLLING_INTERVAL_SECONDS,
     MAX_POLLING_INTERVAL_SECONDS,
+    MIN_CLONE_DEPTH,
+    MAX_CLONE_DEPTH,
+    MIN_SERVER_PORT,
+    MAX_SERVER_PORT,
 } from './config.constants.js';
 
 const REQUIRED_FIELDS: ReadonlyArray<keyof AppConfig> = ['projectsFolder', 'storageFolder'];
 
-// MAINTENANCE NOTE: The Pick union below must be extended whenever a new non-optional,
-// non-required AppConfig field with a sensible default is added. Add both the key to
-// the Pick<AppConfig, ...> type and its value to the object literal below, then update
-// loadConfig() to fall back to the new field. See also: constraints.md § Configuration.
+// When adding a new non-optional AppConfig field with a sensible default: add the
+// key to the Pick<AppConfig, ...> union and its value here, then update loadConfig()
+// to fall back to it. The satisfies guard below will catch if DEFAULTS is incomplete.
 export const DEFAULTS: Readonly<Pick<AppConfig, 'cloneDepth' | 'serverPort' | 'gitPollingIntervalSeconds' | 'notesCardHeight' | 'notesColumns'>> = {
     cloneDepth: 50,
     serverPort: 4200,
@@ -95,6 +126,16 @@ export const DEFAULTS: Readonly<Pick<AppConfig, 'cloneDepth' | 'serverPort' | 'g
     notesCardHeight: DEFAULT_NOTES_CARD_HEIGHT,
     notesColumns: DEFAULT_NOTES_COLUMNS,
 };
+
+// Compile-time guard: ensures DEFAULTS + required fields cover the full AppConfig shape.
+// If a new required field is added to AppConfig without updating DEFAULTS, this line
+// will produce a type error.
+const _defaultsCoverageGuard: AppConfig = {
+    ...DEFAULTS,
+    projectsFolder: '',
+    storageFolder: '',
+} satisfies AppConfig;
+void _defaultsCoverageGuard;
 
 /**
  * Loads, validates, and returns the application configuration from `config.json`.
@@ -137,8 +178,8 @@ export function loadConfig(configPath?: string): AppConfig {
     return {
         projectsFolder: raw['projectsFolder'] as string,
         storageFolder: raw['storageFolder'] as string,
-        cloneDepth: parseIntegerField(raw['cloneDepth'], 'cloneDepth', DEFAULTS.cloneDepth),
-        serverPort: parseIntegerField(raw['serverPort'], 'serverPort', DEFAULTS.serverPort),
+        cloneDepth: parseIntegerField(raw['cloneDepth'], 'cloneDepth', DEFAULTS.cloneDepth, MIN_CLONE_DEPTH, MAX_CLONE_DEPTH),
+        serverPort: parseIntegerField(raw['serverPort'], 'serverPort', DEFAULTS.serverPort, MIN_SERVER_PORT, MAX_SERVER_PORT),
         gitPollingIntervalSeconds: parseIntegerField(
             raw['gitPollingIntervalSeconds'],
             'gitPollingIntervalSeconds',
@@ -369,6 +410,6 @@ export interface AppConfig {
 ```
 ---
 **File Statistics**
-- **Size**: 10.1 KB
-- **Lines**: 310
+- **Size**: 12.29 KB
+- **Lines**: 375
 File: `modules/config/architecture-core.md`
