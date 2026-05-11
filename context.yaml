@@ -47,3 +47,15 @@ documents:
         description: 'Agent project manifest — tech stack, API surface, constraints, data flows, REST API, GUI frontend'
         sourcePaths: [ docs/agents/project-manifest ]
         filePattern: "*.md"
+
+  - description: 'Project - Contributing Guide'
+    outputPath: 'project-contributing.md'
+    sources:
+      - type: file
+        description: 'Developer contributing guide — setup, build, test conventions, server-layer test helpers, core test helpers'
+        sourcePaths: [ . ]
+        filePattern: "CONTRIBUTING.md"
+        excludePatterns:
+          - 'node_modules/'
+          - 'dist/'
+          - '.context/'

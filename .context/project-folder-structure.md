@@ -74,6 +74,7 @@
     │           └── repository-detail.js
     │           └── repository-detail.test.mjs
     │           └── settings.js
+    │           └── settings.test.mjs
     │           └── workspace-detail.js
     │           └── workspace-detail.notes.test.mjs
     │           └── workspace-detail.open-button.test.mjs
@@ -137,6 +138,8 @@
     │   ├── __tests__/
     │   │   ├── app-launcher.test.ts
     │   │   ├── config.notes-display.test.ts
+    │   │   ├── helpers/
+    │   │   │   ├── mock-http.ts
     │   │   ├── index.test.ts
     │   │   ├── pollingManager.errorLog.test.ts
     │   │   ├── pollingManager.test.ts
@@ -177,6 +180,7 @@
     │   ├── module-context.yaml
     │   ├── storage.types.ts
     ├── tests/
+    │   ├── README.md
     │   ├── branch-orchestrator.test.ts
     │   ├── config.test.ts
     │   ├── error-log.manager.test.ts
@@ -186,6 +190,7 @@
     │   ├── git-credentials.test.ts
     │   ├── git-status.test.ts
     │   ├── json-storage.test.ts
+    │   ├── module-context.yaml
     │   ├── paths.test.ts
     │   ├── project-orchestrator.test.ts
     │   ├── project.manager.test.ts
@@ -209,6 +214,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 7.64 KB
-- **Lines**: 215
+- **Size**: 7.83 KB
+- **Lines**: 220
 File: `project-folder-structure.md`

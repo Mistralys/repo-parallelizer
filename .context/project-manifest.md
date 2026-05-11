@@ -73,6 +73,16 @@ interface AppConfig {
 }
 ```
 
+### Constants (`config.ts`)
+
+```typescript
+const DEFAULTS: Readonly<Pick<AppConfig, 'cloneDepth' | 'serverPort' | 'gitPollingIntervalSeconds' | 'notesCardHeight' | 'notesColumns'>>
+// Values: { cloneDepth: 50, serverPort: 4200, gitPollingIntervalSeconds: 30,
+//           notesCardHeight: 220, notesColumns: 2 }
+```
+
+> **Maintenance note:** The `Pick` union must be extended whenever a new non-optional, non-required `AppConfig` field with a sensible default is added. See the inline comment in `config.ts` and the constraints guide.
+
 ### Functions (`config.ts`)
 
 ```typescript
@@ -627,11 +637,10 @@ Runs the interactive first-time configuration wizard. Guides the user through cr
 **Constants (module-level):**
 
 ```typescript
-const DEFAULTS = {
-    cloneDepth: 50,
-    serverPort: 4200,
-    gitPollingIntervalSeconds: 30,
-    storageFolder: 'data/storage',
+// UI prompt hints only — not AppConfig defaults.
+// Actual config defaults are sourced from DEFAULTS imported from config.ts.
+const SETUP_DEFAULTS = {
+    storageFolder: 'data/storage',  // hint shown in the storage-folder prompt
 }
 ```
 
@@ -1000,6 +1009,7 @@ Both `storageFolder` and `projectsFolder` in `config.json` accept relative or ab
 - `config.json` is created by copying `config.dist.json`. It is not committed (gitignored).
 - The `_instructions` key in `config.dist.json` is an editorial note and is not a valid config field. Remove it from `config.json`.
 - `initializeStorage()` is idempotent — re-running it does not overwrite existing files.
+- **`DEFAULTS` Pick maintenance:** The exported `DEFAULTS` constant in `src/config/config.ts` is typed as `Pick<AppConfig, 'cloneDepth' | 'serverPort' | 'gitPollingIntervalSeconds' | 'notesCardHeight' | 'notesColumns'>`. When a new non-optional, non-required `AppConfig` field with a sensible default is added, **three** coordinated changes are required: (1) add the field key to the `Pick` union, (2) add the field's default value to the `DEFAULTS` object literal, and (3) add the fallback guard in `loadConfig()` (e.g. `typeof raw['field'] === 'number' ? raw['field'] : DEFAULTS.field`). Omitting step (1) is a TypeScript compile error; omitting steps (2)–(3) causes the field to be `undefined` at runtime for configs that predate the new field.
 
 ## Test Conventions
 
@@ -1351,6 +1361,8 @@ The `Router` class (`gui/public/js/router.js`) manages view lifecycle:
 | `#/settings` | `settings.js` | Settings view with four sections: **Git Credentials** (add/delete per-host PATs), **Repositories Refresh Delay** (configurable `gitPollingIntervalSeconds`), **Webserver URL** (base URL of the local webserver; enables the "Browse" button in the workspace-detail view), and **Notes Display** (card height in px and column count for the notes grid, backed by `GET/PUT /api/config/notes-display`). All non-credentials sections share a single **"Save Settings"** footer button that calls each section's `save()` function in parallel via `Promise.all()`. The Notes Display section is built by `buildNotesDisplaySection()`, which uses CSS classes `notes-display-section` (section wrapper), `notes-display-input-row` (flex row for label + input + unit), `notes-display-label` (label element), `notes-display-input` (number input), and `notes-display-unit` (unit span, e.g. "px"). |
 | `#/error-log` | `error-log.js` | Paginated, filterable error log table with expandable detail rows and "Clear All" action. |
 | `#/notes` | `notes-collected.js` | Two-panel notes view: a left sidebar listing all workspaces grouped by collapsible project groups (workspaces with notes carry a `.has-notes` class and a blue dot indicator), and a right scrollable main panel of editable note cards. On initial load only workspaces with non-empty notes show cards. Clicking a sidebar item for a workspace with a card scrolls the main panel to it; clicking one without a card creates a new empty card and focuses the textarea. Each card header contains a clickable workspace ID link to `#/projects/:pid/workspaces/:wid`. Textareas auto-save after 1000 ms of inactivity via `api.workspaces.update()`; saving empty text removes the card and clears the sidebar indicator. A `.notes-empty-state` message is shown when no cards are present. |
+
+> **Maintainer note — Settings sections:** `settings.js` has a module-level JSDoc block (at the top of the file) that lists all active settings sections. When adding or removing a `build*Section()` factory from `settings.js`, update that JSDoc list to keep it in sync with the route description in this table.
 
 ## API Client
 
@@ -2169,6 +2181,6 @@ Both scripts `cd` to their own directory before invoking `node dist/index.js men
 ```
 ---
 **File Statistics**
-- **Size**: 110.59 KB
-- **Lines**: 2175
+- **Size**: 112.25 KB
+- **Lines**: 2187
 File: `project-manifest.md`

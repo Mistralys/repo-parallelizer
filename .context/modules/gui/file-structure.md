@@ -48,6 +48,7 @@
                 └── repository-detail.js
                 └── repository-detail.test.mjs
                 └── settings.js
+                └── settings.test.mjs
                 └── workspace-detail.js
                 └── workspace-detail.notes.test.mjs
                 └── workspace-detail.open-button.test.mjs
@@ -56,6 +57,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 2.14 KB
-- **Lines**: 62
+- **Size**: 2.19 KB
+- **Lines**: 63
 File: `modules/gui/file-structure.md`
