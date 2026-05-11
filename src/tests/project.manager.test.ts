@@ -1,28 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
-import * as os from 'os';
 import * as path from 'node:path';
-import type { AppConfig } from '../config/config.types.js';
 import { initializeStorage } from '../storage/json-storage.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { NotFoundError } from '../errors.js';
-import { createTempDirTracker } from './test-helpers.js';
+import { createTempDirTracker, makeTestConfig } from './test-helpers.js';
 
 const makeTempDir = createTempDirTracker('paralizer-project-test-');
-
-function makeTestConfig(base: string): AppConfig {
-    return {
-        storageFolder: path.join(base, 'storage'),
-        projectsFolder: path.join(base, 'projects'),
-        cloneDepth: 50,
-        serverPort: 4200,
-        gitPollingIntervalSeconds: 30,
-        notesCardHeight: 220,
-        notesColumns: 2,
-    };
-}
 
 function makeManagers(base: string) {
     const config = makeTestConfig(base);

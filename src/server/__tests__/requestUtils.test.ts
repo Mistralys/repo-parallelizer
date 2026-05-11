@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { IncomingMessage } from 'node:http';
 import {
     parseJsonBody,
     sendJson,
     sendError,
     extractParams,
 } from '../requestUtils.js';
+import { mockResponse, type MockResponse } from './helpers/mock-http.js';
 
 // ---------------------------------------------------------------------------
 // Minimal mocks
@@ -40,39 +41,6 @@ function mockRequestWithError(err: Error): IncomingMessage {
     (emitter as unknown as { destroy(): void }).destroy = () => {};
     process.nextTick(() => emitter.emit('error', err));
     return emitter;
-}
-
-interface MockResponse {
-    statusCode: number | undefined;
-    headers: Record<string, string | number>;
-    body: string;
-    res: ServerResponse;
-}
-
-/** Creates a mock ServerResponse that captures writeHead / end calls. */
-function mockResponse(): MockResponse {
-    const mock: MockResponse = {
-        statusCode: undefined,
-        headers: {},
-        body: '',
-        res: null as unknown as ServerResponse,
-    };
-
-    const res = new EventEmitter() as unknown as ServerResponse;
-
-    (res as unknown as {
-        writeHead(status: number, headers: Record<string, string | number>): void;
-    }).writeHead = (status: number, headers: Record<string, string | number>) => {
-        mock.statusCode = status;
-        mock.headers = { ...headers };
-    };
-
-    (res as unknown as { end(body: string): void }).end = (body: string) => {
-        mock.body = body;
-    };
-
-    mock.res = res;
-    return mock;
 }
 
 // ---------------------------------------------------------------------------

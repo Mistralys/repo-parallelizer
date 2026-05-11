@@ -1,11 +1,10 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { serveStatic } from '../staticServer.js';
+import { mockRequest as sharedMockRequest, mockStreamResponse, type MockStreamResponse } from './helpers/mock-http.js';
 
 // ---------------------------------------------------------------------------
 // Temporary base directory — set up once, torn down after all tests
@@ -35,56 +34,12 @@ after(() => {
 // Mocks
 // ---------------------------------------------------------------------------
 
-function mockRequest(url: string): IncomingMessage {
-    const req = new EventEmitter() as IncomingMessage;
-    (req as unknown as { url: string }).url = url;
-    return req;
-}
+/** Thin wrapper: shared mockRequest expects (method, url); static tests only pass url. */
+const mockRequest = (url: string) => sharedMockRequest('GET', url);
 
-interface MockResponse {
-    statusCode: number | undefined;
-    headers: Record<string, string | number>;
-    endCalled: boolean;
-    piped: boolean;
-    res: ServerResponse;
-}
-
-function mockResponse(): MockResponse {
-    const mock: MockResponse = {
-        statusCode: undefined,
-        headers: {},
-        endCalled: false,
-        piped: false,
-        res: null as unknown as ServerResponse,
-    };
-
-    const res = new EventEmitter() as unknown as ServerResponse;
-
-    (res as unknown as {
-        writeHead(status: number, headers: Record<string, string | number>): void;
-    }).writeHead = (status, headers) => {
-        mock.statusCode = status;
-        mock.headers = { ...headers };
-    };
-
-    (res as unknown as { end(body?: string): void }).end = (body?: string) => {
-        void body;
-        mock.endCalled = true;
-    };
-
-    // pipe() is called by createReadStream().pipe(res).
-    // We mark piped = true and call res.emit('finish') so the stream closes
-    // without actually doing filesystem I/O on the mock side.
-    (res as unknown as { pipe: unknown }).pipe = undefined; // not needed — pipe is called ON the read stream
-    // The ReadStream.pipe(res) destination just needs `write` and `end`.
-    (res as unknown as { write(chunk: unknown): boolean }).write = (_chunk: unknown): boolean => {
-        mock.piped = true;
-        return true;
-    };
-
-    mock.res = res;
-    return mock;
-}
+/** Alias for readability in this test file. */
+const mockResponse = mockStreamResponse;
+type MockResponse = MockStreamResponse;
 
 // ---------------------------------------------------------------------------
 // Root path → index.html

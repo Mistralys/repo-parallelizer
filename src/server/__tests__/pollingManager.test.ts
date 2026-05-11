@@ -7,26 +7,18 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { AppConfig } from '../../config/config.types.js';
 import type { ProjectManager } from '../../models/project/project.manager.js';
 import type { WorkspaceManager } from '../../models/workspace/workspace.manager.js';
 import type { WorkspaceInfo } from '../../models/workspace/workspace.types.js';
 import type { GitStatusInfo } from '../../git/git.types.js';
 import { PollingManager } from '../pollingManager.js';
+import { makeTestConfig } from '../../tests/test-helpers.js';
 
 // ---------------------------------------------------------------------------
 // Minimal stubs / factories
 // ---------------------------------------------------------------------------
 
-const BASE_CONFIG: AppConfig = {
-    projectsFolder: '/fake/projects',
-    storageFolder: '/fake/storage',
-    cloneDepth: 50,
-    serverPort: 4200,
-    gitPollingIntervalSeconds: 30,
-    notesCardHeight: 220,
-    notesColumns: 2,
-};
+const BASE_CONFIG = makeTestConfig('/fake');
 
 function makeStatus(branch = 'main'): GitStatusInfo {
     return {

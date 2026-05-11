@@ -12,8 +12,6 @@
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -22,6 +20,7 @@ import { registerWorkspaceRoutes } from '../../routes/workspaces.js';
 import { NotFoundError } from '../../../errors.js';
 import type { WorkspaceInfo } from '../../../models/workspace/workspace.types.js';
 import type { ProjectData } from '../../../models/project/project.types.js';
+import { mockRequest, mockResponse, flushAsync, type MockResponse } from '../helpers/mock-http.js';
 
 // ---------------------------------------------------------------------------
 // Temp-directory lifecycle (same approach as workspaces-health.test.ts)
@@ -46,56 +45,6 @@ function makeTempDir(): string {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'paralizer-launch-test-'));
     allTempDirs.push(dir);
     return dir;
-}
-
-// ---------------------------------------------------------------------------
-// Minimal request / response helpers
-// ---------------------------------------------------------------------------
-
-function mockRequest(method: string, url: string): IncomingMessage {
-    const req = new EventEmitter() as IncomingMessage;
-    (req as unknown as { method: string }).method = method;
-    (req as unknown as { url: string }).url = url;
-    (req as unknown as { destroy(): void }).destroy = () => {
-        req.emit('error', new Error('destroyed'));
-    };
-    process.nextTick(() => {
-        req.emit('end');
-    });
-    return req;
-}
-
-interface MockResponse {
-    statusCode: number | undefined;
-    headers: Record<string, string | number>;
-    body: string;
-    res: ServerResponse;
-}
-
-function mockResponse(): MockResponse {
-    const mock_: MockResponse = {
-        statusCode: undefined,
-        headers: {},
-        body: '',
-        res: null as unknown as ServerResponse,
-    };
-    const res = new EventEmitter() as unknown as ServerResponse;
-    (res as unknown as {
-        writeHead(status: number, headers: Record<string, string | number>): void;
-    }).writeHead = (status: number, headers: Record<string, string | number>) => {
-        mock_.statusCode = status;
-        mock_.headers = { ...headers };
-    };
-    (res as unknown as { end(body: string): void }).end = (body: string) => {
-        mock_.body = body;
-    };
-    mock_.res = res;
-    return mock_;
-}
-
-async function flushAsync(): Promise<void> {
-    await new Promise<void>((r) => process.nextTick(r));
-    await new Promise<void>((r) => process.nextTick(r));
 }
 
 // ---------------------------------------------------------------------------

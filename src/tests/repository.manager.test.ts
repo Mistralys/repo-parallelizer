@@ -1,26 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
-import * as os from 'os';
 import * as path from 'node:path';
-import type { AppConfig } from '../config/config.types.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { NotFoundError } from '../errors.js';
-import { createTempDirTracker } from './test-helpers.js';
+import { createTempDirTracker, makeTestConfig } from './test-helpers.js';
 
 const makeTempDir = createTempDirTracker('paralizer-repo-test-');
-
-function makeTestConfig(base: string): AppConfig {
-    return {
-        storageFolder: path.join(base, 'storage'),
-        projectsFolder: path.join(base, 'projects'),
-        cloneDepth: 50,
-        serverPort: 4200,
-        gitPollingIntervalSeconds: 30,
-        notesCardHeight: 220,
-        notesColumns: 2,
-    };
-}
 
 function makeManager(base: string): RepositoryManager {
     const config = makeTestConfig(base);

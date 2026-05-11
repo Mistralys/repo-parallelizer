@@ -1,57 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Router } from '../router.js';
-
-// ---------------------------------------------------------------------------
-// Minimal mocks
-// ---------------------------------------------------------------------------
-
-/**
- * Creates a minimal mock IncomingMessage with the given method and URL.
- */
-function mockRequest(method: string, url: string): IncomingMessage {
-    const req = new EventEmitter() as IncomingMessage;
-    (req as unknown as { method: string }).method = method;
-    (req as unknown as { url: string }).url = url;
-    return req;
-}
-
-interface MockResponse {
-    statusCode: number | undefined;
-    headers: Record<string, string | number>;
-    body: string;
-    res: ServerResponse;
-}
-
-/**
- * Creates a mock ServerResponse that captures writeHead / end calls.
- */
-function mockResponse(): MockResponse {
-    const mock: MockResponse = {
-        statusCode: undefined,
-        headers: {},
-        body: '',
-        res: null as unknown as ServerResponse,
-    };
-
-    const res = new EventEmitter() as unknown as ServerResponse;
-
-    (res as unknown as {
-        writeHead(status: number, headers: Record<string, string | number>): void;
-    }).writeHead = (status: number, headers: Record<string, string | number>) => {
-        mock.statusCode = status;
-        mock.headers = { ...headers };
-    };
-
-    (res as unknown as { end(body: string): void }).end = (body: string) => {
-        mock.body = body;
-    };
-
-    mock.res = res;
-    return mock;
-}
+import { mockRequest, mockResponse, type MockResponse } from './helpers/mock-http.js';
 
 // ---------------------------------------------------------------------------
 // Helper: creates a Router with a GET /hello handler and a POST /hello handler

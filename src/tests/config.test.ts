@@ -14,6 +14,22 @@ function writeConfig(dir: string, data: Record<string, unknown>): string {
     return configPath;
 }
 
+/**
+ * Installs a `console.warn` spy, runs `fn`, restores the original, and returns
+ * all captured warning strings (each joined from all arguments with a space).
+ */
+function captureWarnings<T>(fn: () => T): { result: T; warnings: string[] } {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
+    try {
+        const result = fn();
+        return { result, warnings };
+    } finally {
+        console.warn = originalWarn;
+    }
+}
+
 // --- Happy path ---
 
 test('loadConfig() loads a minimal valid config with defaults applied', () => {
@@ -421,4 +437,175 @@ test('loadConfig() falls back to default notesColumns when field is a non-number
     });
     const config = loadConfig(configPath);
     assert.strictEqual(config.notesColumns, 2);
+});
+
+// --- Float rejection (integer guard) ---
+
+test('loadConfig() falls back to default notesCardHeight when value is a float', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        notesCardHeight: 220.5,
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.notesCardHeight, 220, 'float notesCardHeight should fall back to DEFAULT_NOTES_CARD_HEIGHT');
+});
+
+test('loadConfig() falls back to default notesColumns when value is a float', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        notesColumns: 2.5,
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.notesColumns, 2, 'float notesColumns should fall back to DEFAULT_NOTES_COLUMNS');
+});
+
+test('loadConfig() falls back to default cloneDepth when value is a float', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        cloneDepth: 10.1,
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.cloneDepth, 50, 'float cloneDepth should fall back to default (50)');
+});
+
+// --- Out-of-range warnings (console.warn spy) ---
+
+test('loadConfig() emits console.warn when notesCardHeight is below MIN (120)', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        notesCardHeight: 50,
+    });
+    const { result: config, warnings } = captureWarnings(() => loadConfig(configPath));
+    assert.strictEqual(config.notesCardHeight, 50, 'out-of-range value should be passed through without clamping');
+    assert.ok(warnings.length >= 1, 'expected at least one console.warn call');
+    assert.ok(warnings.some(w => w.includes('notesCardHeight')), 'warning should mention the field name');
+});
+
+test('loadConfig() emits console.warn when notesCardHeight is above MAX (800)', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        notesCardHeight: 1000,
+    });
+    const { result: config, warnings } = captureWarnings(() => loadConfig(configPath));
+    assert.strictEqual(config.notesCardHeight, 1000, 'out-of-range value should be passed through without clamping');
+    assert.ok(warnings.length >= 1, 'expected at least one console.warn call');
+    assert.ok(warnings.some(w => w.includes('notesCardHeight')), 'warning should mention the field name');
+});
+
+test('loadConfig() emits console.warn when notesColumns is below MIN (1)', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        notesColumns: 0,
+    });
+    const { result: config, warnings } = captureWarnings(() => loadConfig(configPath));
+    assert.strictEqual(config.notesColumns, 0, 'out-of-range value should be passed through without clamping');
+    assert.ok(warnings.length >= 1, 'expected at least one console.warn call');
+    assert.ok(warnings.some(w => w.includes('notesColumns')), 'warning should mention the field name');
+});
+
+test('loadConfig() emits console.warn when notesColumns is above MAX (6)', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        notesColumns: 10,
+    });
+    const { result: config, warnings } = captureWarnings(() => loadConfig(configPath));
+    assert.strictEqual(config.notesColumns, 10, 'out-of-range value should be passed through without clamping');
+    assert.ok(warnings.length >= 1, 'expected at least one console.warn call');
+    assert.ok(warnings.some(w => w.includes('notesColumns')), 'warning should mention the field name');
+});
+
+test('loadConfig() emits console.warn when gitPollingIntervalSeconds is below MIN (10)', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitPollingIntervalSeconds: 5,
+    });
+    const { result: config, warnings } = captureWarnings(() => loadConfig(configPath));
+    assert.strictEqual(config.gitPollingIntervalSeconds, 5, 'out-of-range value should be passed through without clamping');
+    assert.ok(warnings.length >= 1, 'expected at least one console.warn call');
+    assert.ok(warnings.some(w => w.includes('gitPollingIntervalSeconds')), 'warning should mention the field name');
+});
+
+test('loadConfig() does not emit console.warn for in-range numeric values', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        notesCardHeight: 300,
+        notesColumns: 3,
+        gitPollingIntervalSeconds: 60,
+    });
+    const { warnings } = captureWarnings(() => loadConfig(configPath));
+    assert.strictEqual(warnings.length, 0, 'no console.warn expected for in-range values');
+});
+
+// --- cloneDepth out-of-range warnings ---
+
+test('loadConfig() emits console.warn when cloneDepth is below MIN (0)', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        cloneDepth: -1,
+    });
+    const { result: config, warnings } = captureWarnings(() => loadConfig(configPath));
+    assert.strictEqual(config.cloneDepth, -1, 'out-of-range value should be passed through without clamping');
+    assert.ok(warnings.length >= 1, 'expected at least one console.warn call');
+    assert.ok(warnings.some(w => w.includes('cloneDepth')), 'warning should mention the field name');
+});
+
+test('loadConfig() emits console.warn when cloneDepth is above MAX (2147483647)', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        cloneDepth: 2_147_483_648,
+    });
+    const { result: config, warnings } = captureWarnings(() => loadConfig(configPath));
+    assert.strictEqual(config.cloneDepth, 2_147_483_648, 'out-of-range value should be passed through without clamping');
+    assert.ok(warnings.length >= 1, 'expected at least one console.warn call');
+    assert.ok(warnings.some(w => w.includes('cloneDepth')), 'warning should mention the field name');
+});
+
+// --- serverPort out-of-range warnings ---
+
+test('loadConfig() emits console.warn when serverPort is below MIN (1)', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        serverPort: 0,
+    });
+    const { result: config, warnings } = captureWarnings(() => loadConfig(configPath));
+    assert.strictEqual(config.serverPort, 0, 'out-of-range value should be passed through without clamping');
+    assert.ok(warnings.length >= 1, 'expected at least one console.warn call');
+    assert.ok(warnings.some(w => w.includes('serverPort')), 'warning should mention the field name');
+});
+
+test('loadConfig() emits console.warn when serverPort is above MAX (65535)', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        serverPort: 99999,
+    });
+    const { result: config, warnings } = captureWarnings(() => loadConfig(configPath));
+    assert.strictEqual(config.serverPort, 99999, 'out-of-range value should be passed through without clamping');
+    assert.ok(warnings.length >= 1, 'expected at least one console.warn call');
+    assert.ok(warnings.some(w => w.includes('serverPort')), 'warning should mention the field name');
 });

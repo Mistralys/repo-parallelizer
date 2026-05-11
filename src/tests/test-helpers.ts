@@ -1,6 +1,44 @@
+/**
+ * Shared test utilities for all unit test suites in `src/tests/`.
+ *
+ * Exports:
+ *  - `makeTestConfig`        — builds a minimal `AppConfig` rooted at a temp directory.
+ *  - `createTempDirTracker`  — creates self-cleaning temp directories for test isolation.
+ *  - `setupFakeGit`          — installs a fake `git` binary that records invocations.
+ */
+
 import * as fs from 'node:fs';
 import * as os from 'os';
 import * as path from 'node:path';
+
+import { type AppConfig } from '../config/config.types.js';
+
+/**
+ * Creates a minimal `AppConfig` suitable for use in unit tests.
+ *
+ * `storageFolder` and `projectsFolder` are derived from the supplied `base`
+ * directory so that each test can work inside its own isolated temp tree.
+ * All other fields are set to sensible defaults that match production
+ * defaults.  Pass `overrides` to adjust individual fields without having to
+ * repeat the full object literal.
+ *
+ * @param base      - Root temp-directory for this test (e.g. the value
+ *                    returned by your `makeTempDir()` call).
+ * @param overrides - Optional partial config to merge on top of the defaults.
+ * @returns A complete `AppConfig` object.
+ */
+export function makeTestConfig(base: string, overrides?: Partial<AppConfig>): AppConfig {
+    return {
+        storageFolder: path.join(base, 'storage'),
+        projectsFolder: path.join(base, 'projects'),
+        cloneDepth: 50,
+        serverPort: 4200,
+        gitPollingIntervalSeconds: 30,
+        notesCardHeight: 220,
+        notesColumns: 2,
+        ...overrides,
+    };
+}
 
 /**
  * Creates a temp-directory tracker that auto-cleans all created directories

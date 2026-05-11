@@ -5,17 +5,40 @@ import type { AppConfig } from './config.types.js';
 import {
     DEFAULT_NOTES_CARD_HEIGHT,
     DEFAULT_NOTES_COLUMNS,
+    MIN_NOTES_CARD_HEIGHT,
+    MAX_NOTES_CARD_HEIGHT,
+    MIN_NOTES_COLUMNS,
+    MAX_NOTES_COLUMNS,
+    MIN_POLLING_INTERVAL_SECONDS,
+    MAX_POLLING_INTERVAL_SECONDS,
+    MIN_CLONE_DEPTH,
+    MAX_CLONE_DEPTH,
+    MIN_SERVER_PORT,
+    MAX_SERVER_PORT,
 } from './config.constants.js';
 
 const REQUIRED_FIELDS: ReadonlyArray<keyof AppConfig> = ['projectsFolder', 'storageFolder'];
 
-const DEFAULTS: Readonly<Pick<AppConfig, 'cloneDepth' | 'serverPort' | 'gitPollingIntervalSeconds' | 'notesCardHeight' | 'notesColumns'>> = {
+// When adding a new non-optional AppConfig field with a sensible default: add the
+// key to the Pick<AppConfig, ...> union and its value here, then update loadConfig()
+// to fall back to it. The satisfies guard below will catch if DEFAULTS is incomplete.
+export const DEFAULTS: Readonly<Pick<AppConfig, 'cloneDepth' | 'serverPort' | 'gitPollingIntervalSeconds' | 'notesCardHeight' | 'notesColumns'>> = {
     cloneDepth: 50,
     serverPort: 4200,
     gitPollingIntervalSeconds: 30,
     notesCardHeight: DEFAULT_NOTES_CARD_HEIGHT,
     notesColumns: DEFAULT_NOTES_COLUMNS,
 };
+
+// Compile-time guard: ensures DEFAULTS + required fields cover the full AppConfig shape.
+// If a new required field is added to AppConfig without updating DEFAULTS, this line
+// will produce a type error.
+const _defaultsCoverageGuard: AppConfig = {
+    ...DEFAULTS,
+    projectsFolder: '',
+    storageFolder: '',
+} satisfies AppConfig;
+void _defaultsCoverageGuard;
 
 /**
  * Loads, validates, and returns the application configuration from `config.json`.
@@ -58,19 +81,72 @@ export function loadConfig(configPath?: string): AppConfig {
     return {
         projectsFolder: raw['projectsFolder'] as string,
         storageFolder: raw['storageFolder'] as string,
-        cloneDepth: typeof raw['cloneDepth'] === 'number' ? raw['cloneDepth'] : DEFAULTS.cloneDepth,
-        serverPort: typeof raw['serverPort'] === 'number' ? raw['serverPort'] : DEFAULTS.serverPort,
-        gitPollingIntervalSeconds:
-            typeof raw['gitPollingIntervalSeconds'] === 'number'
-                ? raw['gitPollingIntervalSeconds']
-                : DEFAULTS.gitPollingIntervalSeconds,
+        cloneDepth: parseIntegerField(raw['cloneDepth'], 'cloneDepth', DEFAULTS.cloneDepth, MIN_CLONE_DEPTH, MAX_CLONE_DEPTH),
+        serverPort: parseIntegerField(raw['serverPort'], 'serverPort', DEFAULTS.serverPort, MIN_SERVER_PORT, MAX_SERVER_PORT),
+        gitPollingIntervalSeconds: parseIntegerField(
+            raw['gitPollingIntervalSeconds'],
+            'gitPollingIntervalSeconds',
+            DEFAULTS.gitPollingIntervalSeconds,
+            MIN_POLLING_INTERVAL_SECONDS,
+            MAX_POLLING_INTERVAL_SECONDS,
+        ),
         gitCredentials: parseGitCredentials(raw['gitCredentials']),
         webserverUrl: typeof raw['webserverUrl'] === 'string' && raw['webserverUrl'].trim() !== ''
             ? raw['webserverUrl'].trim().replace(/\/+$/, '')
             : undefined,
-        notesCardHeight: typeof raw['notesCardHeight'] === 'number' ? raw['notesCardHeight'] : DEFAULTS.notesCardHeight,
-        notesColumns: typeof raw['notesColumns'] === 'number' ? raw['notesColumns'] : DEFAULTS.notesColumns,
+        notesCardHeight: parseIntegerField(
+            raw['notesCardHeight'],
+            'notesCardHeight',
+            DEFAULTS.notesCardHeight,
+            MIN_NOTES_CARD_HEIGHT,
+            MAX_NOTES_CARD_HEIGHT,
+        ),
+        notesColumns: parseIntegerField(
+            raw['notesColumns'],
+            'notesColumns',
+            DEFAULTS.notesColumns,
+            MIN_NOTES_COLUMNS,
+            MAX_NOTES_COLUMNS,
+        ),
     };
+}
+
+/**
+ * Parses a numeric config field, enforcing integer-only values and optional
+ * `[min, max]` range bounds.
+ *
+ * - If `value` is not a `number`, returns `defaultValue`.
+ * - If `value` is a number but not an integer (e.g. a float like `220.5`),
+ *   returns `defaultValue`.
+ * - If `min` and `max` are provided and the integer value is outside that range,
+ *   emits `console.warn` but returns the value as-is (no clamping).
+ *
+ * @param value     Raw value read from the config file.
+ * @param fieldName Field name used in warning messages.
+ * @param defaultValue Fallback value for non-numeric or float inputs.
+ * @param min       Optional lower bound (inclusive).
+ * @param max       Optional upper bound (inclusive).
+ */
+function parseIntegerField(
+    value: unknown,
+    fieldName: string,
+    defaultValue: number,
+    min?: number,
+    max?: number,
+): number {
+    if (typeof value !== 'number') {
+        return defaultValue;
+    }
+    if (!Number.isInteger(value)) {
+        return defaultValue;
+    }
+    if (min !== undefined && max !== undefined && (value < min || value > max)) {
+        console.warn(
+            `Configuration warning: "${fieldName}" value ${value} is outside the allowed range ` +
+            `[${min}, ${max}]. The value will be used as-is.`
+        );
+    }
+    return value;
 }
 
 /**

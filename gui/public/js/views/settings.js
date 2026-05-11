@@ -282,6 +282,53 @@ function buildAddCredentialForm(tableContainer) {
 }
 
 // ---------------------------------------------------------------------------
+// Credentials section factory
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the "Git Credentials" settings section.
+ *
+ * Renders the section heading, description, credentials table, and the
+ * "Add / Update Credential" form, then kicks off the initial table load.
+ *
+ * Unlike other `build*Section()` factories, this one does **not** expose a
+ * `save()` function. Credentials are saved immediately when the inline form is
+ * submitted — they do not participate in the shared "Save Settings" footer
+ * button workflow. This is intentional: PATs are sensitive and should be
+ * committed on their own, not batched with other settings.
+ *
+ * Side-effect on mount: `renderCredentialsTable()` is called synchronously
+ * inside this factory to initiate the initial async table load. Callers do
+ * not need to trigger the first render separately.
+ *
+ * @returns {{ element: HTMLElement }}
+ */
+function buildCredentialsSection() {
+    const credSection = document.createElement('section');
+    credSection.className = 'settings-section';
+
+    const credHeading = document.createElement('h2');
+    credHeading.textContent = 'Git Credentials';
+    credSection.appendChild(credHeading);
+
+    const credDescription = document.createElement('p');
+    credDescription.textContent =
+        'Manage per-host personal access tokens used for authenticating with private repositories. Tokens are stored masked — only the last 4 characters are visible.';
+    credSection.appendChild(credDescription);
+
+    const tableContainer = document.createElement('div');
+    tableContainer.className = 'credentials-table-container';
+    credSection.appendChild(tableContainer);
+
+    credSection.appendChild(buildAddCredentialForm(tableContainer));
+
+    // Initial data load
+    renderCredentialsTable(tableContainer);
+
+    return { element: credSection };
+}
+
+// ---------------------------------------------------------------------------
 // Repositories Refresh Delay section
 // ---------------------------------------------------------------------------
 
@@ -670,27 +717,8 @@ export function renderSettings(container, _params) {
     container.appendChild(heading);
 
     // Credentials section
-    const credSection = document.createElement('section');
-    credSection.className = 'settings-section';
-
-    const credHeading = document.createElement('h2');
-    credHeading.textContent = 'Git Credentials';
-    credSection.appendChild(credHeading);
-
-    const credDescription = document.createElement('p');
-    credDescription.textContent =
-        'Manage per-host personal access tokens used for authenticating with private repositories. Tokens are stored masked — only the last 4 characters are visible.';
-    credSection.appendChild(credDescription);
-
-    const tableContainer = document.createElement('div');
-    tableContainer.className = 'credentials-table-container';
-    credSection.appendChild(tableContainer);
-
-    credSection.appendChild(buildAddCredentialForm(tableContainer));
-    container.appendChild(credSection);
-
-    // Initial data load
-    renderCredentialsTable(tableContainer);
+    const credentials = buildCredentialsSection();
+    container.appendChild(credentials.element);
 
     // ---- Remaining sections ----
     const refreshDelay = buildRefreshDelaySection();

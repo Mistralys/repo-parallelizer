@@ -3,12 +3,11 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'os';
 import * as path from 'node:path';
-import { EventEmitter } from 'node:events';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Router } from '../../router.js';
 import { registerConfigRoutes } from '../../routes/config.js';
 import type { AppConfig } from '../../../config/config.types.js';
 import type { PollingManager } from '../../pollingManager.js';
+import { mockRequest, mockResponse } from '../helpers/mock-http.js';
 
 // ---------------------------------------------------------------------------
 // Temp dir (cleaned up on process exit)
@@ -19,57 +18,6 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'paralizer-config-routes-t
 process.on('exit', () => {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
-
-// ---------------------------------------------------------------------------
-// Mock helpers (same pattern as other route tests)
-// ---------------------------------------------------------------------------
-
-function mockRequest(method: string, url: string, bodyJson?: unknown): IncomingMessage {
-    const req = new EventEmitter() as IncomingMessage;
-    (req as unknown as { method: string }).method = method;
-    (req as unknown as { url: string }).url = url;
-    (req as unknown as { destroy(): void }).destroy = () => {
-        req.emit('error', new Error('destroyed'));
-    };
-
-    process.nextTick(() => {
-        if (bodyJson !== undefined) {
-            req.emit('data', Buffer.from(JSON.stringify(bodyJson)));
-        }
-        req.emit('end');
-    });
-
-    return req;
-}
-
-interface MockResponse {
-    statusCode: number | undefined;
-    body: string;
-    res: ServerResponse;
-}
-
-function mockResponse(): MockResponse {
-    const mock: MockResponse = {
-        statusCode: undefined,
-        body: '',
-        res: null as unknown as ServerResponse,
-    };
-
-    const res = new EventEmitter() as unknown as ServerResponse;
-
-    (res as unknown as {
-        writeHead(status: number, headers?: Record<string, string | number>): void;
-    }).writeHead = (status: number) => {
-        mock.statusCode = status;
-    };
-
-    (res as unknown as { end(body?: string): void }).end = (body?: string) => {
-        mock.body = body ?? '';
-    };
-
-    mock.res = res;
-    return mock;
-}
 
 // ---------------------------------------------------------------------------
 // Test fixture helpers

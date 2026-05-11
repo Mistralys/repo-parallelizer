@@ -1,0 +1,27 @@
+moduleMetaData:
+  id: "tests"
+  label: "Test Helpers"
+  description: "Shared test utilities (makeTestConfig, createTempDirTracker, setupFakeGit) and all unit test suites for the server layer."
+  keywords:
+    - makeTestConfig
+    - createTempDirTracker
+    - setupFakeGit
+    - AppConfig
+  relatedModules:
+    - config
+
+documents:
+  - description: 'Tests - Overview'
+    outputPath: 'modules/tests/overview.md'
+    sources:
+      - type: file
+        sourcePaths: [ ./ ]
+        filePattern: "README.md"
+
+  - description: 'Tests - Architecture (test-helpers.ts)'
+    outputPath: 'modules/tests/architecture-core.md'
+    sources:
+      - type: file
+        description: 'Shared test utility exports: makeTestConfig, createTempDirTracker, setupFakeGit'
+        sourcePaths: [ ./ ]
+        filePattern: "test-helpers.ts"

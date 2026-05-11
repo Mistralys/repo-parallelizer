@@ -4,13 +4,14 @@ import * as fs from 'node:fs';
 import * as os from 'os';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
-import type { AppConfig } from '../config/config.types.js';
 import { initializeStorage } from '../storage/json-storage.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import { WorkspaceOrchestrator } from '../orchestration/workspace-orchestrator.js';
 import { ProjectOrchestrator } from '../orchestration/project-orchestrator.js';
+import type { AppConfig } from '../config/config.types.js';
+import { makeTestConfig } from './test-helpers.js';
 
 // ─── Global fixtures ──────────────────────────────────────────────────────────
 
@@ -40,17 +41,7 @@ function makeTempDir(): string {
     return fs.mkdtempSync(path.join(tmpRoot, 'test-'));
 }
 
-function makeConfig(base: string): AppConfig {
-    return {
-        storageFolder: path.join(base, 'storage'),
-        projectsFolder: path.join(base, 'projects'),
-        cloneDepth: 50,
-        serverPort: 4200,
-        gitPollingIntervalSeconds: 30,
-        notesCardHeight: 220,
-        notesColumns: 2,
-    };
-}
+
 
 interface TestFixture {
     config: AppConfig;
@@ -62,7 +53,7 @@ interface TestFixture {
 }
 
 function makeFixture(base: string): TestFixture {
-    const config = makeConfig(base);
+    const config = makeTestConfig(base);
     initializeStorage(config);
 
     const repoManager = new RepositoryManager(config);

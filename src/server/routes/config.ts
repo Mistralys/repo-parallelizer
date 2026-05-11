@@ -41,6 +41,17 @@ function extractScheme(url: string): string {
 }
 
 /**
+ * Type guard that returns `true` when `value` is a finite integer number.
+ * Used by PUT route handlers to validate numeric config fields.
+ *
+ * @param value - The value to test (any type accepted).
+ * @returns `true` when `value` is of type `number`, finite, and an integer; `false` otherwise.
+ */
+function isValidFiniteInteger(value: unknown): value is number {
+    return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value);
+}
+
+/**
  * Returns a copy of the credentials map with all tokens masked.
  */
 function buildMaskedCredentials(
@@ -262,13 +273,8 @@ export function registerConfigRoutes(options: ConfigRoutesOptions): void {
 
         const { seconds } = body as { seconds?: unknown };
 
-        if (typeof seconds !== 'number') {
-            sendError(res, 400, 'Missing or invalid field "seconds": must be a number.');
-            return;
-        }
-
-        if (!Number.isFinite(seconds) || !Number.isInteger(seconds)) {
-            sendError(res, 400, 'Field "seconds" must be a finite integer.');
+        if (!isValidFiniteInteger(seconds)) {
+            sendError(res, 400, 'Missing or invalid field "seconds": must be a finite integer.');
             return;
         }
 
@@ -411,11 +417,7 @@ export function registerConfigRoutes(options: ConfigRoutesOptions): void {
 
         // Validate notesCardHeight if provided.
         if (notesCardHeight !== undefined) {
-            if (typeof notesCardHeight !== 'number') {
-                sendError(res, 400, 'Field "notesCardHeight" must be a number.');
-                return;
-            }
-            if (!Number.isFinite(notesCardHeight) || !Number.isInteger(notesCardHeight)) {
+            if (!isValidFiniteInteger(notesCardHeight)) {
                 sendError(res, 400, 'Field "notesCardHeight" must be a finite integer.');
                 return;
             }
@@ -439,11 +441,7 @@ export function registerConfigRoutes(options: ConfigRoutesOptions): void {
 
         // Validate notesColumns if provided.
         if (notesColumns !== undefined) {
-            if (typeof notesColumns !== 'number') {
-                sendError(res, 400, 'Field "notesColumns" must be a number.');
-                return;
-            }
-            if (!Number.isFinite(notesColumns) || !Number.isInteger(notesColumns)) {
+            if (!isValidFiniteInteger(notesColumns)) {
                 sendError(res, 400, 'Field "notesColumns" must be a finite integer.');
                 return;
             }

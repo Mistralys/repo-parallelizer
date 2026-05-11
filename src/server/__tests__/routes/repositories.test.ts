@@ -1,73 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Router } from '../../router.js';
 import { registerRepositoryRoutes } from '../../routes/repositories.js';
 import { NotFoundError } from '../../../errors.js';
 import type { Repository } from '../../../models/repository/repository.types.js';
-
-// ---------------------------------------------------------------------------
-// Minimal mocks — reused from the router test convention
-// ---------------------------------------------------------------------------
-
-/**
- * Creates a minimal mock IncomingMessage for requests without a body.
- * Emits 'end' immediately so `parseJsonBody` resolves quickly if called.
- */
-function mockRequest(method: string, url: string, bodyJson?: unknown): IncomingMessage {
-    const req = new EventEmitter() as IncomingMessage;
-    (req as unknown as { method: string }).method = method;
-    (req as unknown as { url: string }).url = url;
-    (req as unknown as { destroy(): void }).destroy = () => {
-        req.emit('error', new Error('destroyed'));
-    };
-
-    // Emit body and end asynchronously so parseJsonBody has time to attach listeners
-    process.nextTick(() => {
-        if (bodyJson !== undefined) {
-            req.emit('data', Buffer.from(JSON.stringify(bodyJson)));
-        }
-        req.emit('end');
-    });
-
-    return req;
-}
-
-interface MockResponse {
-    statusCode: number | undefined;
-    headers: Record<string, string | number>;
-    body: string;
-    res: ServerResponse;
-}
-
-/**
- * Creates a mock ServerResponse that captures writeHead / end calls.
- */
-function mockResponse(): MockResponse {
-    const mock: MockResponse = {
-        statusCode: undefined,
-        headers: {},
-        body: '',
-        res: null as unknown as ServerResponse,
-    };
-
-    const res = new EventEmitter() as unknown as ServerResponse;
-
-    (res as unknown as {
-        writeHead(status: number, headers: Record<string, string | number>): void;
-    }).writeHead = (status: number, headers: Record<string, string | number>) => {
-        mock.statusCode = status;
-        mock.headers = { ...headers };
-    };
-
-    (res as unknown as { end(body: string): void }).end = (body: string) => {
-        mock.body = body;
-    };
-
-    mock.res = res;
-    return mock;
-}
+import { mockRequest, mockResponse, type MockResponse } from '../helpers/mock-http.js';
 
 // ---------------------------------------------------------------------------
 // Mock RepositoryManager

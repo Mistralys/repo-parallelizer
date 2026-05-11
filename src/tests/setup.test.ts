@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { loadConfig } from '../config/config.js';
+import { loadConfig, DEFAULTS } from '../config/config.js';
 import { _promptPath, _promptNumber, runSetup, type SetupIO } from '../cli/setup.js';
 
 // ---------------------------------------------------------------------------
@@ -349,6 +349,8 @@ test('runSetup writes config.json with expected values via IO adapter', async ()
         assert.strictEqual(loaded.cloneDepth, 10);
         assert.strictEqual(loaded.serverPort, 3500);
         assert.strictEqual(loaded.gitPollingIntervalSeconds, 60);
+        assert.strictEqual(loaded.notesCardHeight, DEFAULTS.notesCardHeight);
+        assert.strictEqual(loaded.notesColumns, DEFAULTS.notesColumns);
 
         assert.ok(fs.existsSync(storageFolder), 'storage folder should exist after setup');
     });

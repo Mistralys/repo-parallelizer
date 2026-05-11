@@ -4,14 +4,14 @@ import * as fs from 'node:fs';
 import * as os from 'os';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
-import type { AppConfig } from '../config/config.types.js';
 import { initializeStorage, writeJsonFile } from '../storage/json-storage.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import { WorkspaceOrchestrator } from '../orchestration/workspace-orchestrator.js';
 import { RepositoryOrchestrator } from '../orchestration/repository-orchestrator.js';
-import { setupFakeGit } from './test-helpers.js';
+import type { AppConfig } from '../config/config.types.js';
+import { setupFakeGit, makeTestConfig } from './test-helpers.js';
 
 // ─── Global fixtures ──────────────────────────────────────────────────────────
 
@@ -43,17 +43,7 @@ function makeTempDir(): string {
     return fs.mkdtempSync(path.join(tmpRoot, 'test-'));
 }
 
-function makeConfig(base: string): AppConfig {
-    return {
-        storageFolder: path.join(base, 'storage'),
-        projectsFolder: path.join(base, 'projects'),
-        cloneDepth: 50,
-        serverPort: 4200,
-        gitPollingIntervalSeconds: 30,
-        notesCardHeight: 220,
-        notesColumns: 2,
-    };
-}
+
 
 interface TestFixture {
     config: AppConfig;
@@ -71,7 +61,7 @@ interface TestFixture {
  * - A STABLE workspace already cloned via WorkspaceOrchestrator
  */
 async function makeFixture(base: string): Promise<TestFixture> {
-    const config = makeConfig(base);
+    const config = makeTestConfig(base);
     initializeStorage(config);
 
     const repoManager = new RepositoryManager(config);
@@ -149,7 +139,7 @@ test('addRepositoryToProject returns per-workspace clone results', async () => {
 
 test('addRepositoryToProject captures failure for unreachable repo without aborting', async () => {
     const base = makeTempDir();
-    const config = makeConfig(base);
+    const config = makeTestConfig(base);
     initializeStorage(config);
 
     const repoManager = new RepositoryManager(config);
@@ -194,7 +184,7 @@ test('addRepositoryToProject throws when project does not exist', async () => {
 
 test('addRepositoryToProject rejects a clone path that resolves outside projectsFolder', async () => {
     const base = makeTempDir();
-    const config = makeConfig(base);
+    const config = makeTestConfig(base);
     initializeStorage(config);
 
     const repoManager = new RepositoryManager(config);
@@ -295,7 +285,7 @@ test('removeRepositoryFromProject updates project data to exclude the repo', asy
 
 test('removeRepositoryFromProject succeeds when clone folder does not exist on disk', async () => {
     const base = makeTempDir();
-    const config = makeConfig(base);
+    const config = makeTestConfig(base);
     initializeStorage(config);
 
     const repoManager = new RepositoryManager(config);
@@ -349,7 +339,7 @@ test('deleteRepositoryGlobally removes clones from all projects that reference i
 
 test('deleteRepositoryGlobally cascades to all projects that reference the repo', async () => {
     const base = makeTempDir();
-    const config = makeConfig(base);
+    const config = makeTestConfig(base);
     initializeStorage(config);
 
     const repoManager = new RepositoryManager(config);
@@ -412,7 +402,7 @@ test('addRepositoryToProject passes token-injected URL to cloneRepository when c
     const fakeGitDir = fs.mkdtempSync(path.join(tmpRoot, 'fake-git-ro-inj-'));
     const capturedArgsFile = setupFakeGit(fakeGitDir);
 
-    const config = makeConfig(base);
+    const config = makeTestConfig(base);
     // Only HTTPS URLs are processed by injectCredentials.
     config.gitCredentials = { 'private.example': 'ghp_testtoken' };
     initializeStorage(config);
@@ -452,7 +442,7 @@ test('addRepositoryToProject passes original URL to cloneRepository when no cred
     const fakeGitDir = fs.mkdtempSync(path.join(tmpRoot, 'fake-git-ro-nocr-'));
     const capturedArgsFile = setupFakeGit(fakeGitDir);
 
-    const config = makeConfig(base); // gitCredentials deliberately absent
+    const config = makeTestConfig(base); // gitCredentials deliberately absent
     initializeStorage(config);
 
     const repoManager    = new RepositoryManager(config);

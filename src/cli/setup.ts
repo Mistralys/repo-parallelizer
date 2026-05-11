@@ -4,16 +4,15 @@ import { printHeader, printSuccess, printError, printInfo, askQuestion, askYesNo
 import { getToolRoot, getConfigPath } from '../utils/paths.js';
 import { initializeStorage } from '../storage/json-storage.js';
 import type { AppConfig } from '../config/config.types.js';
-import { DEFAULT_NOTES_CARD_HEIGHT, DEFAULT_NOTES_COLUMNS } from '../config/config.constants.js';
+import { DEFAULTS } from '../config/config.js';
 
 // ---------------------------------------------------------------------------
 // Defaults
 // ---------------------------------------------------------------------------
 
-const DEFAULTS = {
-    cloneDepth: 50,
-    serverPort: 4200,
-    gitPollingIntervalSeconds: 30,
+// UI copy only — these are prompt hints shown to the user, not AppConfig defaults.
+// Actual config defaults are sourced from DEFAULTS (imported from config.ts).
+const SETUP_DEFAULTS = {
     storageFolder: 'data/storage',
 } as const;
 
@@ -182,7 +181,7 @@ export async function runSetup(io?: SetupIO): Promise<void> {
         // ------------------------------------------------------------------
         console.log('');
         printInfo('Where should the tool store its data files?');
-        const storageFolder = await _promptPath('Storage folder path', DEFAULTS.storageFolder, ask, confirm);
+        const storageFolder = await _promptPath('Storage folder path', SETUP_DEFAULTS.storageFolder, ask, confirm);
 
         // ------------------------------------------------------------------
         // Step 4 — Numeric settings
@@ -216,13 +215,12 @@ export async function runSetup(io?: SetupIO): Promise<void> {
         // Step 5 — Write config.json
         // ------------------------------------------------------------------
         const config: AppConfig = {
+            ...DEFAULTS,
             projectsFolder,
             storageFolder,
             cloneDepth,
             serverPort,
             gitPollingIntervalSeconds,
-            notesCardHeight: DEFAULT_NOTES_CARD_HEIGHT,
-            notesColumns: DEFAULT_NOTES_COLUMNS,
         };
 
         fs.writeFileSync(configPath, JSON.stringify(config, null, 4) + '\n', 'utf8');

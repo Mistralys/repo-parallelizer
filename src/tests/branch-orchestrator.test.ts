@@ -4,13 +4,14 @@ import * as fs from 'node:fs';
 import * as os from 'os';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
-import type { AppConfig } from '../config/config.types.js';
 import { initializeStorage } from '../storage/json-storage.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import { BranchOrchestrator } from '../orchestration/branch-orchestrator.js';
+import type { AppConfig } from '../config/config.types.js';
 import type { BranchInfo } from '../git/git.types.js';
+import { makeTestConfig } from './test-helpers.js';
 
 // ─── Fixture setup ────────────────────────────────────────────────────────────
 
@@ -46,17 +47,7 @@ function makeTempDir(): string {
     return fs.mkdtempSync(path.join(tmpRoot, 'test-'));
 }
 
-function makeConfig(base: string): AppConfig {
-    return {
-        storageFolder: path.join(base, 'storage'),
-        projectsFolder: path.join(base, 'projects'),
-        cloneDepth: 50,
-        serverPort: 4200,
-        gitPollingIntervalSeconds: 30,
-        notesCardHeight: 220,
-        notesColumns: 2,
-    };
-}
+
 
 interface TestFixture {
     config: AppConfig;
@@ -77,7 +68,7 @@ interface TestFixture {
  * - Clones the origin repo into the expected workspace path
  */
 function makeFixture(base: string, extraSetup?: (repoDir: string) => void): TestFixture {
-    const config = makeConfig(base);
+    const config = makeTestConfig(base);
     initializeStorage(config);
 
     const repoManager = new RepositoryManager(config);
@@ -251,7 +242,7 @@ test('switchBranches switches to a branch that exists only on remote', async () 
 
 test('switchBranches reports per-repository results', async () => {
     const base = makeTempDir();
-    const config = makeConfig(base);
+    const config = makeTestConfig(base);
     initializeStorage(config);
     const repoManager = new RepositoryManager(config);
     const projectManager = new ProjectManager(config, repoManager);

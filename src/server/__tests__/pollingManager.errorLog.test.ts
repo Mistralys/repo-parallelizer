@@ -14,27 +14,19 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { AppConfig } from '../../config/config.types.js';
 import type { ProjectManager } from '../../models/project/project.manager.js';
 import type { WorkspaceManager } from '../../models/workspace/workspace.manager.js';
 import type { ErrorLogManager } from '../../error-log/error-log.manager.js';
 import type { ErrorLogEntry } from '../../error-log/error-log.types.js';
 import type { GitStatusInfo } from '../../git/git.types.js';
 import { PollingManager } from '../pollingManager.js';
+import { makeTestConfig } from '../../tests/test-helpers.js';
 
 // ---------------------------------------------------------------------------
 // Shared test fixtures
 // ---------------------------------------------------------------------------
 
-const BASE_CONFIG: AppConfig = {
-    projectsFolder: '/fake/projects',
-    storageFolder: '/fake/storage',
-    cloneDepth: 50,
-    serverPort: 4200,
-    gitPollingIntervalSeconds: 30,
-    notesCardHeight: 220,
-    notesColumns: 2,
-};
+const BASE_CONFIG = makeTestConfig('/fake');
 
 function makeStatus(branch = 'main'): GitStatusInfo {
     return {
@@ -244,7 +236,7 @@ test('AC4: second consecutive failure (no recovery between) does NOT produce a n
 
 test('AC5: Context fields are populated from the repo path', async () => {
     // Path: /fake/projects/my-project/DEV/my-repo
-    const config: AppConfig = { ...BASE_CONFIG, projectsFolder: '/fake/projects' };
+    const config = BASE_CONFIG;
 
     const project = {
         Id: 'my-project',
@@ -277,15 +269,12 @@ test('AC5: Context fields are populated from the repo path', async () => {
 });
 
 test('AC5: Context is empty object ({}) for a path outside projectsFolder (fewer than 3 segments)', async () => {
-    // Construct a path that has only 2 relative segments when processed by extractContext
-    const config: AppConfig = { ...BASE_CONFIG, projectsFolder: '/fake/projects' };
-
     // Create a repo path that is only 2 segments deep relative to projectsFolder
     const shallowPath = 'proj/repo-only';   // 2 segments → no workspace segment
     const project = { Id: 'proj', Repositories: [shallowPath], Workspaces: { STABLE: {} } };
 
     // Override projectsFolder so path.relative gives exactly 2 segments
-    const overriddenConfig: AppConfig = { ...config, projectsFolder: '/fake/projects/proj' };
+    const overriddenConfig = { ...BASE_CONFIG, projectsFolder: '/fake/projects/proj' };
 
     const pm = {
         list: () => [{ Id: 'proj', Name: 'proj' }],

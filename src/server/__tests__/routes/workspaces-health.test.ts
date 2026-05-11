@@ -13,8 +13,6 @@
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -24,6 +22,7 @@ import { NotFoundError } from '../../../errors.js';
 import type { WorkspaceInfo } from '../../../models/workspace/workspace.types.js';
 import type { ProjectData } from '../../../models/project/project.types.js';
 import type { WorkspaceHealthReport } from '../../../orchestration/workspace-health.js';
+import { mockRequest, mockResponse, type MockResponse } from '../helpers/mock-http.js';
 
 // ---------------------------------------------------------------------------
 // Temp-directory lifecycle
@@ -54,51 +53,6 @@ function makeTempDir(): string {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-health-test-'));
     allTempDirs.push(dir);
     return dir;
-}
-
-// ---------------------------------------------------------------------------
-// Minimal HTTP primitives
-// ---------------------------------------------------------------------------
-
-function mockRequest(method: string, url: string): IncomingMessage {
-    const req = new EventEmitter() as IncomingMessage;
-    (req as unknown as { method: string }).method = method;
-    (req as unknown as { url: string }).url = url;
-    (req as unknown as { destroy(): void }).destroy = () => {
-        req.emit('error', new Error('destroyed'));
-    };
-    // Emit 'end' asynchronously so the request looks like a real stream; the
-    // handlers under test do not consume a body, so this never blocks a test.
-    process.nextTick(() => req.emit('end'));
-    return req;
-}
-
-interface MockResponse {
-    statusCode: number | undefined;
-    headers: Record<string, string | number>;
-    body: string;
-    res: ServerResponse;
-}
-
-function mockResponse(): MockResponse {
-    const mock: MockResponse = {
-        statusCode: undefined,
-        headers: {},
-        body: '',
-        res: null as unknown as ServerResponse,
-    };
-    const res = new EventEmitter() as unknown as ServerResponse;
-    (res as unknown as {
-        writeHead(status: number, headers: Record<string, string | number>): void;
-    }).writeHead = (status: number, headers: Record<string, string | number>) => {
-        mock.statusCode = status;
-        mock.headers = { ...headers };
-    };
-    (res as unknown as { end(body: string): void }).end = (body: string) => {
-        mock.body = body;
-    };
-    mock.res = res;
-    return mock;
 }
 
 // ---------------------------------------------------------------------------

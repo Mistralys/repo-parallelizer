@@ -47,3 +47,31 @@ export const MAX_NOTES_COLUMNS = 6;
  * Default number of columns used in the notes view grid when not set by the user.
  */
 export const DEFAULT_NOTES_COLUMNS = 2;
+
+// ---------------------------------------------------------------------------
+// Git clone depth
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimum clone depth (0 means a full/unlimited clone, which is valid).
+ */
+export const MIN_CLONE_DEPTH = 0;
+
+/**
+ * Maximum clone depth. Git uses 32-bit signed integers for depth.
+ */
+export const MAX_CLONE_DEPTH = 2_147_483_647;
+
+// ---------------------------------------------------------------------------
+// Server port
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimum TCP port number (well-known / system ports start at 1).
+ */
+export const MIN_SERVER_PORT = 1;
+
+/**
+ * Maximum TCP port number (standard 16-bit unsigned range).
+ */
+export const MAX_SERVER_PORT = 65_535;

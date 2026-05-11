@@ -2,24 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { AppConfig } from '../config/config.types.js';
 import { ErrorLogManager } from '../error-log/error-log.manager.js';
 import { DEFAULT_MAX_ERROR_LOG_ENTRIES } from '../error-log/error-log.types.js';
-import { createTempDirTracker } from './test-helpers.js';
+import { createTempDirTracker, makeTestConfig } from './test-helpers.js';
 
 const makeTempDir = createTempDirTracker('paralizer-error-log-test-');
-
-function makeTestConfig(base: string): AppConfig {
-    return {
-        storageFolder: path.join(base, 'storage'),
-        projectsFolder: path.join(base, 'projects'),
-        cloneDepth: 50,
-        serverPort: 4200,
-        gitPollingIntervalSeconds: 30,
-        notesCardHeight: 220,
-        notesColumns: 2,
-    };
-}
 
 function makeManager(base: string): ErrorLogManager {
     const config = makeTestConfig(base);
@@ -351,10 +338,7 @@ test('append writes to stderr when writeJsonFile fails', () => {
 
 test('append respects custom maxErrorLogEntries from config', () => {
     const base = makeTempDir();
-    const config: AppConfig = {
-        ...makeTestConfig(base),
-        maxErrorLogEntries: 5,
-    };
+    const config = makeTestConfig(base, { maxErrorLogEntries: 5 });
     fs.mkdirSync(config.storageFolder, { recursive: true });
     const mgr = new ErrorLogManager(config);
 

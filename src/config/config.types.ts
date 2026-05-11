@@ -68,6 +68,9 @@ export interface AppConfig {
      * Height (in pixels) of each note card in the notes view.
      * Must be between {@link MIN_NOTES_CARD_HEIGHT} and {@link MAX_NOTES_CARD_HEIGHT}.
      * @default DEFAULT_NOTES_CARD_HEIGHT
+     * @remarks Non-integer values (floats, NaN, Infinity) are rejected by `loadConfig()`
+     * and replaced with the default. Out-of-range integers are accepted as-is with a
+     * `console.warn` warning — no clamping is performed.
      */
     notesCardHeight: number;
 
@@ -75,6 +78,9 @@ export interface AppConfig {
      * Number of columns displayed in the notes view grid.
      * Must be between {@link MIN_NOTES_COLUMNS} and {@link MAX_NOTES_COLUMNS}.
      * @default DEFAULT_NOTES_COLUMNS
+     * @remarks Non-integer values (floats, NaN, Infinity) are rejected by `loadConfig()`
+     * and replaced with the default. Out-of-range integers are accepted as-is with a
+     * `console.warn` warning — no clamping is performed.
      */
     notesColumns: number;
 }
