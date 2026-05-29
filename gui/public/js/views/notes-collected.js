@@ -31,6 +31,7 @@
 import { api }                    from '../api.js';
 import { showToast }              from '../components/toast.js';
 import { normaliseNotesResponse } from '../utils/normalise.js';
+import { APP_NAME_SHORT }         from '../utils/constants.js';
 
 // ---------------------------------------------------------------------------
 // Internal DOM helpers
@@ -252,6 +253,8 @@ function buildNoteCard(projectId, projectName, workspaceId, initialNotes, onSave
  * @param {Object}      _params   - Route params (none for this route).
  */
 export async function renderNotesCollected(container, _params) {
+    document.title = 'Notes - ' + APP_NAME_SHORT;
+
     // Show loading state immediately.
     const loadingEl = document.createElement('p');
     loadingEl.className = 'notes-loading';
