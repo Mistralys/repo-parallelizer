@@ -124,6 +124,7 @@ function buildSidebar(projects, onItemClick) {
     for (const project of projects) {
         const details = document.createElement('details');
         details.className = 'notes-sidebar-group';
+        details.open = true;
 
         const summary = document.createElement('summary');
         summary.className = 'notes-sidebar-group-title';

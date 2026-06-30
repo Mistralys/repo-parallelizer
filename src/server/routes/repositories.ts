@@ -4,30 +4,39 @@ import type { RepositoryManager } from '../../models/repository/repository.manag
 import { NotFoundError } from '../../errors.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
 import type { Repository } from '../../models/repository/repository.types.js';
+import type { AppConfig, GitCredentialEntry } from '../../config/config.types.js';
+import type { ErrorLogManager } from '../../error-log/error-log.manager.js';
+import { extractHost } from '../../git/git-credentials.js';
 
 // ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
 /**
- * Registers the five standard CRUD routes for the `/api/repositories` resource
- * group on the provided `Router` instance.
+ * Registers all routes for the `/api/repositories` resource group on the
+ * provided `Router` instance. This includes five standard CRUD routes and two
+ * credential-management routes that require access to the application
+ * configuration.
  *
  * All handlers delegate to the supplied `RepositoryManager` and map results
  * or errors to the appropriate HTTP status codes:
  *
- * | Method | Path                                      | Success | Failure |
- * |--------|-------------------------------------------|---------|---------|
- * | GET    | /api/repositories                         | 200     | —       |
- * | GET    | /api/repositories/:id                     | 200     | 404     |
- * | POST   | /api/repositories                         | 201     | 400     |
- * | PUT    | /api/repositories/:id                     | 200     | 404     |
- * | DELETE | /api/repositories/:id                     | 204     | 404     |
- * | POST   | /api/repositories/:id/refresh-timestamp   | 200     | 404     |
+ * | Method | Path                                        | Success | Failure |
+ * |--------|---------------------------------------------|---------|---------|
+ * | GET    | /api/repositories                           | 200     | —       |
+ * | GET    | /api/repositories/:id                       | 200     | 404     |
+ * | POST   | /api/repositories                           | 201     | 400     |
+ * | PUT    | /api/repositories/:id                       | 200     | 404     |
+ * | DELETE | /api/repositories/:id                       | 204     | 404     |
+ * | POST   | /api/repositories/:id/refresh-timestamp     | 200     | 404     |
+ * | PUT    | /api/repositories/:id/credential            | 200     | 400/404 |
+ * | GET    | /api/repositories/:id/credential-options    | 200     | 404     |
  */
 export function registerRepositoryRoutes(
     router: Router,
     repoManager: RepositoryManager,
+    appConfig: AppConfig,
+    errorLogManager?: ErrorLogManager,
 ): void {
     /**
      * Look up a repository by ID.
@@ -218,5 +227,150 @@ export function registerRepositoryRoutes(
                 sendError(res, 500, 'Internal server error.');
             }
         }
+    });
+
+    // ------------------------------------------------------------------
+    // PUT /api/repositories/:id/credential — set or clear credential
+    //
+    //   Accepts `{ credentialId: string | null }`.
+    //   - When `credentialId` is a non-empty string, validates that it
+    //     references an existing entry in `appConfig.gitCredentials`, then
+    //     calls `RepositoryManager.updateCredential()` to persist the
+    //     association.
+    //   - When `credentialId` is `null`, clears the association.
+    //   Returns the updated `Repository` on success (200).
+    // ------------------------------------------------------------------
+    router.put('/api/repositories/:id/credential', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const id = params['id'];
+
+        const repo = resolveRepository(res, id);
+        if (repo === undefined) return;
+
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return;
+        }
+
+        const { credentialId } = body as { credentialId?: unknown };
+
+        if (credentialId !== null && typeof credentialId !== 'string') {
+            sendError(res, 400, 'Missing required field: credentialId (string or null).');
+            return;
+        }
+
+        if (typeof credentialId === 'string') {
+            // Validate that the referenced credential exists in the config.
+            const credentials: GitCredentialEntry[] = appConfig.gitCredentials ?? [];
+            const credential = credentials.find((c) => c.id === credentialId);
+            if (!credential) {
+                sendError(
+                    res,
+                    400,
+                    `Credential with ID "${credentialId}" does not exist in the application configuration.`,
+                );
+                return;
+            }
+
+            // Host-coherence guard: reject when the credential's host does not
+            // match the repository URL's hostname. SSH URLs (null repoHost) are
+            // exempt — SSH auth is not handled by credential tokens.
+            const repoHost = extractHost(repo.Url);
+            if (repoHost !== null && credential.host !== repoHost) {
+                sendError(
+                    res,
+                    400,
+                    `Credential "${credentialId}" is configured for host "${credential.host}" but repository URL resolves to "${repoHost}".`,
+                );
+                return;
+            }
+        }
+
+        try {
+            const updated = repoManager.updateCredential(id, credentialId as string | null);
+
+            // Audit log — emit assign or clear event.
+            const auditOperation = credentialId === null ? 'clear-credential' : 'assign-credential';
+            errorLogManager?.append({
+                Severity: 'audit',
+                Source: 'credential-audit',
+                Operation: auditOperation,
+                Context: { RepositoryId: id },
+                Message: credentialId === null
+                    ? `Credential association cleared for repository "${id}".`
+                    : `Credential "${credentialId}" assigned to repository "${id}".`,
+            });
+
+            sendJson(res, 200, updated);
+        } catch (err) {
+            if (err instanceof NotFoundError) {
+                sendError(res, 404, err.message);
+            } else {
+                sendError(res, 500, 'Internal server error.');
+            }
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // GET /api/repositories/:id/credential-options — list matching credentials
+    //
+    //   Returns the subset of `appConfig.gitCredentials` whose `host` matches
+    //   the hostname of the repository's remote URL.  Tokens are masked (replaced
+    //   with `"***"`) before being sent to the client.
+    //
+    //   Response shape:
+    //     {
+    //       credentials: GitCredentialEntry[],  // token masked
+    //       autoSelected?: string               // id of the sole matching credential
+    //     }
+    //
+    //   `autoSelected` is included only when exactly one credential matches the
+    //   repository's host.
+    // ------------------------------------------------------------------
+    router.get('/api/repositories/:id/credential-options', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        const id = params['id'];
+
+        const repo = resolveRepository(res, id);
+        if (repo === undefined) return;
+
+        const credentials: GitCredentialEntry[] = appConfig.gitCredentials ?? [];
+        const repoHost = extractHost(repo.Url);
+
+        // Filter to credentials whose host matches the repository's URL host.
+        // For non-HTTPS URLs (e.g. SSH), repoHost is null and no credentials match.
+        const matching = repoHost !== null
+            ? credentials.filter((c) => c.host === repoHost)
+            : [];
+
+        // Mask tokens before sending — never expose raw tokens over the API.
+        const maskedCredentials: GitCredentialEntry[] = matching.map((c) => ({
+            ...c,
+            token: '***',
+        }));
+
+        const responseBody: { credentials: GitCredentialEntry[]; autoSelected?: string } = {
+            credentials: maskedCredentials,
+        };
+
+        if (matching.length === 1) {
+            responseBody.autoSelected = matching[0].id;
+        }
+
+        sendJson(res, 200, responseBody);
     });
 }

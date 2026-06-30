@@ -19,19 +19,29 @@ class NotFoundError extends Error {
 ### Types (`config.types.ts`)
 
 ```typescript
+/** A single named Git credential entry used to authenticate against a remote host. */
+interface GitCredentialEntry {
+    id: string;     // unique identifier; referenced by Repository.CredentialId
+    label: string;  // human-readable display name shown in the UI
+    host: string;   // hostname this credential applies to (e.g. "github.com")
+    token: string;  // Personal Access Token, password, or other credential string
+}
+
 interface AppConfig {
     projectsFolder: string;
     storageFolder: string;
     cloneDepth: number;       // default: 50
     serverPort: number;       // default: 4200
     gitPollingIntervalSeconds: number; // default: 30
-    gitCredentials?: Record<string, string>; // hostname → PAT/password; absent = public repos only
+    gitCredentials?: GitCredentialEntry[]; // named credential entries; absent or empty = public repos only
     maxErrorLogEntries?: number;  // default: 500 — FIFO eviction cap for error log
     webserverUrl?: string;  // base URL of local webserver (e.g. http://localhost:8080); absent = Browse button hidden
     notesCardHeight: number;  // height (px) of each note card; range [MIN_NOTES_CARD_HEIGHT, MAX_NOTES_CARD_HEIGHT]; default: DEFAULT_NOTES_CARD_HEIGHT (220)
     notesColumns: number;     // column count in the notes view grid; range [MIN_NOTES_COLUMNS, MAX_NOTES_COLUMNS]; default: DEFAULT_NOTES_COLUMNS (2)
 }
 ```
+
+> **Credential selection:** Repositories reference a specific credential via `Repository.CredentialId`. When a repository has no `CredentialId`, the tool auto-selects the sole credential whose `host` matches the repository's remote URL (if exactly one such credential exists).
 
 ### Constants (`config.ts`)
 
@@ -105,12 +115,30 @@ function runGitOrThrow(args: string[], cwd?: string): Promise<string>
 
 ```typescript
 function extractHost(url: string): string | null
-function injectCredentials(url: string, credentials: Record<string, string>): string
+function resolveCredential(url: string, credentials: GitCredentialEntry[], credentialId?: string): GitCredentialEntry | null
+function injectCredentialToken(url: string, token: string): string
 function hasEmbeddedCredentials(url: string): boolean
 function stripEmbeddedCredentials(input: string): string
 ```
 
-> **`stripEmbeddedCredentials` contract:** Accepts an arbitrary string — not just a URL. Pure HTTPS URLs are sanitised via the WHATWG URL object (clean userinfo removal). All other inputs (non-HTTPS URLs, git prose error messages such as `"fatal: repository 'https://token@host/...' not found"`, and unparseable values) fall through to a regex scrub that replaces any `https?://…@` pattern with `https://***@`. Use this function on `gitResult.stderr` before surfaces it in API responses or logs.
+> **Note:** The legacy `injectCredentials()` function was removed. All call sites use the `resolveCredential()` + `injectCredentialToken()` pipeline.
+
+**Credential resolution pipeline** — the standard call sequence for authenticated git operations:
+
+```ts
+const entry = resolveCredential(repoUrl, config.gitCredentials, repo.credentialId);
+const authenticatedUrl = entry ? injectCredentialToken(repoUrl, entry.token) : repoUrl;
+```
+
+`resolveCredential` applies two strategies in order:
+1. **Explicit ID** (`credentialId` provided) — returns the entry whose `id` matches, or `null` for a stale reference.
+2. **Auto-selection** (`credentialId` omitted) — filters by URL hostname; returns the single match, or `null` for zero or multiple matches (ambiguous).
+
+> **SECURITY — `resolveCredential` with explicit `credentialId`:** When a `credentialId` is supplied, no host cross-validation is performed. The caller is responsible for ensuring the URL's host is consistent with the credential's configured `host` before using the resolved token (enforce this in orchestrators, not in the utility itself).
+
+> **`injectCredentialToken`:** Injects a pre-resolved token string as the WHATWG URL username. Token injection uses property assignment (`parsed.username = token`), not string concatenation — special characters are automatically percent-encoded.
+
+> **`stripEmbeddedCredentials` contract:** Accepts an arbitrary string — not just a URL. Pure HTTPS URLs are sanitised via the WHATWG URL object (clean userinfo removal). All other inputs (non-HTTPS URLs, git prose error messages such as `"fatal: repository 'https://token@host/...' not found"`, and unparseable values) fall through to a regex scrub that replaces any `https?://…@` pattern with `https://***@`. Use this function on `gitResult.stderr` before surfacing it in API responses or logs.
 
 ### Clone (`git-clone.ts`)
 
@@ -144,7 +172,7 @@ function fetchAndGetStatus(repoPath: string, timeoutMs?: number): Promise<GitSta
 ### Types (`error-log.types.ts`)
 
 ```typescript
-type ErrorSeverity = 'error' | 'warning';
+type ErrorSeverity = 'error' | 'warning' | 'audit' | 'info';
 
 interface ErrorLogContext {
     ProjectId?: string;
@@ -215,12 +243,16 @@ interface Repository {
     Name: string;
     Url: string;
     credentialsStripped?: boolean; // transient — set by add(), not persisted
+    LastRefreshedAt?: string;      // ISO 8601 — written by touchRefreshTimestamp(); absent until first manual refresh
+    CredentialId?: string;         // references GitCredentialEntry.id; absent = auto-select by host match
 }
 
 interface RepositoryStore extends BaseStore {
     Repositories: Repository[];
 }
 ```
+
+> **Schema version note:** `CredentialId` is an optional field addition. Per the `BaseStore` versioning policy (see `storage.types.ts`), adding an optional field is backward-compatible — existing `repositories.json` files that lack the field remain valid. No `SCHEMA_VERSION` bump is required.
 
 #### Manager (`repository.manager.ts`)
 
@@ -234,8 +266,12 @@ class RepositoryManager {
     add(params: { url: string; name?: string; id?: string }): Repository
     update(id: string, params: { name: string }): Repository
     remove(id: string): void
+    updateCredential(id: string, credentialId: string | null): Repository
+    touchRefreshTimestamp(id: string): Repository
 }
 ```
+
+> **`updateCredential()`:** Associates or removes a named credential on a repository. Pass a `credentialId` string to pin the repository to a specific `GitCredentialEntry`; pass `null` to clear the association and revert to host-based auto-selection at runtime. When `null` is passed, the `CredentialId` key is removed entirely from `repositories.json` (not set to `undefined`) so the JSON remains clean. Throws `NotFoundError` if the repository ID does not exist. See `Repository.CredentialId` for the auto-selection fallback behaviour.
 
 ### Project
 
@@ -447,8 +483,11 @@ function checkWorkspaceHealth(
     workspaceId: string,
     projectsFolder: string,
     repositoryIds: string[],
+    errorLogManager?: ErrorLogManager,
 ): WorkspaceHealthReport
 ```
+
+> **Credential-missing check:** When `errorLogManager` is supplied, `checkWorkspaceHealth` performs an additional Check 3: it queries all `Source: 'credentials'` log entries scoped to the workspace and inspects the most recent entry per repository. A `credential-missing` health issue is surfaced only when the most recent entry has `Severity: 'error'`. A `Severity: 'info'` entry — written by `WorkspaceOrchestrator.createWorkspace()` or `RepositoryOrchestrator.addRepositoryToProject()` after a successful credential-based clone — suppresses the stale error badge without deleting history. SSH clones (`credential === null`) do not produce a credentials log entry and are not evaluated by this check.
 
 ---
 
@@ -774,7 +813,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown>
 
 ```typescript
 // repositories.ts
-function registerRepositoryRoutes(router: Router, repoManager: RepositoryManager): void
+function registerRepositoryRoutes(
+    router: Router,
+    repoManager: RepositoryManager,
+    appConfig: AppConfig,
+    errorLogManager?: ErrorLogManager,  // optional — when provided, credential assign/clear ops emit audit log entries
+): void
 
 // projects.ts
 function registerProjectRoutes(router: Router, projectManager: ProjectManager): void
@@ -796,8 +840,15 @@ function registerBranchRoutes(router: Router, orchestrator: BranchOrchestrator, 
 // status.ts
 function registerStatusRoutes(router: Router, pollingManager: PollingManager, projectManager: ProjectManager, workspaceManager: WorkspaceManager, config: AppConfig): void
 
-// config.ts
-function registerConfigRoutes(router: Router, appConfig: AppConfig, configPath?: string, pollingManager?: PollingManager): void
+// config.ts — accepts a named-options bag
+interface ConfigRoutesOptions {
+    router: Router;
+    appConfig: AppConfig;
+    configPath?: string;        // optional — defaults to tool-root config.json
+    pollingManager?: PollingManager;   // optional — when provided, PUT /api/config/polling restarts the loop
+    errorLogManager?: ErrorLogManager; // optional — when provided, credential create/update/delete ops emit audit log entries
+}
+function registerConfigRoutes(options: ConfigRoutesOptions): void
 ```
 
 ---
@@ -810,27 +861,33 @@ Vanilla JS HTTP client for the SPA frontend. All methods return Promises and thr
 
 ### `api.config.credentials`
 
-Manages per-host git credentials. All tokens are **always returned masked** by the API (e.g. `****abc1`) — the plaintext token is never surfaced in any response.
+Manages named git credentials. Each credential has a unique `id`, a human-readable `label`, a `host`, and a `token`. All tokens are **always returned masked** by the API (e.g. `****abc1`) — the plaintext token is never surfaced in any response.
 
 ```js
 // List all configured credentials.
-// Returns: Promise<Record<string, string>>  // host → masked token
+// Returns: Promise<Array<{ id: string, label: string, host: string, maskedToken: string }>>
 api.config.credentials.list()
 
-// Add or update a host credential.
-// data: { host: string, token: string }
-// Returns: Promise<Record<string, string>>  // updated masked credentials map
-api.config.credentials.set(data)
+// Add a new credential (no id in the request body).
+// data: { label: string, host: string, token: string }
+// Returns: Promise<Array<{ id: string, label: string, host: string, maskedToken: string }>>
+api.config.credentials.add(data)
 
-// Remove a host credential.
-// host: string — URL-encoded automatically by the client
-// Returns: Promise<Record<string, string>>  // updated masked credentials map after deletion
-api.config.credentials.delete(host)
+// Update an existing credential by ID.
+// id: string — the credential ID to update
+// data: { label?: string, token?: string } — omit token to leave the existing token unchanged
+// Returns: Promise<Array<{ id: string, label: string, host: string, maskedToken: string }>>
+api.config.credentials.update(id, data)
+
+// Remove a credential by ID.
+// id: string — URL-encoded automatically by the client
+// Returns: Promise<void>
+api.config.credentials.remove(id)
 ```
 
-> **Token masking:** The server applies `maskToken()` before every API response. The client never receives or stores a plaintext token. The `set()` form uses `<input type="password">` in the UI.
+> **Token masking:** The server applies `maskToken()` before every API response. The client never receives or stores a plaintext token. The Token field uses `<input type="password">` in the UI.
 
-> **Known edge case:** Hosts containing a colon (e.g. `gitlab.com:8080`) may be undeletable via the UI. `encodeURIComponent()` encodes the colon in the DELETE URL, but the server's `extractParams()` does not call `decodeURIComponent()` before the credential lookup. Tracked as a low-severity improvement for a follow-up.
+> **Partial update — token retention:** When `update()` is called without a `token` key in `data` (e.g. the user edited only the label), the server retains the existing stored token unchanged. This is the expected behaviour for label-only edits during inline editing in the credentials table.
 
 ### `api.config.polling`
 

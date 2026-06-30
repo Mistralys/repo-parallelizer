@@ -29,6 +29,13 @@ export interface Repository {
      * Undefined when the repository has never been manually refreshed.
      */
     LastRefreshedAt?: string;
+
+    /**
+     * References the `id` of a {@link GitCredentialEntry} in `AppConfig.gitCredentials`.
+     * When set, the tool uses that credential exclusively for this repository.
+     * When absent, the tool falls back to auto-selecting a credential by host match.
+     */
+    CredentialId?: string;
 }
 
 /**

@@ -6,7 +6,7 @@
     "serverPort": 4200,
     "gitPollingIntervalSeconds": 30,
     "maxErrorLogEntries": 500,
-    "gitCredentials": {},
+    "gitCredentials": [],
     "webserverUrl": "",
     "notesCardHeight": 220,
     "notesColumns": 2

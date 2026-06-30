@@ -266,3 +266,55 @@ test('AC3 — Saving updates the name link text', async () => {
         cleanupContainers();
     }
 });
+
+// ---------------------------------------------------------------------------
+// Credential status indicator tests
+// ---------------------------------------------------------------------------
+
+test('Credential — table header includes a "Credential" column', async () => {
+    const container = await renderAndWait();
+    try {
+        const table = container.querySelector('table.repositories-table');
+        assert.ok(table, 'Repositories table should exist');
+
+        const headers = [...table.querySelectorAll('thead th')].map((th) => th.textContent);
+        assert.ok(headers.includes('Credential'), 'Table header should include "Credential" column');
+    } finally {
+        cleanupContainers();
+    }
+});
+
+test('Credential — row shows no-credential badge when repo has no CredentialId', async () => {
+    // Default mock returns a repo without CredentialId.
+    const container = await renderAndWait();
+    try {
+        const credCell = container.querySelector('td.repo-credential-cell');
+        assert.ok(credCell, 'Credential cell should exist');
+
+        const badge = credCell.querySelector('.credential-badge');
+        assert.ok(badge, 'Credential badge should exist');
+        assert.ok(badge.classList.contains('credential-badge--none'), 'Badge should have --none class when no credential');
+    } finally {
+        cleanupContainers();
+    }
+});
+
+test('Credential — row shows set-credential badge when repo has a CredentialId', async () => {
+    const origList = api.repositories.list;
+    api.repositories.list = async () => [
+        { Id: REPO_ID, Name: REPO_NAME, Url: REPO_URL, CredentialId: 'cred-abc' },
+    ];
+
+    const container = await renderAndWait();
+    try {
+        const credCell = container.querySelector('td.repo-credential-cell');
+        assert.ok(credCell, 'Credential cell should exist');
+
+        const badge = credCell.querySelector('.credential-badge');
+        assert.ok(badge, 'Credential badge should exist');
+        assert.ok(badge.classList.contains('credential-badge--set'), 'Badge should have --set class when credential is configured');
+    } finally {
+        api.repositories.list = origList;
+        cleanupContainers();
+    }
+});

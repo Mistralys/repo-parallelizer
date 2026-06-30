@@ -13,6 +13,81 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 | `POST` | `/api/repositories` | 201 | 400 | Register a new repository. Body: `{ url, name?, id? }`. |
 | `PUT` | `/api/repositories/:id` | 200 | 404, 500 | Update repository metadata. Body: `{ name }`. |
 | `DELETE` | `/api/repositories/:id` | 204 | 404 | Delete a repository. |
+| `PUT` | `/api/repositories/:id/credential` | 200 | 400, 404 | Assign or clear a git credential for a repository. Body: `{ credentialId: string \| null }`. |
+| `GET` | `/api/repositories/:id/credential-options` | 200 | 404 | List credentials compatible with the repository's host, with tokens masked. |
+
+### `PUT /api/repositories/:id/credential` — Assign or Clear a Credential
+
+Associates a configured git credential with a repository, or clears any existing association.
+
+**Request body:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `credentialId` | `string \| null` | **Yes** | ID of the credential to assign. Pass `null` to clear the current association. Must reference an entry in `appConfig.gitCredentials` when a string. |
+
+**400 cases:**
+- `credentialId` is not a string and not `null` (e.g. missing field, number, boolean, object).
+- `credentialId` is a string that does not match any configured credential ID.
+- `credentialId` references a credential whose `host` does not match the repository URL's hostname (host-coherence guard). Example error: `Credential "my-cred" is configured for host "gitlab.com" but repository URL resolves to "github.com".`
+
+**404:** repository not found.
+
+**200 Response:** the full updated `Repository` object.
+
+> **Null-clear semantics:** when `credentialId` is `null`, the `CredentialId` field is **removed** from the persisted repository record entirely — it is not stored as `null`. A repository with no credential has no `CredentialId` key in its JSON.
+
+> **Host-coherence guard:** when assigning a credential, the API verifies that `credential.host` matches the hostname extracted from the repository URL. The check is skipped for SSH URLs (where `extractHost()` returns `null`) and when `credentialId` is `null` (clearing the association is always allowed). This prevents misrouted credential injection where a token for one host would be injected into git operations targeting a different host.
+
+> **Audit logging:** each successful assign or clear operation emits an audit log entry with `Source: 'credential-audit'` and `Operation: 'assign-credential'` or `'clear-credential'`. The `Context` field includes `{ RepositoryId: id }`. The credential token is never included in the audit entry.
+
+**Request body (assign):**
+```json
+{ "credentialId": "github-personal" }
+```
+
+**Request body (clear):**
+```json
+{ "credentialId": null }
+```
+
+**Response (200):**
+```json
+{
+    "Id": "my-repo",
+    "Url": "https://github.com/org/my-repo.git",
+    "Name": "my-repo",
+    "CredentialId": "github-personal"
+}
+```
+
+---
+
+### `GET /api/repositories/:id/credential-options` — List Compatible Credentials
+
+Returns the subset of configured git credentials whose `host` matches the repository's remote URL hostname. Tokens are always masked before being sent to the client.
+
+**404:** repository not found.
+
+**200 Response shape:**
+
+```json
+{
+    "credentials": [
+        { "id": "github-personal", "label": "GitHub personal account", "host": "github.com", "token": "***" }
+    ],
+    "autoSelected": "github-personal"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `credentials` | `GitCredentialEntry[]` | Credentials whose `host` matches the repository URL's hostname. Tokens are replaced with `"***"`. Empty array `[]` when no credentials match or when the repository uses a non-HTTPS URL (e.g. SSH). |
+| `autoSelected` | `string` *(optional)* | ID of the sole matching credential. **Present only when `credentials` contains exactly one entry.** Omitted when zero or two-or-more credentials match. |
+
+> **SSH / non-HTTPS URLs:** repositories whose URL is not an HTTPS URL (e.g. `git@github.com:org/repo.git`) always return `{ "credentials": [] }` with no `autoSelected`. The host cannot be extracted from SSH URLs, so no credentials are ever shown for them.
+
+> **Known inconsistency — token mask format:** this endpoint masks tokens with the hardcoded string `"***"` (3 asterisks), while `GET /api/config/credentials` uses the `maskToken()` helper which produces `"****"` + last-4 characters (4 asterisks prefix, e.g. `"****abc1"`). Both surfaces guarantee the full token is never exposed; the format difference is a pre-existing inconsistency and will be unified in a future cleanup pass.
 
 ---
 
@@ -43,7 +118,29 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 | `DELETE` | `/api/projects/:id/workspaces/:wid` | 204 | 404 | Delete workspace (STABLE cannot be deleted). |
 | `POST` | `/api/projects/:id/workspaces/:wid/setup` | 200 | 400, 404, 500 | Initialize workspace on disk (clone repos, generate .code-workspace file). |
 | `POST` | `/api/projects/:id/workspaces/:wid/regenerate-workspace-file` | 200 | 400, 404, 500 | Regenerate the `.code-workspace` file from the current repository list without cloning. Workspace folder must already exist on disk (400 if absent). Body: none. Response: `{ success: true }`. |
-| `GET` | `/api/projects/:id/workspaces/:wid/health` | 200 | 404 | Fetch the health report for a workspace. Returns `{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }`. Uninitialized workspaces return `{ healthy: true, issues: [] }`. 404 if project or workspace ID is unknown. |
+| `GET` | `/api/projects/:id/workspaces/:wid/health` | 200 | 404 | Fetch the health report for a workspace. Returns `{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }`. Uninitialized workspaces return `{ healthy: true, issues: [] }`. 404 if project or workspace ID is unknown. See **Health Issue Types** below. |
+
+### Health Issue Types
+
+The `GET .../health` endpoint returns an `issues` array where each element has:
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | Issue type identifier. |
+| `severity` | `'error' \| 'warning'` | Severity level. |
+| `message` | `string` | Human-readable description. |
+| `fixAction` | `string` | Suggested fix action identifier (used by the GUI to render a fix button). |
+| `repositoryId` | `string` *(optional)* | Present when the issue is scoped to a specific repository. |
+
+Known issue types:
+
+| `type` | `fixAction` | Description |
+|---|---|---|
+| `workspace-file-missing` | `regenerate-workspace-file` | The `.code-workspace` file for the workspace is absent on disk. |
+| `repository-not-cloned` | `setup-workspace` | A repository directory has no `.git` entry (not yet cloned). Includes `repositoryId`. |
+| `credential-missing` | `configure-credential` | The most recent setup run for this workspace failed because no credential is configured for the repository's host. Includes `repositoryId`. The error is sourced from error log entries with `Source: 'credentials'` scoped to this workspace. |
+
+---
 
 ### `PUT /api/projects/:id/workspaces/:wid` — Request Body
 
@@ -145,7 +242,7 @@ Four endpoints for reading and managing the runtime error log. The log is backed
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `severity` | `"error" \| "warning"` | — | Filter by severity. Any other value is silently treated as no filter. |
+| `severity` | `"error" \| "warning" \| "audit" \| "info"` | — | Filter by severity. Any other value is silently treated as no filter. |
 | `source` | `string` | — | Exact-match filter on the `Source` field. No length cap or allowlist — treat as internal-use only. |
 | `limit` | `integer ≥ 0` | `100` | Maximum entries to return. `limit=0` returns an empty `entries` array but `total` is still populated. Negative values are clamped to 0. |
 | `offset` | `integer ≥ 0` | `0` | Zero-based offset into the filtered result set. Negative values are treated as 0. |
@@ -195,52 +292,81 @@ The `:id` segment must be a **positive integer** (digits only). The following re
 
 ## Credentials (`/api/config/credentials`)
 
-Manage per-host git credentials stored in `gitCredentials` within `config.json`. Changes take effect immediately (no server restart required) and are persisted to disk.
+Manage named git credential entries stored in the `gitCredentials` array within `config.json`. Each entry has a unique `id`, a human-readable `label`, a `host`, and a `token`. Changes take effect immediately (no server restart required) and are persisted to disk.
 
 **Token masking:** tokens are never returned in full. The response always shows `****` followed by the last 4 characters (e.g. `****abc1`). Tokens shorter than 4 characters are fully masked as `****`.
+
+**Audit logging:** when the server is started with an `ErrorLogManager` (always the case in production), every credential mutation is recorded as an `audit`-severity audit log entry with `Source: 'credential-audit'`. The entry includes the credential `id`, `label`, and `host`, but never the token. See [Audit log entries for credential mutations](#audit-log-entries-for-credential-mutations) below.
 
 | Method | Path | Success | Error Codes | Description |
 |---|---|---|---|---|
 | `GET` | `/api/config/credentials` | 200 | — | List all configured credentials with masked tokens. |
-| `PUT` | `/api/config/credentials` | 200 | 400 | Add or update a single host entry. Body: `{ host, token }`. |
-| `DELETE` | `/api/config/credentials/:host` | 200 | 404 | Remove a single host entry. |
+| `PUT` | `/api/config/credentials` | 200 | 400 | Add or update a single credential entry. Body: `{ id?, label, host, token }`. |
+| `DELETE` | `/api/config/credentials/:id` | 200 | 404 | Remove a single entry by its `id`. |
 
-### Validation (PUT)
+### `PUT /api/config/credentials` — Request Body
 
-- `host`: non-empty string; must not contain path separators (`/`, `\`) or whitespace.
-- `token`: non-empty string.
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `id` | `string` | No | Unique identifier for the entry. When omitted, an ID is auto-generated from `label` as a kebab-case string (e.g. `"My Token"` → `"my-token"`). When the generated ID is already in use, a numeric suffix is appended (`-2`, `-3`, …). When provided and it matches an existing entry, that entry is updated in-place (upsert). When provided and no existing entry matches, a new entry is created with that ID. |
+| `label` | `string` | **Yes** | Human-readable display name (e.g. `"GitHub personal account"`). Must be a non-empty string. |
+| `host` | `string` | **Yes** | Hostname this credential applies to (e.g. `"github.com"`). Must be a non-empty string. Must not contain `/`, `\`, null bytes, or whitespace — these characters are rejected with HTTP 400. See [constraints § Hostname Format](constraints.md#hostname-format-host-field). |
+| `token` | `string` | **Yes** | Personal Access Token or other credential string. Must be a non-empty string. |
 
-Both fields are required; missing or invalid fields return `400` with a descriptive error message.
+**400 cases:** missing or invalid `label`, `host`, or `token`; `host` contains `/`, `\`, null bytes, or whitespace; `id` present but empty or not a string.
 
 ### `GET /api/config/credentials` Response
 
-```json
-{
-    "github.com": "****abc1",
-    "gitlab.com": "****xyz9"
-}
-```
+Returns a `GitCredentialEntry[]` array with tokens masked. An empty array `[]` is returned when no credentials are configured.
 
-An empty object `{}` is returned when no credentials are configured.
+```json
+[
+    { "id": "github-personal", "label": "GitHub personal account", "host": "github.com", "token": "****abc1" },
+    { "id": "gitlab-work",     "label": "GitLab work account",     "host": "gitlab.com", "token": "****xyz9" }
+]
+```
 
 ### `PUT /api/config/credentials` Request / Response
 
-**Request body:**
+**Request body (create — no `id`, auto-generates ID from label):**
 ```json
-{ "host": "github.com", "token": "ghp_fulltoken" }
+{ "label": "GitHub personal account", "host": "github.com", "token": "ghp_fulltoken" }
 ```
 
-**Response** (full masked map after update):
+**Request body (upsert — explicit `id` updates the matching entry in-place):**
 ```json
-{ "github.com": "****oken" }
+{ "id": "github-personal", "label": "GitHub personal account", "host": "github.com", "token": "ghp_newtoken" }
 ```
 
-### `DELETE /api/config/credentials/:host` Response
-
-**Response** (full masked map after deletion — empty object when last entry removed):
+**Response** (full masked array after update):
 ```json
-{}
+[
+    { "id": "github-personal", "label": "GitHub personal account", "host": "github.com", "token": "****oken" }
+]
 ```
+
+### `DELETE /api/config/credentials/:id` Response
+
+**Response** (full masked array after deletion — empty array `[]` when the last entry is removed):
+```json
+[]
+```
+
+**404** is returned when no entry with the given `id` exists.
+
+### Audit log entries for credential mutations
+
+When `ErrorLogManager` is present (always in production), each mutation emits an audit entry with the following shape:
+
+| Field | Value |
+|---|---|
+| `Severity` | `"audit"` |
+| `Source` | `"credential-audit"` |
+| `Operation` | `"create-credential"`, `"update-credential"`, or `"delete-credential"` |
+| `Context` | `{}` (empty — credential mutations are not scoped to a project or workspace) |
+| `Message` | Human-readable summary including `id`, `label`, and `host` — **never the token** |
+
+> **Filtering in the error log GUI:** audit entries use `Severity: 'audit'`. To isolate audit events, filter by `Source: 'credential-audit'` via `GET /api/error-log?source=credential-audit`, or filter by `?severity=audit` to retrieve all audit-severity entries across all sources.
 
 ---
 

@@ -391,6 +391,7 @@ export function registerWorkspaceRoutes(
             workspaceId,
             appConfig.projectsFolder,
             project.Repositories,
+            errorLogManager,
         );
         sendJson(res, 200, report);
     });

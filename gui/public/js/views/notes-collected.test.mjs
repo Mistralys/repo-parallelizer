@@ -16,7 +16,7 @@
  *   node --test 'gui/public/js/views/notes-collected.test.mjs'
  */
 
-import { test, beforeEach } from 'node:test';
+import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -45,6 +45,8 @@ globalThis.Event       = window.Event;
 let _pendingDebounce       = null;
 let _originalSetTimeout    = null;
 let _originalClearTimeout  = null;
+/** Map from timer ID → pending callback, for correct clearTimeout semantics. */
+const _pendingTimers       = new Map();
 
 /**
  * Immediately execute the pending debounce callback and await the result.
@@ -74,6 +76,12 @@ globalThis.fetch = async () => ({
 // ---------------------------------------------------------------------------
 
 const { api } = await import('../api.js');
+
+// Stub api.config.notesDisplay.get so notes-collected.js can resolve its
+// config fetch without hanging.
+if (!api.config) api.config = {};
+if (!api.config.notesDisplay) api.config.notesDisplay = {};
+api.config.notesDisplay.get = async () => ({});
 
 /** Calls recorded by api.workspaces.update spy. */
 const updateCalls = [];
@@ -120,18 +128,27 @@ const container = window.document.getElementById('app');
  * Render the notes-collected view and await the async data fetch.
  */
 async function render() {
-    // Stub setTimeout so debounce can be flushed synchronously.
-    _pendingDebounce     = null;
-    _originalSetTimeout  = globalThis.setTimeout;
+    // Stub setTimeout / clearTimeout so debounce can be flushed synchronously.
+    _pendingDebounce      = null;
+    _originalSetTimeout   = globalThis.setTimeout;
     _originalClearTimeout = globalThis.clearTimeout;
+    _pendingTimers.clear();
 
-    let _timerId = 2000;
+    let _nextTimerId = 2000;
     globalThis.setTimeout = (fn, _delay) => {
+        const id = ++_nextTimerId;
         _pendingDebounce = fn;
-        return ++_timerId;
+        _pendingTimers.set(id, fn);
+        return id;
     };
     globalThis.clearTimeout = (id) => {
-        if (_timerId === id) _pendingDebounce = null;
+        if (_pendingTimers.has(id)) {
+            // Only clear _pendingDebounce when it still refers to this timer's callback.
+            if (_pendingDebounce === _pendingTimers.get(id)) {
+                _pendingDebounce = null;
+            }
+            _pendingTimers.delete(id);
+        }
     };
 
     // Stub scrollIntoView — not available in jsdom.
@@ -147,6 +164,9 @@ async function render() {
     await result;
 
     // Restore scrollIntoView if it existed.
+    // Note: after the first render() call, origScrollIntoView will itself be the
+    // no-op stub installed above (not the original jsdom prototype method), so this
+    // restore is effectively a no-op after test 1. It is kept for symmetry.
     if (origScrollIntoView !== undefined) {
         window.HTMLElement.prototype.scrollIntoView = origScrollIntoView;
     }
@@ -156,6 +176,7 @@ function restoreTimers() {
     if (_originalSetTimeout)   globalThis.setTimeout   = _originalSetTimeout;
     if (_originalClearTimeout) globalThis.clearTimeout = _originalClearTimeout;
     _pendingDebounce = null;
+    _pendingTimers.clear();
 }
 
 function clearContainer() {
@@ -165,6 +186,13 @@ function clearContainer() {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+afterEach(() => {
+    // Always restore the original setTimeout/clearTimeout, even when a test
+    // assertion fails mid-execution. This prevents subsequent tests from
+    // inheriting a stale stub.
+    restoreTimers();
+});
 
 beforeEach(() => {
     clearContainer();
@@ -203,7 +231,6 @@ test('AC1: renders .notes-view wrapper with .notes-sidebar and .notes-main', asy
     assert.ok(view,    '.notes-view should be rendered');
     assert.ok(sidebar, '.notes-sidebar should be rendered');
     assert.ok(main,    '.notes-main should be rendered');
-    restoreTimers();
 });
 
 // ---- AC2: Sidebar grouped by project ----
@@ -212,7 +239,6 @@ test('AC2: sidebar has one collapsible group per project', async () => {
     await render();
     const groups = container.querySelectorAll('.notes-sidebar-group');
     assert.strictEqual(groups.length, 2);
-    restoreTimers();
 });
 
 test('AC2: each group contains the correct workspace buttons', async () => {
@@ -222,7 +248,6 @@ test('AC2: each group contains the correct workspace buttons', async () => {
     assert.strictEqual(firstGroupBtns.length, 2, 'proj-a has 2 workspaces');
     const secondGroupBtns = groups[1].querySelectorAll('.notes-sidebar-btn');
     assert.strictEqual(secondGroupBtns.length, 1, 'proj-b has 1 workspace');
-    restoreTimers();
 });
 
 test('AC2: groups are open by default', async () => {
@@ -231,7 +256,6 @@ test('AC2: groups are open by default', async () => {
     for (const group of groups) {
         assert.strictEqual(group.open, true, 'groups should be open by default');
     }
-    restoreTimers();
 });
 
 // ---- AC3: Visual distinction for workspaces with notes ----
@@ -244,7 +268,6 @@ test('AC3: sidebar item for workspace with notes has .has-notes class', async ()
     );
     assert.ok(devItem, 'DEV workspace item should exist in sidebar');
     assert.ok(devItem.classList.contains('has-notes'), 'DEV item should have .has-notes');
-    restoreTimers();
 });
 
 test('AC3: sidebar item for workspace without notes does NOT have .has-notes class', async () => {
@@ -255,7 +278,6 @@ test('AC3: sidebar item for workspace without notes does NOT have .has-notes cla
     );
     assert.ok(stableItem, 'STABLE workspace item should exist in sidebar');
     assert.ok(!stableItem.classList.contains('has-notes'), 'STABLE item should NOT have .has-notes');
-    restoreTimers();
 });
 
 // ---- AC4: Clicking sidebar item with existing card scrolls to it ----
@@ -273,7 +295,6 @@ test('AC4: clicking sidebar item for a workspace with a card does not create a d
 
     const cardsAfter = container.querySelectorAll('.notes-card');
     assert.strictEqual(cardsAfter.length, countBefore, 'no duplicate card should be created');
-    restoreTimers();
 });
 
 // ---- AC5: Clicking sidebar item without a card creates one ----
@@ -290,7 +311,6 @@ test('AC5: clicking sidebar item for a workspace without a card creates a new ca
         (c) => c.dataset.projectId === 'proj-a' && c.dataset.workspaceId === 'STABLE',
     );
     assert.ok(stableCard, 'a new card for STABLE should be created');
-    restoreTimers();
 });
 
 test('AC5: new card textarea is empty and present', async () => {
@@ -307,7 +327,6 @@ test('AC5: new card textarea is empty and present', async () => {
     const ta = stableCard.querySelector('.notes-card-textarea');
     assert.ok(ta, 'card should contain a textarea');
     assert.strictEqual(ta.value, '', 'new card textarea should be empty');
-    restoreTimers();
 });
 
 // ---- AC6: Card header link to workspace detail ----
@@ -325,7 +344,6 @@ test('AC6: card header contains a link to the workspace detail view', async () =
         link.href.includes('/projects/proj-a/workspaces/DEV'),
         'link href should point to workspace detail',
     );
-    restoreTimers();
 });
 
 // ---- AC7: Auto-save with status indicator ----
@@ -349,7 +367,6 @@ test('AC7: typing triggers api.workspaces.update after the debounce', async () =
     assert.strictEqual(updateCalls[0].projectId, 'proj-a');
     assert.strictEqual(updateCalls[0].wid, 'DEV');
     assert.deepStrictEqual(updateCalls[0].data, { notes: 'updated notes' });
-    restoreTimers();
 });
 
 test('AC7: status indicator shows "Saving…" while save is in flight', async () => {
@@ -383,7 +400,6 @@ test('AC7: status indicator shows "Saving…" while save is in flight', async ()
 
     resolveUpdate();
     await new Promise((resolve) => _originalSetTimeout(resolve, 0));
-    restoreTimers();
 });
 
 test('AC7: status indicator shows "Saved" after a successful save', async () => {
@@ -400,7 +416,6 @@ test('AC7: status indicator shows "Saved" after a successful save', async () => 
 
     assert.strictEqual(statusEl.hidden, false);
     assert.strictEqual(statusEl.textContent, 'Saved');
-    restoreTimers();
 });
 
 test('AC7: status indicator shows "Save failed." when api call rejects', async () => {
@@ -417,7 +432,6 @@ test('AC7: status indicator shows "Save failed." when api call rejects', async (
     await flushDebounce();
 
     assert.strictEqual(statusEl.textContent, 'Save failed.');
-    restoreTimers();
 });
 
 // ---- AC8: Saving empty removes card and clears sidebar indicator ----
@@ -438,7 +452,6 @@ test('AC8: saving empty text removes the card from the main panel', async () => 
         (c) => c.dataset.workspaceId === 'DEV',
     );
     assert.strictEqual(cardAfter, undefined, 'DEV card should be removed after empty save');
-    restoreTimers();
 });
 
 test('AC8: saving empty clears .has-notes on the sidebar item', async () => {
@@ -456,7 +469,6 @@ test('AC8: saving empty clears .has-notes on the sidebar item', async () => {
     );
     assert.ok(devItem, 'DEV sidebar item should still exist');
     assert.ok(!devItem.classList.contains('has-notes'), '.has-notes should be removed from sidebar item');
-    restoreTimers();
 });
 
 test('AC8: empty-state message appears when all cards are removed', async () => {
@@ -482,7 +494,6 @@ test('AC8: empty-state message appears when all cards are removed', async () => 
 
     const empty = container.querySelector('.notes-empty-state');
     assert.ok(empty, '.notes-empty-state should appear after last card is removed');
-    restoreTimers();
 });
 
 // ---- AC9: Initial load only shows non-empty cards ----
@@ -494,7 +505,6 @@ test('AC9: on initial load, only non-empty notes produce cards', async () => {
     assert.strictEqual(cards.length, 1, 'only one card should be rendered initially');
     assert.strictEqual(cards[0].dataset.projectId,   'proj-a');
     assert.strictEqual(cards[0].dataset.workspaceId, 'DEV');
-    restoreTimers();
 });
 
 test('AC9: empty-state message shown when no workspaces have notes on load', async () => {
@@ -514,5 +524,4 @@ test('AC9: empty-state message shown when no workspaces have notes on load', asy
 
     const empty = container.querySelector('.notes-empty-state');
     assert.ok(empty, '.notes-empty-state should be shown');
-    restoreTimers();
 });

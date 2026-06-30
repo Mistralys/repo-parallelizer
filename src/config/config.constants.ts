@@ -75,3 +75,35 @@ export const MIN_SERVER_PORT = 1;
  * Maximum TCP port number (standard 16-bit unsigned range).
  */
 export const MAX_SERVER_PORT = 65_535;
+
+// ---------------------------------------------------------------------------
+// GitCredentialEntry — per-field maximum lengths
+// ---------------------------------------------------------------------------
+
+/**
+ * Maximum character length for a credential `id` field.
+ * IDs are kebab-case strings; 100 characters provides a generous upper bound
+ * while guarding against unbounded input.
+ */
+export const MAX_CREDENTIAL_ID_LENGTH = 100;
+
+/**
+ * Maximum character length for a credential `label` field.
+ * Labels are human-readable display names; 200 characters is sufficient for
+ * any reasonable label.
+ */
+export const MAX_CREDENTIAL_LABEL_LENGTH = 200;
+
+/**
+ * Maximum character length for a credential `host` field.
+ * 253 characters is the maximum length of a fully-qualified DNS hostname
+ * per RFC 1035.
+ */
+export const MAX_CREDENTIAL_HOST_LENGTH = 253;
+
+/**
+ * Maximum character length for a credential `token` field.
+ * 500 characters covers GitHub fine-grained PATs (~93 chars) and similar
+ * tokens with a wide safety margin.
+ */
+export const MAX_CREDENTIAL_TOKEN_LENGTH = 500;

@@ -3,7 +3,26 @@
  *
  * Only HTTPS URLs are supported. SSH URLs (`git@...`) are left unchanged because
  * SSH authentication is handled by the SSH agent or key — not by inline tokens.
+ *
+ * ## Credential resolution pipeline
+ *
+ * The intended call sequence for authenticated git operations is:
+ *
+ * 1. **{@link resolveCredential}** — given a repository URL and the configured
+ *    credential array, returns the matching {@link GitCredentialEntry} (or `null`
+ *    when resolution fails or is ambiguous).
+ * 2. **`entry.token`** — extract the token string from the resolved entry.
+ * 3. **{@link injectCredentialToken}** — embed the token into the URL as the
+ *    WHATWG URL username, producing an authenticated HTTPS URL ready for git.
+ *
+ * ```ts
+ * const entry = resolveCredential(repoUrl, config.gitCredentials, repo.CredentialId);
+ * const authenticatedUrl = entry ? injectCredentialToken(repoUrl, entry.token) : repoUrl;
+ * ```
+ *
  */
+
+import type { GitCredentialEntry } from '../config/config.types.js';
 
 /**
  * Extracts the hostname from an HTTPS git URL.
@@ -24,30 +43,69 @@ export function extractHost(url: string): string | null {
 }
 
 /**
- * Injects a token credential into an HTTPS URL as the userinfo component.
+ * Resolves the credential to use for a given repository URL.
  *
- * If the credentials map contains an entry whose key matches the URL's hostname,
- * the token is inserted as `https://<token>@<host>/...`. If no matching entry
- * exists, or the URL is not HTTPS, the original URL is returned unchanged.
+ * Resolution strategy:
  *
- * The token is written as the username only (no password component) since
- * Personal Access Tokens are typically passed in the username field.
+ * 1. **Explicit ID (`credentialId` provided):** Returns the entry whose `id`
+ *    matches `credentialId`, or `null` if no such entry exists (stale reference).
+ * 2. **Auto-selection (`credentialId` omitted):** Filters `credentials` by host
+ *    match against the URL's hostname.
+ *    - Exactly one match → returns that entry.
+ *    - Zero matches → returns `null` (no credentials configured for this host).
+ *    - Multiple matches → returns `null` (ambiguous; user must assign a
+ *      `CredentialId` to the repository explicitly).
  *
- * **Security note:** Token injection is performed via WHATWG URL object property
- * assignment (`parsed.username = token`), NOT string concatenation. The URL
- * serialiser automatically percent-encodes special characters in the token (e.g.
- * `@`, `/`, `#`), preventing URL injection even with adversarially-crafted values.
+ * @param url          - The repository's remote URL.
+ * @param credentials  - The full array of configured credential entries.
+ * @param credentialId - Optional explicit credential ID to look up.
+ * @returns The matching `GitCredentialEntry`, or `null` when resolution fails.
  *
- * @param url         - The remote URL to modify.
- * @param credentials - Map of hostname → token (e.g. `{ "github.com": "ghp_abc" }`).
- * @returns The URL with credentials injected, or the original URL if no match.
+ * @remarks
+ * **SECURITY — host/credential coherence (explicit `credentialId` path):**
+ * When `credentialId` is supplied, resolution performs only an exact `id` match;
+ * no cross-validation against the URL's hostname is performed. A caller could
+ * inadvertently (or maliciously) pass a `credentialId` belonging to a different
+ * host and receive a credential for that host. The caller is responsible for
+ * ensuring the URL's host is consistent with the credential's configured `host`
+ * before using the resolved token. This validation should occur at the call site
+ * (e.g. in the orchestrators) before passing the authenticated URL to git.
  */
-export function injectCredentials(url: string, credentials: Record<string, string>): string {
+export function resolveCredential(
+    url: string,
+    credentials: GitCredentialEntry[],
+    credentialId?: string,
+): GitCredentialEntry | null {
+    if (credentialId !== undefined) {
+        return credentials.find((c) => c.id === credentialId) ?? null;
+    }
+
+    const host = extractHost(url);
+    if (host === null) return null;
+
+    const matches = credentials.filter((c) => c.host === host);
+    return matches.length === 1 ? matches[0] : null;
+}
+
+/**
+ * Injects a single token into an HTTPS URL as the userinfo component.
+ *
+ * Accepts a pre-resolved token string directly (obtained from a
+ * {@link GitCredentialEntry} via {@link resolveCredential}) and embeds it as
+ * the WHATWG URL username. No string concatenation is used — special characters
+ * in the token are automatically percent-encoded by the URL serialiser.
+ *
+ * The token is written as the WHATWG URL username only (no password component)
+ * since Personal Access Tokens are typically passed in the username field.
+ *
+ * @param url   - The remote URL to modify.
+ * @param token - The credential token to inject.
+ * @returns The URL with the token injected, or the original URL unchanged for
+ *   non-HTTPS or malformed URLs.
+ */
+export function injectCredentialToken(url: string, token: string): string {
     const host = extractHost(url);
     if (host === null) return url;
-
-    const token = credentials[host];
-    if (!token) return url;
 
     try {
         const parsed = new URL(url);

@@ -1,4 +1,28 @@
 /**
+ * A single named Git credential entry used to authenticate against a remote host.
+ *
+ * Credentials are stored as an array so that multiple tokens can exist for the
+ * same host (e.g. different accounts on github.com). Each repository references
+ * the credential it needs via its `CredentialId` field.
+ */
+export interface GitCredentialEntry {
+    /** Unique identifier for this credential, used to reference it from repositories. */
+    id: string;
+
+    /** Human-readable display name shown in the UI (e.g. "GitHub personal account"). */
+    label: string;
+
+    /**
+     * Hostname this credential applies to (e.g. `"github.com"`).
+     * Used for auto-selection when a repository's host has exactly one matching credential.
+     */
+    host: string;
+
+    /** Personal Access Token, password, or other credential string. */
+    token: string;
+}
+
+/**
  * The application configuration loaded from config.json.
  *
  * Copy config.dist.json to config.json and fill in the required fields before
@@ -37,15 +61,18 @@ export interface AppConfig {
     gitPollingIntervalSeconds: number;
 
     /**
-     * Map of hostname (or URL prefix) to Personal Access Token / password used
-     * when cloning or fetching from private repositories.
+     * Named credential entries used when cloning or fetching from private
+     * repositories.
      *
-     * Keys are matched against the remote URL (e.g. `"github.com"`).
-     * Values must be non-empty credential strings (PATs, passwords, etc.).
+     * Each entry carries an `id`, `label`, `host`, and `token`. Repositories
+     * reference a specific credential via their `CredentialId` field. When a
+     * repository has no explicit `CredentialId`, the tool auto-selects the
+     * sole credential whose `host` matches the repository's remote URL (if
+     * exactly one such credential exists).
      *
-     * Omit the field or leave the object empty for public repositories.
+     * Omit the field or leave the array empty for public repositories.
      */
-    gitCredentials?: Record<string, string>;
+    gitCredentials?: GitCredentialEntry[];
 
     /**
      * Maximum number of entries retained in the error log. Oldest entries are

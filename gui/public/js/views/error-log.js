@@ -8,8 +8,8 @@
  *   - "Clear All" button prompts a confirmation dialog and clears all entries.
  *   - Timestamps display relative time (e.g. "3 min ago") with the full ISO
  *     timestamp in the `title` tooltip.
- *   - Severity is rendered as a coloured badge using `.severity-error` or
- *     `.severity-warning` CSS classes.
+ *   - Severity is rendered as a coloured badge using `.severity-error`,
+ *     `.severity-warning`, `.severity-audit`, or `.severity-info` CSS classes.
  *   - All dynamic text is set via `textContent` (never `innerHTML`) for XSS
  *     safety.
  *
@@ -33,6 +33,8 @@ const SEVERITY_OPTIONS = [
     { value: 'all',     label: 'All Severities' },
     { value: 'error',   label: 'Error'          },
     { value: 'warning', label: 'Warning'        },
+    { value: 'audit',   label: 'Audit'          },
+    { value: 'info',    label: 'Info'           },
 ];
 
 // ---------------------------------------------------------------------------
@@ -158,7 +160,7 @@ function buildTableHead() {
 /**
  * Build a severity badge `<span>` for the given severity string.
  *
- * @param {string} severity - 'error', 'warning', or any other string.
+ * @param {string} severity - 'error', 'warning', 'audit', 'info', or any other string.
  * @returns {HTMLSpanElement}
  */
 function buildSeverityBadge(severity) {

@@ -9,6 +9,7 @@ import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import { WorkspaceOrchestrator } from '../orchestration/workspace-orchestrator.js';
+import { ErrorLogManager } from '../error-log/error-log.manager.js';
 import type { AppConfig } from '../config/config.types.js';
 import { setupFakeGit, makeTestConfig } from './test-helpers.js';
 
@@ -359,8 +360,8 @@ test('createWorkspace passes token-injected URL to cloneRepository when credenti
     const capturedArgsFile = setupFakeGit(fakeGitDir);
 
     const config = makeTestConfig(dir);
-    // Only HTTPS URLs are processed by injectCredentials.
-    config.gitCredentials = { 'private.example': 'ghp_testtoken' };
+    // Only HTTPS URLs are processed — provide a single credential for auto-selection.
+    config.gitCredentials = [{ id: 'cred-ws-inj', label: 'Test Credential', host: 'private.example', token: 'ghp_testtoken' }];
     initializeStorage(config);
 
     const repoManager     = new RepositoryManager(config);
@@ -392,10 +393,8 @@ test('createWorkspace passes token-injected URL to cloneRepository when credenti
     );
 });
 
-test('createWorkspace passes original URL to cloneRepository when no credentials match', async () => {
+test('createWorkspace returns credential-missing error when no credentials are configured for an HTTPS repo', async () => {
     const dir = makeTempDir();
-    const fakeGitDir = fs.mkdtempSync(path.join(tmpRoot, 'fake-git-ws-nocr-'));
-    const capturedArgsFile = setupFakeGit(fakeGitDir);
 
     const config = makeTestConfig(dir); // gitCredentials deliberately absent
     initializeStorage(config);
@@ -405,27 +404,165 @@ test('createWorkspace passes original URL to cloneRepository when no credentials
     const workspaceManager = new WorkspaceManager(projectManager);
     const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
 
-    repoManager.add({ url: 'https://private.example/org/priv-repo.git', id: 'priv-repo' });
+    repoManager.add({ url: 'https://private.example/org/priv-repo.git', id: 'priv-repo', name: 'Priv Repo' });
     projectManager.create('Priv Project', ['priv-repo'], undefined, 'priv-project-ws-no-creds');
+
+    const result = await orchestrator.createWorkspace('priv-project-ws-no-creds', 'DEV');
+
+    // When no credential resolves for an HTTPS repo, the operation must fail
+    // with a descriptive message — git clone is never attempted.
+    assert.strictEqual(result.results.length, 1);
+    assert.strictEqual(result.results[0].success, false);
+    assert.ok(
+        result.results[0].error?.includes('private.example'),
+        `expected error to mention the host; got: "${result.results[0].error}"`,
+    );
+    assert.ok(
+        result.results[0].error?.includes('requires a credential'),
+        `expected error to describe missing credential; got: "${result.results[0].error}"`,
+    );
+});
+
+test('createWorkspace returns credential-missing error when multiple credentials exist for an HTTPS repo host (ambiguous)', async () => {
+    const dir = makeTempDir();
+
+    const config = makeTestConfig(dir);
+    // Two credentials for the same host — resolution is ambiguous without an explicit CredentialId.
+    config.gitCredentials = [
+        { id: 'cred-ws-amb-1', label: 'Account A', host: 'private.example', token: 'token-a' },
+        { id: 'cred-ws-amb-2', label: 'Account B', host: 'private.example', token: 'token-b' },
+    ];
+    initializeStorage(config);
+
+    const repoManager     = new RepositoryManager(config);
+    const projectManager  = new ProjectManager(config, repoManager);
+    const workspaceManager = new WorkspaceManager(projectManager);
+    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
+
+    // Repo has no CredentialId — auto-selection fails (ambiguous).
+    repoManager.add({ url: 'https://private.example/org/priv-repo.git', id: 'priv-repo-amb-ws', name: 'Priv Repo' });
+    projectManager.create('Priv Project Amb', ['priv-repo-amb-ws'], undefined, 'priv-project-ws-ambiguous');
+
+    const result = await orchestrator.createWorkspace('priv-project-ws-ambiguous', 'DEV');
+
+    assert.strictEqual(result.results.length, 1);
+    assert.strictEqual(result.results[0].success, false);
+    assert.ok(
+        result.results[0].error?.includes('private.example'),
+        `expected error to mention the host; got: "${result.results[0].error}"`,
+    );
+});
+
+// ─── ErrorLogManager integration (credential-missing) ─────────────────────────
+
+test('createWorkspace logs credential-missing error via ErrorLogManager with source "credentials"', async () => {
+    const dir = makeTempDir();
+
+    const config = makeTestConfig(dir); // no gitCredentials configured
+    initializeStorage(config);
+
+    const repoManager     = new RepositoryManager(config);
+    const projectManager  = new ProjectManager(config, repoManager);
+    const workspaceManager = new WorkspaceManager(projectManager);
+    const errorLogManager = new ErrorLogManager(config);
+    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, errorLogManager);
+
+    repoManager.add({ url: 'https://private.example/org/priv-repo.git', id: 'priv-repo-ws-log', name: 'Priv Repo' });
+    projectManager.create('Priv Project Log', ['priv-repo-ws-log'], undefined, 'priv-project-ws-log');
+
+    await orchestrator.createWorkspace('priv-project-ws-log', 'DEV');
+
+    // Verify that the error log received an entry with source 'credentials'.
+    const { entries } = errorLogManager.list({});
+    assert.ok(entries.length > 0, 'expected at least one error log entry');
+    const credEntry = entries.find((e) => e.Source === 'credentials');
+    assert.ok(credEntry !== undefined, 'expected an error log entry with source "credentials"');
+    assert.strictEqual(credEntry.Severity, 'error');
+    assert.ok(
+        credEntry.Message.includes('private.example'),
+        `expected error log message to mention the host; got: "${credEntry.Message}"`,
+    );
+    assert.ok(
+        credEntry.Message.includes('requires a credential'),
+        `expected error log message to describe missing credential; got: "${credEntry.Message}"`,
+    );
+});
+
+// ─── Credential success log entry (createWorkspace) ──────────────────────────
+
+test('createWorkspace writes a credentials/info log entry after successful credential-based clone', async () => {
+    const dir = makeTempDir();
+    const fakeGitDir = fs.mkdtempSync(path.join(tmpRoot, 'fake-git-ws-success-log-'));
+
+    // Set up a fake git that exits with 0 (successful clone).
+    const fakeGitPath = path.join(fakeGitDir, 'git');
+    const capturedArgsFile = path.join(fakeGitDir, 'captured-args.txt');
+    fs.writeFileSync(fakeGitPath, `#!/bin/sh\necho "$@" >> ${capturedArgsFile}\nmkdir -p "$2/.git"\nexit 0\n`, { mode: 0o755 });
+
+    const config = makeTestConfig(dir);
+    config.gitCredentials = [{ id: 'cred-ws-success', label: 'Success Cred', host: 'private.example', token: 'ghp_success' }];
+    initializeStorage(config);
+
+    const repoManager     = new RepositoryManager(config);
+    const projectManager  = new ProjectManager(config, repoManager);
+    const workspaceManager = new WorkspaceManager(projectManager);
+    const errorLogManager = new ErrorLogManager(config);
+    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, errorLogManager);
+
+    repoManager.add({ url: 'https://private.example/org/cred-repo.git', id: 'cred-repo-ws', name: 'Cred Repo' });
+    projectManager.create('Cred Project WS', ['cred-repo-ws'], undefined, 'cred-project-ws-success');
 
     const origPath = process.env.PATH ?? '';
     process.env.PATH = `${fakeGitDir}:${origPath}`;
     try {
-        await orchestrator.createWorkspace('priv-project-ws-no-creds', 'DEV');
+        await orchestrator.createWorkspace('cred-project-ws-success', 'DEV');
     } finally {
         process.env.PATH = origPath;
     }
 
-    // Without credentials the URL must pass through unchanged — no token injected.
-    const captured = fs.existsSync(capturedArgsFile)
-        ? fs.readFileSync(capturedArgsFile, 'utf8')
-        : '';
-    assert.ok(
-        captured.includes('https://private.example/org/priv-repo.git'),
-        `expected original URL (no token) in git arguments; got: "${captured}"`,
-    );
-    assert.ok(
-        !captured.includes('@private.example'),
-        `expected no injected credentials in clone URL; got: "${captured}"`,
-    );
+    const { entries } = errorLogManager.list({ source: 'credentials' });
+    const infoEntry = entries.find((e) => e.Severity === 'info');
+    assert.ok(infoEntry !== undefined, 'expected a credentials/info log entry after successful credential-based clone');
+    assert.strictEqual(infoEntry.Source, 'credentials');
+    assert.strictEqual(infoEntry.Operation, 'workspace-setup');
+    assert.strictEqual(infoEntry.Context.ProjectId, 'cred-project-ws-success');
+    assert.strictEqual(infoEntry.Context.WorkspaceId, 'DEV');
+    assert.strictEqual(infoEntry.Context.RepositoryId, 'cred-repo-ws');
+});
+
+test('createWorkspace does NOT write a credentials/info log entry for SSH clones (credential === null)', async () => {
+    const dir = makeTempDir();
+    const fakeGitDir = fs.mkdtempSync(path.join(tmpRoot, 'fake-git-ws-ssh-nolog-'));
+
+    // SSH clone succeeds with exit 0 — credential is null, so no info entry.
+    const fakeGitPath = path.join(fakeGitDir, 'git');
+    const capturedArgsFile = path.join(fakeGitDir, 'captured-args.txt');
+    fs.writeFileSync(fakeGitPath, `#!/bin/sh\necho "$@" >> ${capturedArgsFile}\nmkdir -p "$2/.git"\nexit 0\n`, { mode: 0o755 });
+
+    const config = makeTestConfig(dir);
+    // Configure a credential for a different host so SSH URL is not matched.
+    config.gitCredentials = [{ id: 'cred-ws-ssh-nolog', label: 'Other Cred', host: 'other.example', token: 'ghp_other' }];
+    initializeStorage(config);
+
+    const repoManager     = new RepositoryManager(config);
+    const projectManager  = new ProjectManager(config, repoManager);
+    const workspaceManager = new WorkspaceManager(projectManager);
+    const errorLogManager = new ErrorLogManager(config);
+    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, errorLogManager);
+
+    // SSH URL → credential is null (host is null for SSH, so no credential check).
+    repoManager.add({ url: 'git@github.com:org/ssh-repo.git', id: 'ssh-repo-ws-nolog', name: 'SSH Repo' });
+    projectManager.create('SSH Project WS', ['ssh-repo-ws-nolog'], undefined, 'ssh-project-ws-nolog');
+
+    const origPath = process.env.PATH ?? '';
+    process.env.PATH = `${fakeGitDir}:${origPath}`;
+    try {
+        await orchestrator.createWorkspace('ssh-project-ws-nolog', 'DEV');
+    } finally {
+        process.env.PATH = origPath;
+    }
+
+    const { entries } = errorLogManager.list({ source: 'credentials' });
+    const infoEntry = entries.find((e) => e.Severity === 'info');
+    assert.strictEqual(infoEntry, undefined, 'SSH clones (credential === null) must NOT produce a credentials/info entry');
 });

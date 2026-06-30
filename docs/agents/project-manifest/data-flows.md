@@ -131,8 +131,10 @@ Orchestrator (future WP) receives a repo URL (e.g. https://github.com/org/privat
        ├→ true:  URL already has credentials — decide: strip-and-reinject or reject
        └→ false: proceed to injection
   └→ extractHost(url)                          # → 'github.com'
-  └→ config.gitCredentials['github.com']?
-       ├→ found: injectCredentials(url, config.gitCredentials)
+  └→ resolveCredential(url, config.gitCredentials, repo.credentialId)?
+       │  # Looks up GitCredentialEntry[] by credentialId, or auto-selects
+       │  # the sole entry whose host matches extractHost(url)
+       ├→ found: injectCredentialToken(url, credential.token)
        │         # Returns https://ghp_token@github.com/org/private.git
        │         # Token injected via WHATWG URL API (percent-encoded, not string concat)
        └→ absent: pass original URL (auth will fail fast — GIT_ASKPASS=echo)
@@ -145,9 +147,9 @@ Orchestrator (future WP) receives a repo URL (e.g. https://github.com/org/privat
 ```
 
 **Credential injection rules (standing constraints):**
-- `injectCredentials()` must only be called immediately before a git subprocess call — never stored or passed through API boundaries.
+- `injectCredentialToken()` must only be called immediately before a git subprocess call — never stored or passed through API boundaries.
 - `stripEmbeddedCredentials()` must be applied to any `GitResult.stderr` and `Error.message` before the string is logged or returned in an API response.
-- `hasEmbeddedCredentials()` must be checked before calling `injectCredentials()` when the URL originates from user input.
+- `hasEmbeddedCredentials()` must be checked before calling `injectCredentialToken()` when the URL originates from user input.
 
 ---
 
@@ -158,7 +160,7 @@ WorkspaceOrchestrator.createWorkspace() on clone failure:
   └→ cloneRepository() → GitResult.stderr  (e.g. "fatal: Authentication failed for https://...")
        └→ [FUTURE WP — MANDATORY] stripEmbeddedCredentials(gitResult.stderr)
             # Must be applied before assigning to OrchestrationRepoResult.error
-            # Prevents PAT exposure when injectCredentials() is active
+            # Prevents PAT exposure when credential injection is active
        └→ OrchestrationRepoResult.error = (sanitised) stderr string
   └→ API response: { failures: [{ repositoryId, error }] }
   └→ Browser (project-detail.js):
@@ -208,7 +210,8 @@ User → GET /api/projects/:id/workspaces/:wid/health
   └→ fs.existsSync(workspaceFolder)?
        ├→ false (uninitialized): sendJson 200 { healthy: true, issues: [] }
        └→ true (initialized):
-            checkWorkspaceHealth(projectId, workspaceId, projectsFolder, repositoryIds)
+            checkWorkspaceHealth(projectId, workspaceId, projectsFolder, repositoryIds,
+                                 errorLogManager)
               └→ Check 1: fs.existsSync(getWorkspaceFilePath(...))
                    └→ absent → issue { type: 'workspace-file-missing', severity: 'warning',
                                         fixAction: 'regenerate-workspace-file' }
@@ -216,13 +219,24 @@ User → GET /api/projects/:id/workspaces/:wid/health
                    fs.existsSync(path.join(projectsFolder, projectId, wid, repoId, '.git'))
                    └→ absent → issue { type: 'repository-not-cloned', severity: 'warning',
                                         fixAction: 'setup-workspace', repositoryId }
+              └→ Check 3 (when errorLogManager provided):
+                   errorLogManager.list({ source: 'credentials' })
+                   └→ Filter to entries scoped to this workspace (matching ProjectId + WorkspaceId)
+                   └→ De-duplicate by RepositoryId, keeping only the most recent entry per repo
+                        (list() returns entries newest-first)
+                   └→ For each most-recent entry:
+                        ├→ Severity: 'error'  → issue { type: 'credential-missing',
+                        │                               severity: 'warning',
+                        │                               fixAction: 'configure-credential',
+                        │                               repositoryId }
+                        └→ Severity: 'info'   → suppress (stale badge resolved — see §14)
               └→ Return WorkspaceHealthReport { healthy: issues.length === 0, issues }
             sendJson 200 WorkspaceHealthReport
 ```
 
 **GUI integration:**
 - `project-detail.js`: health fetched in parallel with status for all initialized workspaces via `Promise.allSettled`. Failing fetches degrade gracefully (health cell left empty).
-- `workspace-detail.js`: health report fetched on initial load and every poll cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix action buttons.
+- `workspace-detail.js`: health report fetched on initial load and every poll cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix action buttons. A `credential-missing` issue renders a **"Configure"** button (`fixAction: 'configure-credential'`) that navigates to `#/repositories/:repoId` so the user can assign a credential.
 
 ---
 
@@ -241,3 +255,35 @@ User → POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file
 ```
 
 **No git operations are performed.** This endpoint only writes the `.code-workspace` JSON file. All repository clones remain untouched. Use `POST .../setup` to clone missing repositories.
+
+---
+
+## 14. Credential Success Log Entry and Stale Badge Suppression
+
+When a workspace setup or repository addition completes a **credential-based clone** (i.e. a credential was resolved and injected), both `WorkspaceOrchestrator.createWorkspace()` and `RepositoryOrchestrator.addRepositoryToProject()` write a success entry to the error log:
+
+```
+Successful credential-based clone (per repository):
+  └→ errorLogManager.append({
+         Severity: 'info',
+         Source:   'credentials',
+         Operation: 'clone',
+         Context:  { ProjectId, WorkspaceId, RepositoryId },
+         Message:  'Credential used successfully for clone.',
+     })
+```
+
+This entry serves as a **badge-suppression signal** for `checkWorkspaceHealth()` (§12, Check 3). The flow from clone to badge resolution is:
+
+```
+1. User assigns credential → PUT /api/repositories/:id/credential
+2. User runs setup        → POST /api/projects/:id/workspaces/:wid/setup
+3. Clone succeeds with credential
+     └→ Orchestrator writes Source: 'credentials', Severity: 'info' entry
+4. GET /api/projects/:id/workspaces/:wid/health
+     └→ checkWorkspaceHealth checks most-recent Source: 'credentials' entry per repo
+          ├→ Severity: 'info'  → suppress credential-missing badge (badge cleared)
+          └→ Severity: 'error' → surface credential-missing badge (badge shown)
+```
+
+**SSH clones are excluded:** when `resolveCredential()` returns `null` (e.g. SSH URL, no matching credential), no credentials log entry is written for that repository. The badge-suppression mechanism only applies to repositories that have undergone at least one credential-based clone attempt.

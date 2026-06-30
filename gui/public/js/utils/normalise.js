@@ -12,13 +12,21 @@
  * Normalise a repository object from the backend.
  *
  * @param {Object} repo
- * @returns {{ id: string, name: string, url: string, LastRefreshedAt: string|undefined }}
+ * @returns {{ id: string, name: string, url: string, credentialId: string|undefined, LastRefreshedAt: string|undefined }}
+ *
+ * @remarks
+ * Unlike other normalised fields, `LastRefreshedAt` intentionally retains its
+ * Go-capitalised casing in the returned object. This preserves compatibility
+ * with existing consumers (e.g. `buildRepoStatusCells`) that already reference
+ * it by that name. All other fields (`id`, `name`, `url`, `credentialId`) use
+ * camelCase as the normalised form.
  */
 export function normaliseRepo(repo) {
     return {
         id:              repo.Id   || repo.id   || '',
         name:            repo.Name || repo.name || '',
         url:             repo.Url  || repo.url  || repo.URL || '',
+        credentialId:    repo.CredentialId || repo.credentialId || undefined,
         LastRefreshedAt: repo.LastRefreshedAt || repo.lastRefreshedAt || undefined,
     };
 }

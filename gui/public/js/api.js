@@ -172,6 +172,39 @@ const repositories = {
     touchRefreshTimestamp(id) {
         return request('POST', `/api/repositories/${encodeURIComponent(id)}/refresh-timestamp`);
     },
+
+    /**
+     * Fetch the list of credentials that can be associated with a repository.
+     *
+     * Returns "None" (empty credentialId) plus all credentials whose host
+     * matches the repository's URL hostname. Used to populate the credential
+     * selector dropdown on the repository detail view.
+     *
+     * @param {string} id - Repository ID.
+     * @returns {Promise<Array<{ credentialId: string, label: string, host: string, auto: boolean }>>}
+     */
+    credentialOptions(id) {
+        return request('GET', `/api/repositories/${encodeURIComponent(id)}/credential-options`);
+    },
+
+    /**
+     * Associate (or disassociate) a credential with a repository.
+     *
+     * Pass an empty string for `credentialId` to clear the association.
+     *
+     * **Important:** `credentialId` must be a string. Passing `undefined` will
+     * cause `JSON.stringify` to silently omit the key from the request body,
+     * producing an empty `{}` payload instead of `{ credentialId: '' }`. Always
+     * pass `''` (empty string) when the intent is to clear the association.
+     *
+     * @param {string} id             - Repository ID.
+     * @param {string} credentialId   - The credential ID to associate, or '' to clear.
+     *                                  Must be a string — `undefined` is not supported.
+     * @returns {Promise<Object>} The updated repository.
+     */
+    updateCredential(id, credentialId) {
+        return request('PUT', `/api/repositories/${encodeURIComponent(id)}/credential`, { credentialId });
+    },
 };
 
 /**
@@ -603,30 +636,44 @@ const config = {
         /**
          * List all configured git credentials with masked tokens.
          *
-         * @returns {Promise<Record<string, string>>} Map of host → masked token.
+         * @returns {Promise<Array<{ id: string, label: string, host: string, maskedToken: string }>>}
          */
         list() {
             return request('GET', '/api/config/credentials');
         },
 
         /**
-         * Add or update a host credential.
+         * Add a new credential (no `id` in the request body).
          *
-         * @param {{ host: string, token: string }} data
-         * @returns {Promise<Record<string, string>>} Updated masked credentials map.
+         * @param {{ label: string, host: string, token: string }} data
+         * @returns {Promise<Array<{ id: string, label: string, host: string, maskedToken: string }>>} Updated credentials list.
          */
-        set(data) {
+        add(data) {
             return request('PUT', '/api/config/credentials', data);
         },
 
         /**
-         * Remove a host credential.
+         * Update an existing credential by ID.
          *
-         * @param {string} host
-         * @returns {Promise<Record<string, string>>} Updated masked credentials map after deletion.
+         * @param {string} id   - The credential ID to update.
+         * @param {{ label?: string, token?: string }} data - Fields to update.
+         *   Omit `token` (or leave it as an empty string) to leave the existing
+         *   server-side token unchanged — the server retains the current token
+         *   when no `token` key is present in the request body.
+         * @returns {Promise<Array<{ id: string, label: string, host: string, maskedToken: string }>>} Updated credentials list.
          */
-        delete(host) {
-            return request('DELETE', `/api/config/credentials/${encodeURIComponent(host)}`);
+        update(id, data) {
+            return request('PUT', '/api/config/credentials', { id, ...data });
+        },
+
+        /**
+         * Remove a credential by ID.
+         *
+         * @param {string} id - The credential ID to remove.
+         * @returns {Promise<void>}
+         */
+        remove(id) {
+            return request('DELETE', `/api/config/credentials/${encodeURIComponent(id)}`);
         },
     },
 

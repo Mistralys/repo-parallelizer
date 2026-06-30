@@ -193,6 +193,46 @@ export class RepositoryManager {
     }
 
     /**
+     * Sets or clears the `CredentialId` on the specified repository and persists
+     * the change to `repositories.json`.
+     *
+     * - Pass a non-null `credentialId` to associate a specific credential entry
+     *   with this repository. The tool will use that credential exclusively when
+     *   authenticating.
+     * - Pass `null` to remove the association, reverting to host-based auto-
+     *   selection at runtime.
+     *
+     * @param id           The repository ID.
+     * @param credentialId The credential entry ID to associate, or `null` to clear.
+     *
+     * @returns The updated `Repository` object.
+     *
+     * @throws {NotFoundError} If no repository with the given ID exists.
+     *
+     * @see {@link Repository.CredentialId} for the auto-selection fallback behaviour when no credential is pinned.
+     */
+    updateCredential(id: string, credentialId: string | null): Repository {
+        const store = this.load();
+        const index = store.Repositories.findIndex((r) => r.Id === id);
+
+        if (index === -1) {
+            throw new NotFoundError(`Cannot update credential: repository with ID "${id}" does not exist.`);
+        }
+
+        const existing = store.Repositories[index];
+        if (credentialId === null) {
+            // Remove the CredentialId field entirely so the JSON stays clean.
+            const { CredentialId: _removed, ...rest } = existing;
+            store.Repositories[index] = rest as Repository;
+        } else {
+            store.Repositories[index] = { ...existing, CredentialId: credentialId };
+        }
+
+        this.save(store);
+        return store.Repositories[index];
+    }
+
+    /**
      * Writes the current UTC timestamp to `LastRefreshedAt` for the given
      * repository. Called when the user triggers a manual refresh from the
      * repository detail view.

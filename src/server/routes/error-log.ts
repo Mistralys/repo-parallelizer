@@ -5,6 +5,13 @@ import type { ErrorSeverity } from '../../error-log/error-log.types.js';
 import { sendJson, sendError } from '../requestUtils.js';
 
 // ---------------------------------------------------------------------------
+// Module-scope constants
+// ---------------------------------------------------------------------------
+
+/** All accepted values for the `severity` query parameter. */
+const VALID_SEVERITIES = new Set<ErrorSeverity>(['error', 'warning', 'audit', 'info']);
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -29,7 +36,7 @@ export function registerErrorLogRoutes(
     //
     // Query parameters (all optional):
     //
-    //   severity  "error" | "warning"
+    //   severity  "error" | "warning" | "audit" | "info"
     //             Filter by severity level. Any other value is silently
     //             ignored (treated as no filter).
     //
@@ -55,7 +62,7 @@ export function registerErrorLogRoutes(
     //       {
     //         "Id": 42,
     //         "Timestamp": "2026-04-11T09:00:00.000Z",
-    //         "Severity": "error" | "warning",
+    //         "Severity": "error" | "warning" | "audit" | "info",
     //         "Source": "<string>",
     //         "Operation": "<string>",
     //         "Context": { ... },
@@ -87,8 +94,8 @@ export function registerErrorLogRoutes(
         const offsetRaw = qs.get('offset');
 
         // Validate and cast severity to the union type.
-        const severity =
-            severityRaw === 'error' || severityRaw === 'warning'
+        const severity: ErrorSeverity | undefined =
+            severityRaw !== undefined && VALID_SEVERITIES.has(severityRaw as ErrorSeverity)
                 ? (severityRaw as ErrorSeverity)
                 : undefined;
 

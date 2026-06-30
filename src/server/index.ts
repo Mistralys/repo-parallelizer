@@ -132,12 +132,12 @@ export function startServer(config: ServerConfig): Promise<void> {
     // ------------------------------------------------------------------
     const router = new Router();
     router.setErrorLogManager(errorLogManager);
-    registerRepositoryRoutes(router, repoManager);
+    registerRepositoryRoutes(router, repoManager, config.appConfig, errorLogManager);
     registerProjectRoutes(router, projectManager);
     registerWorkspaceRoutes(router, workspaceManager, workspaceOrchestrator, config.appConfig, projectManager, errorLogManager);
     registerBranchRoutes(router, branchOrchestrator, workspaceManager);
     registerStatusRoutes(router, pollingManager, projectManager, workspaceManager, config.appConfig);
-    registerConfigRoutes({ router, appConfig: config.appConfig, pollingManager });
+    registerConfigRoutes({ router, appConfig: config.appConfig, pollingManager, errorLogManager });
     registerErrorLogRoutes(router, errorLogManager);
     registerNotesRoutes(router, projectManager, workspaceManager);
     registerVersionRoute(router);
