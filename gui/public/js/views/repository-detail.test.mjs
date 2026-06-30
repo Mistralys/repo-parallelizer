@@ -113,8 +113,11 @@ let mockWorkspacesList = [
 ];
 let mockStatusMap = { [REPO_ID]: STATUS_INFO };
 let mockWebserverUrl = null;
+let mockCredentialOptions = [];
 
 api.repositories.get = async () => mockRepoResponse;
+api.repositories.credentialOptions = async () => mockCredentialOptions;
+api.repositories.updateCredential  = async () => ({});
 api.projects.list    = async () => mockProjectsList;
 api.projects.get     = async () => mockProjectDetail;
 api.workspaces.list  = async () => mockWorkspacesList;
@@ -728,6 +731,143 @@ test('Step7 — Refresh removes a row for a workspace no longer returned by disc
     } finally {
         mockWorkspacesList = [{ WorkspaceID: WS_ID, Initialized: true }];
         mockStatusMap = { [REPO_ID]: STATUS_INFO };
+        cleanupContainers();
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Credential section tests
+// ---------------------------------------------------------------------------
+
+test('Credential section — "Credential" section is rendered in the detail view', async () => {
+    mockCredentialOptions = [];
+
+    const container = await renderAndWait();
+    try {
+        const credSection = container.querySelector('.repository-credential-section');
+        assert.ok(credSection, 'Credential section should exist in the detail view');
+
+        const heading = credSection.querySelector('.section-title');
+        assert.ok(heading, 'Credential section should have a heading');
+        assert.strictEqual(heading.textContent, 'Credential');
+    } finally {
+        mockCredentialOptions = [];
+        cleanupContainers();
+    }
+});
+
+test('Credential section — dropdown is populated from credential options (None + each credential)', async () => {
+    mockCredentialOptions = [
+        { credentialId: 'cred-1', label: 'My Token', host: 'github.com', auto: false },
+        { credentialId: 'cred-2', label: 'Work Token', host: 'github.com', auto: false },
+    ];
+
+    const container = await renderAndWait();
+    // Extra flush for the async credentialOptions fetch inside buildCredentialSection
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    try {
+        const select = container.querySelector('select.credential-select');
+        assert.ok(select, 'Credential <select> should exist');
+
+        const options = [...select.querySelectorAll('option')];
+        assert.ok(options.length >= 3, 'Select should have at least 3 options (None + two credentials)');
+
+        // First option should always be "None"
+        assert.strictEqual(options[0].value, '', 'First option value should be empty (None)');
+        assert.strictEqual(options[0].textContent, 'None', 'First option text should be "None"');
+
+        // Other options should correspond to the credentials
+        const credValues = options.slice(1).map((o) => o.value);
+        assert.ok(credValues.includes('cred-1'), 'Select should include cred-1 option');
+        assert.ok(credValues.includes('cred-2'), 'Select should include cred-2 option');
+    } finally {
+        mockCredentialOptions = [];
+        cleanupContainers();
+    }
+});
+
+test('Credential section — auto-selected credential shows (auto) indicator', async () => {
+    mockCredentialOptions = [
+        { credentialId: 'cred-1', label: 'My Token', host: 'github.com', auto: true },
+    ];
+
+    const container = await renderAndWait();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    try {
+        const select = container.querySelector('select.credential-select');
+        assert.ok(select, 'Credential <select> should exist');
+
+        const options = [...select.querySelectorAll('option')];
+        const autoOpt = options.find((o) => o.textContent.includes('(auto)'));
+        assert.ok(autoOpt, 'Auto-matched credential option should include "(auto)" in its label');
+        // Only one option → should be pre-selected
+        assert.strictEqual(select.value, 'cred-1', 'Auto-matched credential should be pre-selected');
+    } finally {
+        mockCredentialOptions = [];
+        cleanupContainers();
+    }
+});
+
+test('Credential section — stored CredentialId is pre-selected in the dropdown', async () => {
+    mockRepoResponse = { Id: REPO_ID, Name: REPO_NAME, Url: REPO_URL, CredentialId: 'cred-2' };
+    mockCredentialOptions = [
+        { credentialId: 'cred-1', label: 'Token A', host: 'github.com', auto: false },
+        { credentialId: 'cred-2', label: 'Token B', host: 'github.com', auto: false },
+    ];
+
+    const container = await renderAndWait();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    try {
+        const select = container.querySelector('select.credential-select');
+        assert.ok(select, 'Credential <select> should exist');
+        assert.strictEqual(select.value, 'cred-2', 'Stored credentialId should be pre-selected');
+    } finally {
+        mockRepoResponse = { Id: REPO_ID, Name: REPO_NAME, Url: REPO_URL };
+        mockCredentialOptions = [];
+        cleanupContainers();
+    }
+});
+
+test('Credential section — changing dropdown calls api.repositories.updateCredential', async () => {
+    const updateCalls = [];
+    const originalUpdate = api.repositories.updateCredential;
+    api.repositories.updateCredential = async (id, credentialId) => {
+        updateCalls.push({ id, credentialId });
+        return {};
+    };
+
+    mockCredentialOptions = [
+        { credentialId: 'cred-1', label: 'My Token', host: 'github.com', auto: false },
+    ];
+
+    const container = await renderAndWait();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    try {
+        const select = container.querySelector('select.credential-select');
+        assert.ok(select, 'Credential <select> should exist');
+
+        // Change selection to cred-1
+        select.value = 'cred-1';
+        select.dispatchEvent(new window.Event('change'));
+
+        // Flush async handler
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.ok(updateCalls.length > 0, 'updateCredential should have been called');
+        assert.strictEqual(updateCalls[0].id, REPO_ID, 'updateCredential should be called with repo ID');
+        assert.strictEqual(updateCalls[0].credentialId, 'cred-1', 'updateCredential should be called with selected credentialId');
+    } finally {
+        api.repositories.updateCredential = originalUpdate;
+        mockCredentialOptions = [];
         cleanupContainers();
     }
 });

@@ -2,10 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     extractHost,
-    injectCredentials,
+    injectCredentialToken,
+    resolveCredential,
     hasEmbeddedCredentials,
     stripEmbeddedCredentials,
 } from '../git/git-credentials.js';
+import type { GitCredentialEntry } from '../config/config.types.js';
 
 // ─── extractHost() ────────────────────────────────────────────────────────────
 
@@ -39,59 +41,6 @@ test('extractHost() returns null for a malformed URL', () => {
 
 test('extractHost() returns null for an http:// URL (non-HTTPS)', () => {
     assert.strictEqual(extractHost('http://github.com/org/repo.git'), null);
-});
-
-// ─── injectCredentials() ──────────────────────────────────────────────────────
-
-test('injectCredentials() injects the token for a matching HTTPS host', () => {
-    const result = injectCredentials(
-        'https://github.com/org/repo.git',
-        { 'github.com': 'ghp_abc' },
-    );
-    assert.strictEqual(result, 'https://ghp_abc@github.com/org/repo.git');
-});
-
-test('injectCredentials() returns original URL when host is not in credentials map', () => {
-    const original = 'https://github.com/org/repo.git';
-    const result = injectCredentials(original, { 'gitlab.com': 'token123' });
-    assert.strictEqual(result, original);
-});
-
-test('injectCredentials() returns original URL when credentials map is empty', () => {
-    const original = 'https://github.com/org/repo.git';
-    const result = injectCredentials(original, {});
-    assert.strictEqual(result, original);
-});
-
-test('injectCredentials() returns original URL for an SSH URL', () => {
-    const original = 'git@github.com:org/repo.git';
-    const result = injectCredentials(original, { 'github.com': 'token' });
-    assert.strictEqual(result, original);
-});
-
-test('injectCredentials() returns original URL for an empty string', () => {
-    assert.strictEqual(injectCredentials('', { 'github.com': 'token' }), '');
-});
-
-test('injectCredentials() handles multiple hosts and picks the correct one', () => {
-    const creds = { 'github.com': 'ghp_github', 'gitlab.com': 'glpat_gitlab' };
-    assert.strictEqual(
-        injectCredentials('https://gitlab.com/org/repo.git', creds),
-        'https://glpat_gitlab@gitlab.com/org/repo.git',
-    );
-    assert.strictEqual(
-        injectCredentials('https://github.com/org/repo.git', creds),
-        'https://ghp_github@github.com/org/repo.git',
-    );
-});
-
-test('injectCredentials() preserves path and query string after injection', () => {
-    const result = injectCredentials(
-        'https://github.com/org/repo.git?foo=bar',
-        { 'github.com': 'ghp_tok' },
-    );
-    assert.ok(result.includes('/org/repo.git?foo=bar'), `unexpected result: ${result}`);
-    assert.ok(result.startsWith('https://ghp_tok@github.com'), `unexpected result: ${result}`);
 });
 
 // ─── hasEmbeddedCredentials() ─────────────────────────────────────────────────
@@ -176,4 +125,87 @@ test('stripEmbeddedCredentials() scrubs multiple embedded URLs in a single prose
     const input = "error: https://token1@host1.com/a and https://token2@host2.com/b";
     const result = stripEmbeddedCredentials(input);
     assert.ok(!result.includes('token1') && !result.includes('token2'), `tokens must be redacted — got: ${result}`);
+});
+
+// ─── resolveCredential() ──────────────────────────────────────────────────────
+
+/** Shared fixture used across resolveCredential() tests. */
+const CREDS: GitCredentialEntry[] = [
+    { id: 'github-personal', label: 'GitHub Personal', host: 'github.com', token: 'ghp_abc' },
+    { id: 'gitlab-work',     label: 'GitLab Work',     host: 'gitlab.com', token: 'glpat_xyz' },
+];
+
+test('resolveCredential() returns the matching entry when credentialId matches', () => {
+    const result = resolveCredential('https://github.com/org/repo.git', CREDS, 'github-personal');
+    assert.deepStrictEqual(result, CREDS[0]);
+});
+
+test('resolveCredential() returns null when credentialId does not match any entry', () => {
+    const result = resolveCredential('https://github.com/org/repo.git', CREDS, 'stale-id');
+    assert.strictEqual(result, null);
+});
+
+test('resolveCredential() auto-selects single host match when no credentialId is provided', () => {
+    const result = resolveCredential('https://github.com/org/repo.git', CREDS);
+    assert.deepStrictEqual(result, CREDS[0]);
+});
+
+test('resolveCredential() returns null when no credentials match the URL host', () => {
+    const result = resolveCredential('https://bitbucket.org/org/repo.git', CREDS);
+    assert.strictEqual(result, null);
+});
+
+test('resolveCredential() returns null when multiple credentials match the URL host (ambiguous)', () => {
+    const ambiguousCreds: GitCredentialEntry[] = [
+        { id: 'github-1', label: 'GitHub Acct 1', host: 'github.com', token: 'ghp_one' },
+        { id: 'github-2', label: 'GitHub Acct 2', host: 'github.com', token: 'ghp_two' },
+    ];
+    const result = resolveCredential('https://github.com/org/repo.git', ambiguousCreds);
+    assert.strictEqual(result, null);
+});
+
+test('resolveCredential() returns null when credentials array is empty and no credentialId is provided', () => {
+    const result = resolveCredential('https://github.com/org/repo.git', []);
+    assert.strictEqual(result, null);
+});
+
+test('resolveCredential() returns null when credentials array is empty and credentialId is provided', () => {
+    const result = resolveCredential('https://github.com/org/repo.git', [], 'any-id');
+    assert.strictEqual(result, null);
+});
+
+test('resolveCredential() returns null for a non-HTTPS URL (auto-selection path)', () => {
+    const result = resolveCredential('git@github.com:org/repo.git', CREDS);
+    assert.strictEqual(result, null);
+});
+
+// ─── injectCredentialToken() ──────────────────────────────────────────────────
+
+test('injectCredentialToken() injects the token into an HTTPS URL', () => {
+    const result = injectCredentialToken('https://github.com/org/repo.git', 'ghp_abc');
+    assert.strictEqual(result, 'https://ghp_abc@github.com/org/repo.git');
+});
+
+test('injectCredentialToken() returns the original URL unchanged for an SSH URL', () => {
+    const original = 'git@github.com:org/repo.git';
+    assert.strictEqual(injectCredentialToken(original, 'ghp_abc'), original);
+});
+
+test('injectCredentialToken() returns the original URL unchanged for a non-HTTPS scheme', () => {
+    const original = 'http://github.com/org/repo.git';
+    assert.strictEqual(injectCredentialToken(original, 'ghp_abc'), original);
+});
+
+test('injectCredentialToken() preserves path and query string after injection', () => {
+    const result = injectCredentialToken('https://github.com/org/repo.git?foo=bar', 'tok');
+    assert.ok(result.startsWith('https://tok@github.com'), `unexpected result: ${result}`);
+    assert.ok(result.includes('/org/repo.git?foo=bar'), `unexpected result: ${result}`);
+});
+
+test('injectCredentialToken() percent-encodes special characters in the token', () => {
+    // The WHATWG URL serialiser must encode '@' and '/' inside the token so the
+    // resulting URL is unambiguous and safe to pass directly to git.
+    const result = injectCredentialToken('https://github.com/org/repo.git', 'tok@en/val');
+    assert.ok(!result.includes('tok@en/val'), `raw special chars must be encoded — got: ${result}`);
+    assert.ok(result.startsWith('https://'), `must remain HTTPS — got: ${result}`);
 });

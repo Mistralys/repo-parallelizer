@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'os';
 import * as path from 'node:path';
 import { loadConfig, saveConfigField } from '../config/config.js';
+import { MAX_CREDENTIAL_ID_LENGTH } from '../config/config.constants.js';
 import { createTempDirTracker } from './test-helpers.js';
 
 const makeTempDir = createTempDirTracker('paralizer-config-test-');
@@ -121,7 +122,7 @@ test('loadConfig() throws when projectsFolder is null', () => {
     assert.throws(() => loadConfig(configPath), /projectsFolder/);
 });
 
-// --- gitCredentials ---
+// --- gitCredentials: absent / null ---
 
 test('loadConfig() returns gitCredentials: undefined when field is absent', () => {
     const dir = makeTempDir();
@@ -144,7 +145,169 @@ test('loadConfig() returns gitCredentials: undefined when field is null', () => 
     assert.strictEqual(config.gitCredentials, undefined);
 });
 
-test('loadConfig() returns parsed gitCredentials when valid entries are present', () => {
+// --- gitCredentials: new array format ---
+
+test('loadConfig() returns an empty array when gitCredentials is []', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [],
+    });
+    const config = loadConfig(configPath);
+    assert.deepStrictEqual(config.gitCredentials, []);
+});
+
+test('loadConfig() returns parsed GitCredentialEntry[] when new-format array is provided', () => {
+    const dir = makeTempDir();
+    const entry = { id: 'github-com', label: 'GitHub', host: 'github.com', token: 'ghp_token123' };
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [entry],
+    });
+    const config = loadConfig(configPath);
+    assert.deepStrictEqual(config.gitCredentials, [entry]);
+});
+
+test('loadConfig() returns multiple GitCredentialEntry objects for the same host', () => {
+    const dir = makeTempDir();
+    const entries = [
+        { id: 'work-account', label: 'Work GitHub', host: 'github.com', token: 'ghp_work' },
+        { id: 'personal-account', label: 'Personal GitHub', host: 'github.com', token: 'ghp_personal' },
+    ];
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: entries,
+    });
+    const config = loadConfig(configPath);
+    assert.deepStrictEqual(config.gitCredentials, entries);
+});
+
+test('loadConfig() throws when gitCredentials array has duplicate id values', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [
+            { id: 'same-id', label: 'A', host: 'github.com', token: 'tok1' },
+            { id: 'same-id', label: 'B', host: 'gitlab.com', token: 'tok2' },
+        ],
+    });
+    assert.throws(() => loadConfig(configPath), /duplicate id "same-id"/);
+});
+
+test('loadConfig() throws when a GitCredentialEntry has an empty id', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [{ id: '', label: 'GitHub', host: 'github.com', token: 'tok' }],
+    });
+    assert.throws(() => loadConfig(configPath), /gitCredentials\[0\]\.id.*non-empty/);
+});
+
+test('loadConfig() throws when a GitCredentialEntry has an empty label', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [{ id: 'github-com', label: '', host: 'github.com', token: 'tok' }],
+    });
+    assert.throws(() => loadConfig(configPath), /gitCredentials\[0\]\.label.*non-empty/);
+});
+
+test('loadConfig() throws when a GitCredentialEntry has an empty host', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [{ id: 'github-com', label: 'GitHub', host: '', token: 'tok' }],
+    });
+    assert.throws(() => loadConfig(configPath), /gitCredentials\[0\]\.host.*non-empty/);
+});
+
+test('loadConfig() throws when a GitCredentialEntry has an empty token', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [{ id: 'github-com', label: 'GitHub', host: 'github.com', token: '' }],
+    });
+    assert.throws(() => loadConfig(configPath), /gitCredentials\[0\]\.token.*non-empty/);
+});
+
+test('loadConfig() throws when gitCredentials array contains a non-object element', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: ['raw-token'],
+    });
+    assert.throws(() => loadConfig(configPath), /gitCredentials\[0\].*credential object/);
+});
+
+// --- gitCredentials: per-field length limits (WP-005) ---
+
+test('loadConfig() throws when a GitCredentialEntry id exceeds 100 characters', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [{ id: 'a'.repeat(101), label: 'GitHub', host: 'github.com', token: 'tok' }],
+    });
+    assert.throws(() => loadConfig(configPath), /gitCredentials\[0\]\.id.*100/);
+});
+
+test('loadConfig() throws when a GitCredentialEntry label exceeds 200 characters', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [{ id: 'github-com', label: 'a'.repeat(201), host: 'github.com', token: 'tok' }],
+    });
+    assert.throws(() => loadConfig(configPath), /gitCredentials\[0\]\.label.*200/);
+});
+
+test('loadConfig() throws when a GitCredentialEntry host exceeds 253 characters', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [{ id: 'github-com', label: 'GitHub', host: 'a'.repeat(254), token: 'tok' }],
+    });
+    assert.throws(() => loadConfig(configPath), /gitCredentials\[0\]\.host.*253/);
+});
+
+test('loadConfig() throws when a GitCredentialEntry token exceeds 500 characters', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [{ id: 'github-com', label: 'GitHub', host: 'github.com', token: 'a'.repeat(501) }],
+    });
+    assert.throws(() => loadConfig(configPath), /gitCredentials\[0\]\.token.*500/);
+});
+
+test('loadConfig() accepts GitCredentialEntry fields exactly at each length limit', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [{
+            id: 'a'.repeat(100),
+            label: 'a'.repeat(200),
+            host: 'a'.repeat(253),
+            token: 'a'.repeat(500),
+        }],
+    });
+    assert.doesNotThrow(() => loadConfig(configPath), 'fields at length limit should be accepted');
+});
+
+// --- gitCredentials: old Record<string, string> format — migration ---
+
+test('loadConfig() migrates old Record<string,string> gitCredentials to GitCredentialEntry[]', () => {
     const dir = makeTempDir();
     const configPath = writeConfig(dir, {
         projectsFolder: '/tmp/projects',
@@ -152,13 +315,55 @@ test('loadConfig() returns parsed gitCredentials when valid entries are present'
         gitCredentials: { 'github.com': 'ghp_token123', 'gitlab.com': 'glpat_abc' },
     });
     const config = loadConfig(configPath);
-    assert.deepStrictEqual(config.gitCredentials, {
-        'github.com': 'ghp_token123',
-        'gitlab.com': 'glpat_abc',
-    });
+    assert.ok(Array.isArray(config.gitCredentials), 'gitCredentials should be an array after migration');
+    const entries = config.gitCredentials!;
+    assert.strictEqual(entries.length, 2);
+    const github = entries.find(e => e.host === 'github.com');
+    assert.ok(github, 'expected an entry for github.com');
+    assert.strictEqual(github!.id, 'github-com');
+    assert.strictEqual(github!.label, 'github.com');
+    assert.strictEqual(github!.token, 'ghp_token123');
+    const gitlab = entries.find(e => e.host === 'gitlab.com');
+    assert.ok(gitlab, 'expected an entry for gitlab.com');
+    assert.strictEqual(gitlab!.id, 'gitlab-com');
+    assert.strictEqual(gitlab!.label, 'gitlab.com');
+    assert.strictEqual(gitlab!.token, 'glpat_abc');
 });
 
-test('loadConfig() returns gitCredentials as empty object when field is {}', () => {
+test('loadConfig() migration: id is derived from hostname in kebab-case', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: { 'my.git.server.internal': 'secret' },
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.gitCredentials![0].id, 'my-git-server-internal');
+});
+
+test('loadConfig() migration: label is set to the original hostname', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: { 'github.com': 'tok' },
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.gitCredentials![0].label, 'github.com');
+});
+
+test('loadConfig() migration: host field is preserved exactly', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: { 'github.com': 'tok' },
+    });
+    const config = loadConfig(configPath);
+    assert.strictEqual(config.gitCredentials![0].host, 'github.com');
+});
+
+test('loadConfig() migration: empty {} gitCredentials returns undefined', () => {
     const dir = makeTempDir();
     const configPath = writeConfig(dir, {
         projectsFolder: '/tmp/projects',
@@ -166,47 +371,182 @@ test('loadConfig() returns gitCredentials as empty object when field is {}', () 
         gitCredentials: {},
     });
     const config = loadConfig(configPath);
-    assert.deepStrictEqual(config.gitCredentials, {});
+    assert.strictEqual(config.gitCredentials, undefined);
 });
 
-test('loadConfig() throws when gitCredentials is an array', () => {
+test('loadConfig() migration: duplicate kebab-case IDs get numeric suffix disambiguation', () => {
     const dir = makeTempDir();
+    // Two hostnames that both resolve to the same kebab-case slug.
+    // "github.com" → "github-com" and "github-com" (if used as a hostname) → "github-com"
+    // We craft a realistic case: "github.com" → "github-com" and "github-com" → "github-com"
     const configPath = writeConfig(dir, {
         projectsFolder: '/tmp/projects',
         storageFolder: '/tmp/storage',
-        gitCredentials: ['token'],
+        gitCredentials: { 'github.com': 'token1', 'github-com': 'token2' },
     });
-    assert.throws(() => loadConfig(configPath), /gitCredentials.*plain object/);
+    const config = loadConfig(configPath);
+    const entries = config.gitCredentials!;
+    assert.strictEqual(entries.length, 2);
+    const ids = entries.map(e => e.id);
+    // Both should be present but with different IDs
+    assert.ok(ids.includes('github-com'), 'first collision should get base id');
+    assert.ok(ids.includes('github-com-2'), 'second collision should get -2 suffix');
 });
 
-test('loadConfig() throws when gitCredentials is a string', () => {
+test('loadConfig() migration is idempotent — re-parsing already-migrated array gives same result', () => {
+    const dir1 = makeTempDir();
+    const dir2 = makeTempDir();
+
+    // First pass: parse old format to get migrated entries
+    const configPath1 = writeConfig(dir1, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: { 'github.com': 'ghp_tok', 'gitlab.com': 'glpat_tok' },
+    });
+    const first = loadConfig(configPath1);
+    const migratedEntries = first.gitCredentials!;
+
+    // Second pass: write migrated entries back and parse again
+    const configPath2 = writeConfig(dir2, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: migratedEntries,
+    });
+    const second = loadConfig(configPath2);
+
+    assert.deepStrictEqual(second.gitCredentials, migratedEntries);
+});
+
+test('loadConfig() throws when gitCredentials is a plain string', () => {
     const dir = makeTempDir();
     const configPath = writeConfig(dir, {
         projectsFolder: '/tmp/projects',
         storageFolder: '/tmp/storage',
         gitCredentials: 'token',
     });
-    assert.throws(() => loadConfig(configPath), /gitCredentials.*plain object/);
+    assert.throws(() => loadConfig(configPath), /gitCredentials/);
 });
 
-test('loadConfig() throws when a gitCredentials value is a number', () => {
+test('loadConfig() migration throws when a legacy credentials value is a number', () => {
     const dir = makeTempDir();
     const configPath = writeConfig(dir, {
         projectsFolder: '/tmp/projects',
         storageFolder: '/tmp/storage',
         gitCredentials: { 'github.com': 12345 },
     });
-    assert.throws(() => loadConfig(configPath), /gitCredentials\["github\.com"\].*string/);
+    assert.throws(() => loadConfig(configPath), /gitCredentials entry #1 \(legacy format\).*string/);
 });
 
-test('loadConfig() throws when a gitCredentials value is an empty string', () => {
+test('loadConfig() migration throws when a legacy credentials value is an empty string', () => {
     const dir = makeTempDir();
     const configPath = writeConfig(dir, {
         projectsFolder: '/tmp/projects',
         storageFolder: '/tmp/storage',
         gitCredentials: { 'github.com': '' },
     });
-    assert.throws(() => loadConfig(configPath), /gitCredentials\["github\.com"\].*empty/);
+    assert.throws(() => loadConfig(configPath), /gitCredentials entry #1 \(legacy format\).*empty/);
+});
+
+// --- gitCredentials: whitespace trimming ---
+
+test('loadConfig() trims leading/trailing whitespace from all four fields in new-format entries', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [
+            { id: '  github-com  ', label: '  GitHub  ', host: '  github.com  ', token: '  ghp_token123  ' },
+        ],
+    });
+    const config = loadConfig(configPath);
+    const entry = config.gitCredentials![0];
+    assert.strictEqual(entry.id, 'github-com');
+    assert.strictEqual(entry.label, 'GitHub');
+    assert.strictEqual(entry.host, 'github.com');
+    assert.strictEqual(entry.token, 'ghp_token123');
+});
+
+test('loadConfig() trims all four fields across multiple new-format entries independently', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [
+            { id: ' work  ', label: '\tWork GitHub\t', host: '\ngithub.com\n', token: '  tok1  ' },
+            { id: '  personal  ', label: '  Personal  ', host: '  gitlab.com  ', token: '  tok2  ' },
+        ],
+    });
+    const config = loadConfig(configPath);
+    const [e1, e2] = config.gitCredentials!;
+    assert.strictEqual(e1.id, 'work');
+    assert.strictEqual(e1.label, 'Work GitHub');
+    assert.strictEqual(e1.host, 'github.com');
+    assert.strictEqual(e1.token, 'tok1');
+    assert.strictEqual(e2.id, 'personal');
+    assert.strictEqual(e2.label, 'Personal');
+    assert.strictEqual(e2.host, 'gitlab.com');
+    assert.strictEqual(e2.token, 'tok2');
+});
+
+test('loadConfig() new-format entries with already-trimmed values are unaffected', () => {
+    const dir = makeTempDir();
+    const entry = { id: 'github-com', label: 'GitHub', host: 'github.com', token: 'ghp_token' };
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [entry],
+    });
+    const config = loadConfig(configPath);
+    assert.deepStrictEqual(config.gitCredentials![0], entry);
+});
+
+test('loadConfig() trims host and token in legacy-format entries', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: { '  github.com  ': '  ghp_token123  ' },
+    });
+    const config = loadConfig(configPath);
+    const entry = config.gitCredentials![0];
+    assert.strictEqual(entry.host, 'github.com');
+    assert.strictEqual(entry.token, 'ghp_token123');
+});
+
+test('loadConfig() trims label in legacy-format entries', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: { '  github.com  ': 'ghp_token' },
+    });
+    const config = loadConfig(configPath);
+    const entry = config.gitCredentials![0];
+    assert.strictEqual(entry.label, 'github.com');
+});
+
+test('loadConfig() rejects GitCredentialEntry field whose raw length exceeds limit even if trimmed value would be within limit', () => {
+    const dir = makeTempDir();
+    // id limit is 100; raw length = 101 (100 'a' chars + 1 space), trimmed length = 100
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [{ id: 'a'.repeat(MAX_CREDENTIAL_ID_LENGTH) + ' ', label: 'GitHub', host: 'github.com', token: 'tok' }],
+    });
+    assert.throws(() => loadConfig(configPath), /gitCredentials\[0\]\.id.*100/);
+});
+
+test('loadConfig() legacy-format entries with already-trimmed values are unaffected', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: { 'github.com': 'ghp_token' },
+    });
+    const config = loadConfig(configPath);
+    const entry = config.gitCredentials![0];
+    assert.strictEqual(entry.host, 'github.com');
+    assert.strictEqual(entry.token, 'ghp_token');
 });
 
 // --- saveConfigField() ---

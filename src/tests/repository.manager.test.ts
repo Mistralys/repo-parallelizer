@@ -326,3 +326,71 @@ test('add stores URL unchanged when URL has no embedded credentials', () => {
     const repo = manager.add({ url: 'https://github.com/user/clean-repo.git' });
     assert.strictEqual(repo.Url, 'https://github.com/user/clean-repo.git');
 });
+
+// ─── updateCredential ────────────────────────────────────────────────────────
+
+test('updateCredential sets CredentialId on the specified repository', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git' });
+    const updated = manager.updateCredential('repo', 'cred-1');
+    assert.strictEqual(updated.CredentialId, 'cred-1');
+});
+
+test('updateCredential persists CredentialId so getById() reflects it', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git' });
+    manager.updateCredential('repo', 'cred-1');
+    assert.strictEqual(manager.getById('repo')?.CredentialId, 'cred-1');
+});
+
+test('updateCredential clears CredentialId when null is passed', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git' });
+    manager.updateCredential('repo', 'cred-1');
+    const cleared = manager.updateCredential('repo', null);
+    assert.strictEqual(cleared.CredentialId, undefined);
+});
+
+test('updateCredential with null removes CredentialId from the persisted record', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git' });
+    manager.updateCredential('repo', 'cred-1');
+    manager.updateCredential('repo', null);
+    const stored = manager.getById('repo');
+    assert.ok(stored !== undefined);
+    assert.ok(!Object.hasOwn(stored, 'CredentialId'), 'CredentialId must not be present in persisted record');
+});
+
+test('updateCredential does not affect other fields when setting a credential', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git', name: 'My Repo' });
+    const updated = manager.updateCredential('repo', 'cred-1');
+    assert.strictEqual(updated.Id, 'repo');
+    assert.strictEqual(updated.Name, 'My Repo');
+    assert.strictEqual(updated.Url, 'https://github.com/user/repo.git');
+});
+
+test('updateCredential throws NotFoundError for a non-existent repository ID', () => {
+    const manager = makeManager(makeTempDir());
+    assert.throws(
+        () => manager.updateCredential('nonexistent', 'cred-1'),
+        (err) => err instanceof NotFoundError,
+    );
+});
+
+test('updateCredential error message contains the missing ID', () => {
+    const manager = makeManager(makeTempDir());
+    assert.throws(
+        () => manager.updateCredential('ghost', 'cred-1'),
+        /ghost/,
+    );
+});
+
+test('updateCredential is visible across two independent manager instances', () => {
+    const base = makeTempDir();
+    const m1 = makeManager(base);
+    const m2 = makeManager(base);
+    m1.add({ url: 'https://github.com/user/repo.git' });
+    m1.updateCredential('repo', 'cred-shared');
+    assert.strictEqual(m2.getById('repo')?.CredentialId, 'cred-shared');
+});

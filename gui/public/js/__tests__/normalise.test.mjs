@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { normaliseWorkspace, normaliseNotesResponse } = await import('../utils/normalise.js');
+const { normaliseRepo, normaliseWorkspace, normaliseNotesResponse } = await import('../utils/normalise.js');
 
 // ─── normaliseWorkspace — notes field ────────────────────────────────────────
 
@@ -131,4 +131,46 @@ test('normaliseNotesResponse: includes all workspaces for a project', () => {
         }],
     });
     assert.strictEqual(result.projects[0].workspaces.length, 2);
+});
+
+// ─── normaliseRepo — CredentialId field ──────────────────────────────────────
+
+test('normaliseRepo: CredentialId (Go-capitalised) is mapped to credentialId', () => {
+    const result = normaliseRepo({ Id: 'repo-1', Name: 'Repo One', Url: 'https://github.com/org/repo.git', CredentialId: 'cred-abc' });
+    assert.strictEqual(result.credentialId, 'cred-abc');
+});
+
+test('normaliseRepo: lowercase credentialId is accepted', () => {
+    const result = normaliseRepo({ Id: 'repo-1', Name: 'Repo One', Url: 'https://github.com/org/repo.git', credentialId: 'cred-xyz' });
+    assert.strictEqual(result.credentialId, 'cred-xyz');
+});
+
+test('normaliseRepo: CredentialId takes precedence over credentialId', () => {
+    const result = normaliseRepo({ Id: 'repo-1', CredentialId: 'upper-cred', credentialId: 'lower-cred' });
+    assert.strictEqual(result.credentialId, 'upper-cred');
+});
+
+test('normaliseRepo: missing CredentialId defaults to undefined', () => {
+    const result = normaliseRepo({ Id: 'repo-1', Name: 'Repo', Url: 'https://github.com/org/repo.git' });
+    assert.strictEqual(result.credentialId, undefined);
+});
+
+test('normaliseRepo: empty string CredentialId defaults to undefined', () => {
+    const result = normaliseRepo({ Id: 'repo-1', CredentialId: '' });
+    assert.strictEqual(result.credentialId, undefined);
+});
+
+test('normaliseRepo: existing fields still work when CredentialId is present', () => {
+    const result = normaliseRepo({
+        Id: 'repo-1',
+        Name: 'Repo One',
+        Url: 'https://github.com/org/repo.git',
+        CredentialId: 'cred-abc',
+        LastRefreshedAt: '2026-01-01T00:00:00Z',
+    });
+    assert.strictEqual(result.id, 'repo-1');
+    assert.strictEqual(result.name, 'Repo One');
+    assert.strictEqual(result.url, 'https://github.com/org/repo.git');
+    assert.strictEqual(result.credentialId, 'cred-abc');
+    assert.strictEqual(result.LastRefreshedAt, '2026-01-01T00:00:00Z');
 });

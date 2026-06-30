@@ -122,7 +122,15 @@ function buildSut(projectsFolder: string): {
     const pm = new MockProjectManager();
     const stubOrchestrator = {} as never;
     const appConfig = { projectsFolder } as never;
-    const stubErrorLogManager = {} as never;
+    // Minimal ErrorLogManager stub — list() returns empty so no credential-missing
+    // issues appear in these structural health check tests.
+    const stubErrorLogManager = {
+        list: () => ({ entries: [], total: 0 }),
+        append: () => undefined,
+        getById: () => undefined,
+        clear: () => {},
+        sources: () => [],
+    } as never;
     registerWorkspaceRoutes(router, wm as never, stubOrchestrator, appConfig, pm as never, stubErrorLogManager);
     return { router, wm, pm };
 }

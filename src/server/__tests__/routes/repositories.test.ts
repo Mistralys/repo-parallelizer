@@ -4,7 +4,10 @@ import { Router } from '../../router.js';
 import { registerRepositoryRoutes } from '../../routes/repositories.js';
 import { NotFoundError } from '../../../errors.js';
 import type { Repository } from '../../../models/repository/repository.types.js';
-import { mockRequest, mockResponse, type MockResponse } from '../helpers/mock-http.js';
+import type { AppConfig, GitCredentialEntry } from '../../../config/config.types.js';
+import type { ErrorLogManager } from '../../../error-log/error-log.manager.js';
+import { mockRequest, mockResponse, flushAsync, type MockResponse } from '../helpers/mock-http.js';
+import { makeMockErrorLogManager } from '../helpers/mock-error-log-manager.js';
 
 // ---------------------------------------------------------------------------
 // Mock RepositoryManager
@@ -65,20 +68,55 @@ class MockRepositoryManager {
         this.store.splice(index, 1);
     }
 
+    updateCredential(id: string, credentialId: string | null): Repository {
+        const index = this.store.findIndex((r) => r.Id === id);
+        if (index === -1) {
+            throw new NotFoundError(`Cannot update credential: repository with ID "${id}" does not exist.`);
+        }
+        const existing = this.store[index];
+        if (credentialId === null) {
+            const { CredentialId: _removed, ...rest } = existing;
+            this.store[index] = rest as Repository;
+        } else {
+            this.store[index] = { ...existing, CredentialId: credentialId };
+        }
+        return this.store[index];
+    }
+
     // Test helper: seed the store directly
     seed(repos: Repository[]): void {
         this.store = [...repos];
     }
 }
 
+// ---------------------------------------------------------------------------
+// Minimal AppConfig factory for tests
+// ---------------------------------------------------------------------------
+
+function makeAppConfig(credentials: GitCredentialEntry[] = []): AppConfig {
+    return {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        cloneDepth: 50,
+        serverPort: 4200,
+        gitPollingIntervalSeconds: 30,
+        notesCardHeight: 200,
+        notesColumns: 3,
+        gitCredentials: credentials,
+    };
+}
+
+
 /**
  * Convenience: builds a fresh Router + MockManager pair with routes registered.
+ * Accepts an optional `AppConfig` for tests that exercise credential routes.
  */
-function buildSut(): { router: Router; manager: MockRepositoryManager } {
+function buildSut(appConfig?: AppConfig, errorLogManager?: ErrorLogManager): { router: Router; manager: MockRepositoryManager } {
     const router = new Router();
     const manager = new MockRepositoryManager();
+    const config = appConfig ?? makeAppConfig();
     // Cast is safe: our mock satisfies the same duck-type interface used by the routes.
-    registerRepositoryRoutes(router, manager as never);
+    registerRepositoryRoutes(router, manager as never, config, errorLogManager);
     return { router, manager };
 }
 
@@ -333,4 +371,319 @@ test('DELETE /api/repositories/:id: the deleted repository is no longer listed',
 
     assert.strictEqual(mock.statusCode, 204);
     assert.deepEqual(manager.list().map((r) => r.Id), ['keep']);
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/repositories/:id/credential — set or clear credential
+// ---------------------------------------------------------------------------
+
+test('PUT /api/repositories/:id/credential: sets CredentialId when credentialId is valid', async () => {
+    const credential: GitCredentialEntry = {
+        id: 'cred-1',
+        label: 'GitHub Personal',
+        host: 'github.com',
+        token: 'ghp_secret',
+    };
+    const { router, manager } = buildSut(makeAppConfig([credential]));
+    manager.seed([{ Id: 'my-repo', Name: 'My Repo', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const req = mockRequest('PUT', '/api/repositories/my-repo/credential', { credentialId: 'cred-1' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as Repository;
+    assert.strictEqual(updated.CredentialId, 'cred-1');
+    assert.strictEqual(updated.Id, 'my-repo');
+});
+
+test('PUT /api/repositories/:id/credential: clears CredentialId when credentialId is null', async () => {
+    const credential: GitCredentialEntry = {
+        id: 'cred-1',
+        label: 'GitHub Personal',
+        host: 'github.com',
+        token: 'ghp_secret',
+    };
+    const { router, manager } = buildSut(makeAppConfig([credential]));
+    manager.seed([{ Id: 'my-repo', Name: 'My Repo', Url: 'https://github.com/org/my-repo.git', CredentialId: 'cred-1' }]);
+
+    const req = mockRequest('PUT', '/api/repositories/my-repo/credential', { credentialId: null });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as Repository;
+    assert.strictEqual(updated.CredentialId, undefined);
+    assert.strictEqual(updated.Id, 'my-repo');
+});
+
+test('PUT /api/repositories/:id/credential: returns 400 when credentialId does not reference an existing credential', async () => {
+    const { router, manager } = buildSut(makeAppConfig([]));
+    manager.seed([{ Id: 'my-repo', Name: 'My Repo', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const req = mockRequest('PUT', '/api/repositories/my-repo/credential', { credentialId: 'nonexistent-cred' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 400);
+    const parsed = JSON.parse(mock.body) as { error: string };
+    assert.ok(typeof parsed.error === 'string');
+    assert.ok(parsed.error.includes('nonexistent-cred'));
+});
+
+test('PUT /api/repositories/:id/credential: returns 404 when repository does not exist', async () => {
+    const { router } = buildSut(makeAppConfig([]));
+
+    const req = mockRequest('PUT', '/api/repositories/ghost/credential', { credentialId: null });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 404);
+    const parsed = JSON.parse(mock.body) as { error: string };
+    assert.ok(typeof parsed.error === 'string');
+});
+
+test('PUT /api/repositories/:id/credential: returns 400 when credentialId is not a string or null', async () => {
+    const { router, manager } = buildSut(makeAppConfig([]));
+    manager.seed([{ Id: 'my-repo', Name: 'My Repo', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const req = mockRequest('PUT', '/api/repositories/my-repo/credential', { credentialId: 42 });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 400);
+    const parsed = JSON.parse(mock.body) as { error: string };
+    assert.ok(typeof parsed.error === 'string');
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/repositories/:id/credential — host/credential coherence guard (WP-008)
+// ---------------------------------------------------------------------------
+
+test('PUT /api/repositories/:id/credential: returns 400 when credential host does not match repository URL hostname', async () => {
+    const credential: GitCredentialEntry = {
+        id: 'gitlab-cred',
+        label: 'GitLab',
+        host: 'gitlab.com',
+        token: 'glpat_secret',
+    };
+    const { router, manager } = buildSut(makeAppConfig([credential]));
+    // Repo is on github.com but credential is for gitlab.com.
+    manager.seed([{ Id: 'my-repo', Name: 'My Repo', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const req = mockRequest('PUT', '/api/repositories/my-repo/credential', { credentialId: 'gitlab-cred' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 400);
+    const parsed = JSON.parse(mock.body) as { error: string };
+    assert.ok(typeof parsed.error === 'string');
+    assert.ok(parsed.error.includes('gitlab.com'), 'error must include credential host');
+    assert.ok(parsed.error.includes('github.com'), 'error must include repository host');
+});
+
+test('PUT /api/repositories/:id/credential: returns 200 when credential host matches repository URL hostname', async () => {
+    const credential: GitCredentialEntry = {
+        id: 'github-cred',
+        label: 'GitHub',
+        host: 'github.com',
+        token: 'ghp_secret',
+    };
+    const { router, manager } = buildSut(makeAppConfig([credential]));
+    manager.seed([{ Id: 'my-repo', Name: 'My Repo', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const req = mockRequest('PUT', '/api/repositories/my-repo/credential', { credentialId: 'github-cred' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as Repository;
+    assert.strictEqual(updated.CredentialId, 'github-cred');
+});
+
+test('PUT /api/repositories/:id/credential: clearing (credentialId: null) skips host-coherence check', async () => {
+    const credential: GitCredentialEntry = {
+        id: 'gitlab-cred',
+        label: 'GitLab',
+        host: 'gitlab.com',
+        token: 'glpat_secret',
+    };
+    const { router, manager } = buildSut(makeAppConfig([credential]));
+    // Repo has a mismatched credential already; clearing should always be allowed.
+    manager.seed([{ Id: 'my-repo', Name: 'My Repo', Url: 'https://github.com/org/my-repo.git', CredentialId: 'gitlab-cred' }]);
+
+    const req = mockRequest('PUT', '/api/repositories/my-repo/credential', { credentialId: null });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as Repository;
+    assert.strictEqual(updated.CredentialId, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/repositories/:id/credential-options — list matching credentials
+// ---------------------------------------------------------------------------
+
+test('GET /api/repositories/:id/credential-options: returns only credentials matching the repository host, with tokens masked', () => {
+    const githubCred: GitCredentialEntry = {
+        id: 'cred-github',
+        label: 'GitHub',
+        host: 'github.com',
+        token: 'ghp_secret',
+    };
+    const gitlabCred: GitCredentialEntry = {
+        id: 'cred-gitlab',
+        label: 'GitLab',
+        host: 'gitlab.com',
+        token: 'glpat_secret',
+    };
+    const { router, manager } = buildSut(makeAppConfig([githubCred, gitlabCred]));
+    manager.seed([{ Id: 'my-repo', Name: 'My Repo', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const req = mockRequest('GET', '/api/repositories/my-repo/credential-options');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { credentials: GitCredentialEntry[]; autoSelected?: string };
+    assert.strictEqual(body.credentials.length, 1);
+    assert.strictEqual(body.credentials[0].id, 'cred-github');
+    assert.strictEqual(body.credentials[0].token, '***', 'token must be masked');
+});
+
+test('GET /api/repositories/:id/credential-options: includes autoSelected when exactly one credential matches the host', () => {
+    const cred: GitCredentialEntry = {
+        id: 'cred-1',
+        label: 'My Cred',
+        host: 'github.com',
+        token: 'secret',
+    };
+    const { router, manager } = buildSut(makeAppConfig([cred]));
+    manager.seed([{ Id: 'my-repo', Name: 'My Repo', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const req = mockRequest('GET', '/api/repositories/my-repo/credential-options');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { credentials: GitCredentialEntry[]; autoSelected?: string };
+    assert.strictEqual(body.autoSelected, 'cred-1');
+});
+
+test('GET /api/repositories/:id/credential-options: omits autoSelected when zero credentials match the host', () => {
+    const cred: GitCredentialEntry = {
+        id: 'cred-gitlab',
+        label: 'GitLab',
+        host: 'gitlab.com',
+        token: 'secret',
+    };
+    const { router, manager } = buildSut(makeAppConfig([cred]));
+    // Repo is on github.com — no matching credential
+    manager.seed([{ Id: 'my-repo', Name: 'My Repo', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const req = mockRequest('GET', '/api/repositories/my-repo/credential-options');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { credentials: GitCredentialEntry[]; autoSelected?: string };
+    assert.strictEqual(body.credentials.length, 0);
+    assert.strictEqual(body.autoSelected, undefined);
+});
+
+test('GET /api/repositories/:id/credential-options: omits autoSelected when multiple credentials match the host', () => {
+    const cred1: GitCredentialEntry = { id: 'cred-a', label: 'Account A', host: 'github.com', token: 'secret-a' };
+    const cred2: GitCredentialEntry = { id: 'cred-b', label: 'Account B', host: 'github.com', token: 'secret-b' };
+    const { router, manager } = buildSut(makeAppConfig([cred1, cred2]));
+    manager.seed([{ Id: 'my-repo', Name: 'My Repo', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const req = mockRequest('GET', '/api/repositories/my-repo/credential-options');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { credentials: GitCredentialEntry[]; autoSelected?: string };
+    assert.strictEqual(body.credentials.length, 2);
+    assert.strictEqual(body.autoSelected, undefined, 'autoSelected must be absent when multiple credentials match');
+});
+
+test('GET /api/repositories/:id/credential-options: returns 404 when repository does not exist', () => {
+    const { router } = buildSut(makeAppConfig([]));
+
+    const req = mockRequest('GET', '/api/repositories/ghost/credential-options');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 404);
+    const parsed = JSON.parse(mock.body) as { error: string };
+    assert.ok(typeof parsed.error === 'string');
+});
+
+// ---------------------------------------------------------------------------
+// Audit logging — credential assign / clear operations
+// ---------------------------------------------------------------------------
+
+test('PUT /api/repositories/:id/credential: audit log entry produced with Source credential-audit and operation assign-credential', async () => {
+    const credential: GitCredentialEntry = {
+        id: 'cred-1',
+        label: 'GitHub Personal',
+        host: 'github.com',
+        token: 'ghp_secret',
+    };
+    const errorLogManager = makeMockErrorLogManager();
+    const { router, manager } = buildSut(makeAppConfig([credential]), errorLogManager);
+    manager.seed([{ Id: 'my-repo', Name: 'My Repo', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const req = mockRequest('PUT', '/api/repositories/my-repo/credential', { credentialId: 'cred-1' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.strictEqual(errorLogManager.appendedEntries.length, 1);
+    const entry = errorLogManager.appendedEntries[0];
+    assert.strictEqual(entry.Source, 'credential-audit');
+    assert.strictEqual(entry.Severity, 'audit');
+    assert.strictEqual(entry.Operation, 'assign-credential');
+});
+
+test('PUT /api/repositories/:id/credential: audit log entry produced with operation clear-credential when credentialId is null', async () => {
+    const credential: GitCredentialEntry = {
+        id: 'cred-1',
+        label: 'GitHub Personal',
+        host: 'github.com',
+        token: 'ghp_secret',
+    };
+    const errorLogManager = makeMockErrorLogManager();
+    const { router, manager } = buildSut(makeAppConfig([credential]), errorLogManager);
+    manager.seed([{ Id: 'my-repo', Name: 'My Repo', Url: 'https://github.com/org/my-repo.git', CredentialId: 'cred-1' }]);
+
+    const req = mockRequest('PUT', '/api/repositories/my-repo/credential', { credentialId: null });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.strictEqual(errorLogManager.appendedEntries.length, 1);
+    const entry = errorLogManager.appendedEntries[0];
+    assert.strictEqual(entry.Source, 'credential-audit');
+    assert.strictEqual(entry.Severity, 'audit');
+    assert.strictEqual(entry.Operation, 'clear-credential');
 });

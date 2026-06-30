@@ -138,6 +138,35 @@ test('list severity filter returns correct total', () => {
     assert.strictEqual(result.entries.length, 3);
 });
 
+test('list filters by severity "audit"', () => {
+    const mgr = makeManager(makeTempDir());
+    mgr.append(makePayload({ Severity: 'error', Message: 'err1' }));
+    mgr.append(makePayload({ Severity: 'audit', Message: 'audit1' }));
+    mgr.append(makePayload({ Severity: 'warning', Message: 'warn1' }));
+    mgr.append(makePayload({ Severity: 'audit', Message: 'audit2' }));
+    mgr.append(makePayload({ Severity: 'info', Message: 'info1' }));
+
+    const result = mgr.list({ severity: 'audit' });
+    assert.strictEqual(result.total, 2);
+    assert.ok(result.entries.every((e) => e.Severity === 'audit'));
+    assert.ok(result.entries.some((e) => e.Message === 'audit1'));
+    assert.ok(result.entries.some((e) => e.Message === 'audit2'));
+});
+
+test('list filters by severity "info"', () => {
+    const mgr = makeManager(makeTempDir());
+    mgr.append(makePayload({ Severity: 'error', Message: 'err1' }));
+    mgr.append(makePayload({ Severity: 'info', Message: 'info1' }));
+    mgr.append(makePayload({ Severity: 'audit', Message: 'audit1' }));
+    mgr.append(makePayload({ Severity: 'info', Message: 'info2' }));
+
+    const result = mgr.list({ severity: 'info' });
+    assert.strictEqual(result.total, 2);
+    assert.ok(result.entries.every((e) => e.Severity === 'info'));
+    assert.ok(result.entries.some((e) => e.Message === 'info1'));
+    assert.ok(result.entries.some((e) => e.Message === 'info2'));
+});
+
 // ─── list — combined filter ───────────────────────────────────────────────────
 
 test('list filters by combined severity and source', () => {

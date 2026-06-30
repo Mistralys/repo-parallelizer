@@ -66,6 +66,15 @@ export function createTempDirTracker(prefix: string): () => string {
  * arguments to `dir/captured-args.txt` and exits with code 128 (simulating a
  * failed clone).  The real git binary is never called.
  *
+ * **Important — successful-clone tests:** This helper is intentionally minimal.
+ * The fake `git` script exits with code 128 and does NOT create a `.git`
+ * directory in the destination.  Tests that require the clone to be treated as
+ * successful (i.e. those that need a `.git` directory so the orchestrator's
+ * post-clone success gate passes) must use an inline shell script instead of
+ * this helper — one that exits with code 0 and runs `mkdir -p "$2/.git"`.
+ * See the credential success log tests in `workspace-orchestrator.test.ts` and
+ * `repository-orchestrator.test.ts` for working examples.
+ *
  * @returns Path of the file where captured arguments are written.
  */
 export function setupFakeGit(dir: string): string {

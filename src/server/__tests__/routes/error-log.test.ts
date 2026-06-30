@@ -150,6 +150,54 @@ test('GET /api/error-log: ignores unknown severity values (treats as no filter)'
     assert.strictEqual(manager.lastListOptions?.severity, undefined);
 });
 
+test('GET /api/error-log?severity=audit: returns only audit-severity entries', () => {
+    const { router, manager } = buildSut();
+    const entries = [
+        makeEntry(1, { Severity: 'error' }),
+        makeEntry(2, { Severity: 'audit' }),
+        makeEntry(3, { Severity: 'warning' }),
+        makeEntry(4, { Severity: 'audit' }),
+        makeEntry(5, { Severity: 'info' }),
+    ];
+    manager.seed(entries);
+
+    const req = mockRequest('GET', '/api/error-log?severity=audit');
+    const mock = mockResponse();
+
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    // Confirm severity was forwarded to manager.list()
+    assert.strictEqual(manager.lastListOptions?.severity, 'audit');
+    const body = JSON.parse(mock.body) as ErrorLogListResult;
+    assert.strictEqual(body.total, 2);
+    assert.ok(body.entries.every((e) => e.Severity === 'audit'), 'all returned entries should have Severity "audit"');
+});
+
+test('GET /api/error-log?severity=info: returns only info-severity entries', () => {
+    const { router, manager } = buildSut();
+    const entries = [
+        makeEntry(1, { Severity: 'error' }),
+        makeEntry(2, { Severity: 'audit' }),
+        makeEntry(3, { Severity: 'info' }),
+        makeEntry(4, { Severity: 'warning' }),
+        makeEntry(5, { Severity: 'info' }),
+    ];
+    manager.seed(entries);
+
+    const req = mockRequest('GET', '/api/error-log?severity=info');
+    const mock = mockResponse();
+
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    // Confirm severity was forwarded to manager.list()
+    assert.strictEqual(manager.lastListOptions?.severity, 'info');
+    const body = JSON.parse(mock.body) as ErrorLogListResult;
+    assert.strictEqual(body.total, 2);
+    assert.ok(body.entries.every((e) => e.Severity === 'info'), 'all returned entries should have Severity "info"');
+});
+
 // ---------------------------------------------------------------------------
 // GET /api/error-log/:id — get single entry
 // ---------------------------------------------------------------------------

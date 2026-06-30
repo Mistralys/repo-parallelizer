@@ -4,6 +4,33 @@ import * as fs from 'node:fs';
 import * as os from 'os';
 import * as path from 'node:path';
 import { checkWorkspaceHealth } from '../orchestration/workspace-health.js';
+import type { ErrorLogManager } from '../error-log/error-log.manager.js';
+import type { ErrorLogEntry, ErrorLogListOptions, ErrorLogListResult } from '../error-log/error-log.types.js';
+
+// ---------------------------------------------------------------------------
+// Minimal ErrorLogManager stub for credential-missing health issue tests.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a minimal ErrorLogManager stub backed by an in-memory entry array.
+ * Only `list()` is implemented (append, getById, clear, sources are no-ops).
+ */
+function makeMockErrorLogManager(entries: ErrorLogEntry[]): ErrorLogManager {
+    return {
+        append: () => entries[0]!,
+        list: (options?: ErrorLogListOptions): ErrorLogListResult => {
+            let filtered = [...entries].reverse(); // newest-first
+            if (options?.source !== undefined) {
+                filtered = filtered.filter((e) => e.Source === options.source);
+            }
+            const total = filtered.length;
+            return { entries: filtered, total };
+        },
+        getById: (id: number) => entries.find((e) => e.Id === id),
+        clear: () => {},
+        sources: () => [],
+    } as unknown as ErrorLogManager;
+}
 
 // ---------------------------------------------------------------------------
 // Global temp directory — one root, cleaned up on process exit.
@@ -207,4 +234,231 @@ test('.git file (not directory) does not satisfy the cloned check', () => {
     // existsSync returns true for files too, so the workspace should be healthy.
     assert.strictEqual(report.healthy, true);
     assert.deepStrictEqual(report.issues, []);
+});
+
+// ---------------------------------------------------------------------------
+// credential-missing health issues (WP-002)
+// ---------------------------------------------------------------------------
+
+test('includes credential-missing issue when error log has credentials entry scoped to the workspace', () => {
+    const base = makeTempDir();
+    const pid = 'proj';
+    const wid = 'DEV';
+
+    createWsFile(base, pid, wid);
+    createRepoDotGit(base, pid, wid, 'repo-a');
+
+    const credEntry: ErrorLogEntry = {
+        Id: 1,
+        Timestamp: new Date().toISOString(),
+        Severity: 'error',
+        Source: 'credentials',
+        Operation: 'workspace-setup',
+        Context: { ProjectId: pid, WorkspaceId: wid, RepositoryId: 'repo-a' },
+        Message: "Repository 'repo-a' requires a credential for host 'github.com'.",
+    };
+    const errorLogManager = makeMockErrorLogManager([credEntry]);
+
+    const report = checkWorkspaceHealth(pid, wid, base, ['repo-a'], errorLogManager);
+
+    assert.strictEqual(report.healthy, false);
+
+    const issue = report.issues.find((i) => i.type === 'credential-missing');
+    assert.ok(issue, 'credential-missing issue should be present');
+    assert.strictEqual(issue.severity, 'warning');
+    assert.strictEqual(issue.fixAction, 'configure-credential');
+    assert.strictEqual(issue.repositoryId, 'repo-a');
+    assert.strictEqual(typeof issue.message, 'string');
+    assert.ok(issue.message.length > 0);
+});
+
+test('omits credential-missing issue when no credentials entries exist for the workspace', () => {
+    const base = makeTempDir();
+    const pid = 'proj';
+    const wid = 'DEV';
+
+    createWsFile(base, pid, wid);
+    createRepoDotGit(base, pid, wid, 'repo-a');
+
+    const errorLogManager = makeMockErrorLogManager([]);
+
+    const report = checkWorkspaceHealth(pid, wid, base, ['repo-a'], errorLogManager);
+
+    assert.strictEqual(report.healthy, true);
+    assert.ok(!report.issues.some((i) => i.type === 'credential-missing'));
+});
+
+test('omits credential-missing issues for entries scoped to a different workspace', () => {
+    const base = makeTempDir();
+    const pid = 'proj';
+    const wid = 'DEV';
+
+    createWsFile(base, pid, wid);
+    createRepoDotGit(base, pid, wid, 'repo-a');
+
+    // Entry is for a different workspace.
+    const credEntry: ErrorLogEntry = {
+        Id: 1,
+        Timestamp: new Date().toISOString(),
+        Severity: 'error',
+        Source: 'credentials',
+        Operation: 'workspace-setup',
+        Context: { ProjectId: pid, WorkspaceId: 'STABLE', RepositoryId: 'repo-a' },
+        Message: "Repository 'repo-a' requires a credential.",
+    };
+    const errorLogManager = makeMockErrorLogManager([credEntry]);
+
+    const report = checkWorkspaceHealth(pid, wid, base, ['repo-a'], errorLogManager);
+
+    assert.strictEqual(report.healthy, true);
+    assert.ok(!report.issues.some((i) => i.type === 'credential-missing'));
+});
+
+test('credential-missing issue includes repositoryId', () => {
+    const base = makeTempDir();
+    const pid = 'proj';
+    const wid = 'DEV';
+
+    createWsFile(base, pid, wid);
+    createRepoDotGit(base, pid, wid, 'specific-repo');
+
+    const credEntry: ErrorLogEntry = {
+        Id: 5,
+        Timestamp: new Date().toISOString(),
+        Severity: 'error',
+        Source: 'credentials',
+        Operation: 'workspace-setup',
+        Context: { ProjectId: pid, WorkspaceId: wid, RepositoryId: 'specific-repo' },
+        Message: "Repository 'specific-repo' requires a credential.",
+    };
+    const errorLogManager = makeMockErrorLogManager([credEntry]);
+
+    const report = checkWorkspaceHealth(pid, wid, base, ['specific-repo'], errorLogManager);
+
+    const issue = report.issues.find((i) => i.type === 'credential-missing');
+    assert.ok(issue, 'credential-missing issue should be present');
+    assert.strictEqual(issue.repositoryId, 'specific-repo');
+});
+
+test('omits credential-missing issues when errorLogManager is not provided', () => {
+    const base = makeTempDir();
+    const pid = 'proj';
+    const wid = 'DEV';
+
+    createWsFile(base, pid, wid);
+    createRepoDotGit(base, pid, wid, 'repo-a');
+
+    // No errorLogManager passed — credential check is skipped.
+    const report = checkWorkspaceHealth(pid, wid, base, ['repo-a']);
+
+    assert.strictEqual(report.healthy, true);
+    assert.ok(!report.issues.some((i) => i.type === 'credential-missing'));
+});
+
+// ---------------------------------------------------------------------------
+// Stale credential-missing badge suppression (WP-007)
+// ---------------------------------------------------------------------------
+
+test('suppresses credential-missing issue when most recent credentials entry is Severity: info', () => {
+    const base = makeTempDir();
+    const pid = 'proj';
+    const wid = 'DEV';
+
+    createWsFile(base, pid, wid);
+    createRepoDotGit(base, pid, wid, 'repo-a');
+
+    // Older error entry first (lower Id), newer info entry second (higher Id).
+    // list() returns entries newest-first, so the info entry is seen first.
+    const errorEntry: ErrorLogEntry = {
+        Id: 1,
+        Timestamp: new Date(Date.now() - 10000).toISOString(),
+        Severity: 'error',
+        Source: 'credentials',
+        Operation: 'workspace-setup',
+        Context: { ProjectId: pid, WorkspaceId: wid, RepositoryId: 'repo-a' },
+        Message: "Repository 'repo-a' requires a credential for host 'github.com'.",
+    };
+    const infoEntry: ErrorLogEntry = {
+        Id: 2,
+        Timestamp: new Date().toISOString(),
+        Severity: 'info',
+        Source: 'credentials',
+        Operation: 'workspace-setup',
+        Context: { ProjectId: pid, WorkspaceId: wid, RepositoryId: 'repo-a' },
+        Message: "Repository 'repo-a' cloned successfully using credential 'My Token'.",
+    };
+    // errorLogManager.list() reverses the array (newest-first), so infoEntry (Id 2) is first.
+    const errorLogManager = makeMockErrorLogManager([errorEntry, infoEntry]);
+
+    const report = checkWorkspaceHealth(pid, wid, base, ['repo-a'], errorLogManager);
+
+    assert.strictEqual(report.healthy, true, 'should be healthy when most recent entry is info');
+    assert.ok(
+        !report.issues.some((i) => i.type === 'credential-missing'),
+        'credential-missing issue must be suppressed when most recent entry is Severity: info',
+    );
+});
+
+test('re-surfaces credential-missing issue when most recent credentials entry is Severity: error (after an older info entry)', () => {
+    const base = makeTempDir();
+    const pid = 'proj';
+    const wid = 'DEV';
+
+    createWsFile(base, pid, wid);
+    createRepoDotGit(base, pid, wid, 'repo-a');
+
+    // Older info entry (Id 1) — credential was working.
+    // Newer error entry (Id 2) — credential was removed / stopped working.
+    const infoEntry: ErrorLogEntry = {
+        Id: 1,
+        Timestamp: new Date(Date.now() - 10000).toISOString(),
+        Severity: 'info',
+        Source: 'credentials',
+        Operation: 'workspace-setup',
+        Context: { ProjectId: pid, WorkspaceId: wid, RepositoryId: 'repo-a' },
+        Message: "Repository 'repo-a' cloned successfully using credential 'My Token'.",
+    };
+    const errorEntry: ErrorLogEntry = {
+        Id: 2,
+        Timestamp: new Date().toISOString(),
+        Severity: 'error',
+        Source: 'credentials',
+        Operation: 'workspace-setup',
+        Context: { ProjectId: pid, WorkspaceId: wid, RepositoryId: 'repo-a' },
+        Message: "Repository 'repo-a' requires a credential for host 'github.com'.",
+    };
+    // list() returns newest-first: errorEntry (Id 2) is first.
+    const errorLogManager = makeMockErrorLogManager([infoEntry, errorEntry]);
+
+    const report = checkWorkspaceHealth(pid, wid, base, ['repo-a'], errorLogManager);
+
+    assert.strictEqual(report.healthy, false, 'should be unhealthy when most recent entry is error');
+    const issue = report.issues.find((i) => i.type === 'credential-missing');
+    assert.ok(issue !== undefined, 'credential-missing issue must be re-surfaced when most recent entry is Severity: error');
+    assert.strictEqual(issue.repositoryId, 'repo-a');
+});
+
+test('suppresses credential-missing when info entry is the only credentials entry', () => {
+    const base = makeTempDir();
+    const pid = 'proj';
+    const wid = 'DEV';
+
+    createWsFile(base, pid, wid);
+    createRepoDotGit(base, pid, wid, 'repo-a');
+
+    const infoEntry: ErrorLogEntry = {
+        Id: 1,
+        Timestamp: new Date().toISOString(),
+        Severity: 'info',
+        Source: 'credentials',
+        Operation: 'workspace-setup',
+        Context: { ProjectId: pid, WorkspaceId: wid, RepositoryId: 'repo-a' },
+        Message: "Repository 'repo-a' cloned successfully using credential 'My Token'.",
+    };
+    const errorLogManager = makeMockErrorLogManager([infoEntry]);
+
+    const report = checkWorkspaceHealth(pid, wid, base, ['repo-a'], errorLogManager);
+
+    assert.strictEqual(report.healthy, true);
+    assert.ok(!report.issues.some((i) => i.type === 'credential-missing'));
 });
