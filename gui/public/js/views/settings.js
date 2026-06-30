@@ -2,7 +2,7 @@
  * Settings View — Repo Parallelizer GUI.
  *
  * Renders four settings sections:
- *   1. **Git Credentials** — table of per-host PATs with add/delete controls.
+ *   1. **Git Credentials** — table of labeled per-host PATs (Label, Host, Token, Actions) with add/inline-edit/delete controls.
  *   2. **Repositories Refresh Delay** — number input for `gitPollingIntervalSeconds`
  *      with client-side validation (min 10) and save/feedback.
  *   3. **Webserver URL** — text input for the base URL of the local webserver
@@ -37,7 +37,7 @@ function buildTableHead() {
     const thead = document.createElement('thead');
     const tr = document.createElement('tr');
 
-    ['Host', 'Token', 'Actions'].forEach((label) => {
+    ['Label', 'Host', 'Token', 'Actions'].forEach((label) => {
         const th = document.createElement('th');
         th.textContent = label;
         tr.appendChild(th);
@@ -50,47 +50,206 @@ function buildTableHead() {
 /**
  * Build a single `<tr>` for one credential entry.
  *
- * @param {string}            host       - The hostname key.
- * @param {string}            maskedToken - The masked token string (e.g. `****abc1`).
- * @param {function(): void}  onDeleted  - Callback to refresh the table after deletion.
+ * The row starts in read mode. Clicking "Edit" switches the Label cell to an
+ * `<input>` and reveals a Token `<input type="password">`. Host is always
+ * read-only. Clicking "Save" calls PUT /api/config/credentials with the
+ * credential id and updated fields.
+ *
+ * @param {{ id: string, label: string, host: string, maskedToken: string }} cred
+ * @param {function(): void} onDeleted  - Callback invoked after a successful
+ *   credential deletion. Triggers a full re-render of the credentials table by
+ *   calling `renderCredentialsTable()` internally. Not called on error or when
+ *   the user cancels the confirmation dialog.
  * @returns {HTMLTableRowElement}
  */
-function buildCredentialRow(host, maskedToken, onDeleted) {
+function buildCredentialRow(cred, onDeleted) {
     const tr = document.createElement('tr');
-    tr.dataset.credHost = host;
+    tr.dataset.credId = cred.id;
 
-    // ---- Host cell (read-only) ----
+    // ---- Label cell (editable) ----
+    const labelCell = document.createElement('td');
+    labelCell.className = 'cred-label-cell';
+
+    const labelDisplay = document.createElement('span');
+    labelDisplay.className = 'cred-label-display';
+    labelDisplay.textContent = cred.label;
+    labelCell.appendChild(labelDisplay);
+
+    const labelInput = document.createElement('input');
+    labelInput.type = 'text';
+    labelInput.className = 'form-input cred-label-input';
+    labelInput.value = cred.label;
+    labelInput.hidden = true;
+    labelInput.setAttribute('aria-label', `Label for credential ${cred.id}`);
+    labelCell.appendChild(labelInput);
+
+    tr.appendChild(labelCell);
+
+    // ---- Host cell (always read-only) ----
     const hostCell = document.createElement('td');
     hostCell.className = 'cred-host-cell';
-    hostCell.textContent = host;
+    hostCell.textContent = cred.host;
     tr.appendChild(hostCell);
 
-    // ---- Masked token cell (read-only) ----
+    // ---- Token cell ----
     const tokenCell = document.createElement('td');
     tokenCell.className = 'cred-token-cell text-muted';
-    tokenCell.textContent = maskedToken;
+
+    const maskedTokenDisplay = document.createElement('span');
+    maskedTokenDisplay.className = 'cred-token-display';
+    maskedTokenDisplay.textContent = cred.maskedToken;
+    tokenCell.appendChild(maskedTokenDisplay);
+
+    const tokenInput = document.createElement('input');
+    tokenInput.type = 'password';
+    tokenInput.className = 'form-input cred-token-input';
+    tokenInput.placeholder = 'New token (leave blank to keep current)';
+    tokenInput.hidden = true;
+    tokenInput.setAttribute('aria-label', `Token for credential ${cred.id}`);
+    tokenCell.appendChild(tokenInput);
+
     tr.appendChild(tokenCell);
 
     // ---- Actions cell ----
     const actionsCell = document.createElement('td');
     actionsCell.className = 'cred-actions-cell';
 
+    // Read-mode buttons
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'btn btn-secondary btn-sm';
+    editBtn.textContent = 'Edit';
+
     const deleteBtn = document.createElement('button');
     deleteBtn.type = 'button';
     deleteBtn.className = 'btn btn-danger btn-sm';
     deleteBtn.textContent = 'Delete';
 
+    // Edit-mode buttons (hidden initially)
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'btn btn-primary btn-sm';
+    saveBtn.textContent = 'Save';
+    saveBtn.hidden = true;
+
+    const cancelEditBtn = document.createElement('button');
+    cancelEditBtn.type = 'button';
+    cancelEditBtn.className = 'btn btn-secondary btn-sm';
+    cancelEditBtn.textContent = 'Cancel';
+    cancelEditBtn.hidden = true;
+
+    actionsCell.appendChild(editBtn);
     actionsCell.appendChild(deleteBtn);
+    actionsCell.appendChild(saveBtn);
+    actionsCell.appendChild(cancelEditBtn);
     tr.appendChild(actionsCell);
 
-    // ---- Behaviour ----
+    // ---- Inline edit behaviour ----
+
+    // Enter edit mode
+    editBtn.addEventListener('click', () => {
+        labelDisplay.hidden = true;
+        labelInput.hidden = false;
+        labelInput.value = cred.label;
+        labelInput.focus();
+        labelInput.select();
+
+        maskedTokenDisplay.hidden = true;
+        tokenInput.hidden = false;
+        tokenInput.value = '';
+
+        editBtn.hidden = true;
+        deleteBtn.hidden = true;
+        saveBtn.hidden = false;
+        cancelEditBtn.hidden = false;
+    });
+
+    // Cancel edit mode
+    cancelEditBtn.addEventListener('click', () => {
+        labelInput.hidden = true;
+        labelDisplay.hidden = false;
+
+        tokenInput.hidden = true;
+        maskedTokenDisplay.hidden = false;
+
+        editBtn.hidden = false;
+        deleteBtn.hidden = false;
+        saveBtn.hidden = true;
+        cancelEditBtn.hidden = true;
+    });
+
+    // Save inline edit
+    saveBtn.addEventListener('click', async () => {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving…';
+
+        const updatedLabel = labelInput.value.trim();
+        const updatedToken = tokenInput.value.trim();
+
+        const updateData = { label: updatedLabel };
+        if (updatedToken) {
+            updateData.token = updatedToken;
+        }
+
+        try {
+            await api.config.credentials.update(cred.id, updateData);
+            cred.label = updatedLabel;
+            labelDisplay.textContent = updatedLabel;
+            showToast(`Credential "${updatedLabel}" updated.`, 'success');
+
+            // Return to read mode
+            labelInput.hidden = true;
+            labelDisplay.hidden = false;
+            tokenInput.hidden = true;
+            maskedTokenDisplay.hidden = false;
+            editBtn.hidden = false;
+            deleteBtn.hidden = false;
+            saveBtn.hidden = true;
+            cancelEditBtn.hidden = true;
+        } catch (err) {
+            showToast(err.message || 'Failed to update credential.', 'error');
+        } finally {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+        }
+    });
+
+    // Allow Enter/Escape in label input
+    labelInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            saveBtn.click();
+        } else if (e.key === 'Escape') {
+            cancelEditBtn.click();
+        }
+    });
+
+    // ---- Delete behaviour ----
 
     deleteBtn.addEventListener('click', async () => {
+        // Fetch repositories to check for references to this credential.
+        let repos = [];
         try {
-            await showConfirm(
-                'Delete Credential',
-                `Remove the credential for "${host}"? This action cannot be undone.`,
-            );
+            repos = await api.repositories.list();
+        } catch {
+            // Non-fatal — proceed without count; show generic warning.
+        }
+
+        const referencingRepos = Array.isArray(repos)
+            ? repos.filter((r) => (r.credentialId || r.CredentialId) === cred.id)
+            : [];
+
+        let confirmMessage;
+        if (referencingRepos.length > 0) {
+            const n = referencingRepos.length;
+            const noun = n === 1 ? 'repository' : 'repositories';
+            confirmMessage = `Remove credential '${cred.label}'? ${n} ${noun} currently use this credential and will lose their credential association.`;
+        } else {
+            confirmMessage = `Remove credential '${cred.label}' for host '${cred.host}'? This action cannot be undone.`;
+        }
+
+        try {
+            await showConfirm('Remove Credential', confirmMessage);
         } catch {
             // User cancelled — do nothing.
             return;
@@ -100,8 +259,8 @@ function buildCredentialRow(host, maskedToken, onDeleted) {
         deleteBtn.textContent = 'Deleting…';
 
         try {
-            await api.config.credentials.delete(host);
-            showToast(`Credential for "${host}" deleted.`, 'success');
+            await api.config.credentials.remove(cred.id);
+            showToast(`Credential "${cred.label}" deleted.`, 'success');
             onDeleted();
         } catch (err) {
             showToast(err.message || 'Failed to delete credential.', 'error');
@@ -152,9 +311,9 @@ async function renderCredentialsTable(tableContainer) {
         return;
     }
 
-    const entries = Object.entries(credentials || {});
+    const credList = Array.isArray(credentials) ? credentials : [];
 
-    if (entries.length === 0) {
+    if (credList.length === 0) {
         tableContainer.innerHTML = `
             <p class="empty-state">No credentials configured. Use the form below to add one.</p>
         `;
@@ -170,8 +329,8 @@ async function renderCredentialsTable(tableContainer) {
 
     const tbody = document.createElement('tbody');
 
-    for (const [host, maskedToken] of entries) {
-        tbody.appendChild(buildCredentialRow(host, maskedToken, () => {
+    for (const cred of credList) {
+        tbody.appendChild(buildCredentialRow(cred, () => {
             renderCredentialsTable(tableContainer);
         }));
     }
@@ -182,11 +341,11 @@ async function renderCredentialsTable(tableContainer) {
 }
 
 // ---------------------------------------------------------------------------
-// Add / Update credential form
+// Add credential form
 // ---------------------------------------------------------------------------
 
 /**
- * Build the "Add / Update Credential" section with a toggle button and inline form.
+ * Build the "Add Credential" section with a toggle button and inline form.
  *
  * @param {HTMLElement} tableContainer - Used to trigger a refresh after a successful save.
  * @returns {HTMLElement} The wrapper element containing the toggle button and form.
@@ -207,6 +366,11 @@ function buildAddCredentialForm(tableContainer) {
     const form = document.createElement('form');
     form.noValidate = true;
 
+    form.appendChild(createFormField('Label', 'text', 'label', {
+        placeholder: 'e.g. My GitHub Token',
+        required: true,
+    }));
+
     form.appendChild(createFormField('Host', 'text', 'host', {
         placeholder: 'e.g. github.com',
         required: true,
@@ -223,7 +387,7 @@ function buildAddCredentialForm(tableContainer) {
     const submitBtn = document.createElement('button');
     submitBtn.type = 'submit';
     submitBtn.className = 'btn btn-primary';
-    submitBtn.textContent = 'Save';
+    submitBtn.textContent = 'Add Credential';
 
     const cancelBtn = document.createElement('button');
     cancelBtn.type = 'button';
@@ -243,8 +407,8 @@ function buildAddCredentialForm(tableContainer) {
     toggleBtn.addEventListener('click', () => {
         formWrapper.hidden = !formWrapper.hidden;
         if (!formWrapper.hidden) {
-            const hostInput = form.querySelector('[name="host"]');
-            if (hostInput) hostInput.focus();
+            const labelInput = form.querySelector('[name="label"]');
+            if (labelInput) labelInput.focus();
         }
     });
 
@@ -256,8 +420,9 @@ function buildAddCredentialForm(tableContainer) {
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
 
-        if (!validateRequired(form, ['host', 'token'])) return;
+        if (!validateRequired(form, ['label', 'host', 'token'])) return;
 
+        const label = form.querySelector('[name="label"]').value.trim();
         const host  = form.querySelector('[name="host"]').value.trim();
         const token = form.querySelector('[name="token"]').value.trim();
 
@@ -265,16 +430,16 @@ function buildAddCredentialForm(tableContainer) {
         submitBtn.textContent = 'Saving…';
 
         try {
-            await api.config.credentials.set({ host, token });
-            showToast(`Credential for "${host}" saved.`, 'success');
+            await api.config.credentials.add({ label, host, token });
+            showToast(`Credential "${label}" added.`, 'success');
             form.reset();
             formWrapper.hidden = true;
             renderCredentialsTable(tableContainer);
         } catch (err) {
-            showToast(err.message || 'Failed to save credential.', 'error');
+            showToast(err.message || 'Failed to add credential.', 'error');
         } finally {
             submitBtn.disabled = false;
-            submitBtn.textContent = 'Save';
+            submitBtn.textContent = 'Add Credential';
         }
     });
 
@@ -288,8 +453,9 @@ function buildAddCredentialForm(tableContainer) {
 /**
  * Build the "Git Credentials" settings section.
  *
- * Renders the section heading, description, credentials table, and the
- * "Add / Update Credential" form, then kicks off the initial table load.
+ * Renders the section heading, description, credentials table (columns:
+ * Label, Host, Token, Actions), the "Add / Update Credential" form, and
+ * per-row inline edit / delete controls. Kicks off the initial table load.
  *
  * Unlike other `build*Section()` factories, this one does **not** expose a
  * `save()` function. Credentials are saved immediately when the inline form is
@@ -301,7 +467,10 @@ function buildAddCredentialForm(tableContainer) {
  * inside this factory to initiate the initial async table load. Callers do
  * not need to trigger the first render separately.
  *
- * @returns {{ element: HTMLElement }}
+ * @returns {{ element: HTMLElement }} The section element, ready to be mounted
+ *   in the DOM. **Side-effect:** `renderCredentialsTable()` is called
+ *   synchronously as part of this factory to initiate the initial async table
+ *   load — callers do not need to trigger the first render separately.
  */
 function buildCredentialsSection() {
     const credSection = document.createElement('section');

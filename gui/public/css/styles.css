@@ -35,6 +35,11 @@
     /* Status badge colors */
     --badge-clean: #16a34a;
     --badge-clean-bg: #dcfce7;
+    /* Semantic alias for the "credential assigned" badge. Aliases --badge-clean so that
+       .credential-badge--set can be restyled independently of the generic clean/success
+       badge without changing either token's value at the point of use. */
+    --badge-credential-set: var(--badge-clean);
+    --badge-credential-set-bg: var(--badge-clean-bg);
     --badge-modified: #d97706;
     --badge-modified-bg: #fef3c7;
     --badge-ahead: #2563eb;
@@ -45,6 +50,10 @@
     --badge-conflict-bg: #fee2e2;
     --badge-error: #dc2626;
     --badge-error-bg: #fee2e2;
+    /* Credential-missing badge — amber/orange, distinct from the red error badge.
+       Paired with .status-badge-credential in the workspace detail status table. */
+    --badge-credential: #c2410c;
+    --badge-credential-bg: #ffedd5;
 
     /* Layout */
     --nav-height: 56px;
@@ -118,6 +127,9 @@
     --badge-conflict-bg: #450a0a;
     --badge-error: #f87171;
     --badge-error-bg: #450a0a;
+    /* Credential-missing badge dark variants — see light theme comment above. */
+    --badge-credential: #fb923c;
+    --badge-credential-bg: #431407;
 
     /* Button text */
     --color-btn-text: #fff;
@@ -599,6 +611,52 @@ td.mono {
     background: var(--badge-error-bg);
 }
 
+/* Credential-missing badge — amber/orange, distinct from .status-badge-error (red).
+   Variables: --badge-credential / --badge-credential-bg (both light and dark themes).
+   Used in the workspace detail status table when a repository clone fails because
+   no credential is associated with it. Links to the repository detail page. */
+.status-badge-credential {
+    color: var(--badge-credential);
+    background: var(--badge-credential-bg);
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.status-badge-credential:hover {
+    opacity: 0.85;
+    text-decoration: underline;
+}
+
+/* Credential badge — used in the Repositories and Project Detail tables to
+   indicate whether a repository has a credential assigned.
+   Base class shared by both states; modifier classes supply the visual state.
+   Built by buildCredentialBadge() in gui/public/js/utils/dom.js.
+   NOTE: Distinct from .status-badge-credential above. .status-badge-credential
+   is the amber clickable badge shown in the workspace detail status table when a
+   clone fails due to a missing credential. .credential-badge is the static
+   green/neutral inline badge in repository list tables showing assignment status. */
+.credential-badge {
+    display: inline-block;
+    font-size: var(--font-size-xs);
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 9999px;
+    white-space: nowrap;
+    cursor: default;
+}
+
+/* A credential is assigned — green checkmark style. */
+.credential-badge--set {
+    color: var(--badge-credential-set);
+    background: var(--badge-credential-set-bg);
+}
+
+/* No credential assigned — muted neutral style. */
+.credential-badge--none {
+    color: var(--color-text-muted);
+    background: var(--color-border-light);
+}
+
 .status-badge-dot {
     display: inline-block;
     width: 8px;
@@ -648,6 +706,16 @@ td.mono {
 .severity-warning {
     color: var(--color-warning);
     background: var(--color-warning-light);
+}
+
+.severity-audit {
+    color: var(--badge-ahead);
+    background: var(--badge-ahead-bg);
+}
+
+.severity-info {
+    color: var(--color-text-muted);
+    background: var(--color-border-light);
 }
 
 /* --------------------------------------------------------------------------

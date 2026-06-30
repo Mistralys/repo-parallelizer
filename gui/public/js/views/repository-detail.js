@@ -62,6 +62,123 @@ export function setRouter(router) {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// Credential section builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the "Credential" section for the repository detail view.
+ *
+ * Fetches `GET /api/repositories/:id/credential-options`, renders a `<select>`
+ * dropdown with a "None" option plus each matching credential shown as
+ * `label (host)`. When exactly one credential auto-matches the repository URL
+ * it is pre-selected with an "(auto)" suffix. When a stored `CredentialId`
+ * exists it is pre-selected from the list. Changing the selection calls
+ * `PUT /api/repositories/:id/credential`.
+ *
+ * @param {string}      repoId       - Repository ID.
+ * @param {string|undefined} storedCredentialId - Currently stored credential ID (from normaliseRepo).
+ * @returns {HTMLElement} The section element (async content rendered after the promise resolves).
+ */
+function buildCredentialSection(repoId, storedCredentialId) {
+    const section = document.createElement('section');
+    section.className = 'repository-credential-section';
+
+    const heading = document.createElement('h2');
+    heading.className   = 'section-title';
+    heading.textContent = 'Credential';
+    section.appendChild(heading);
+
+    // Show a brief loading indicator while options are fetched.
+    const loadingEl = document.createElement('span');
+    loadingEl.className   = 'text-muted';
+    loadingEl.textContent = 'Loading credentials…';
+    section.appendChild(loadingEl);
+
+    // Asynchronously populate the section once options are available.
+    api.repositories.credentialOptions(repoId)
+        .then((options) => {
+            section.removeChild(loadingEl);
+
+            const controlRow = document.createElement('div');
+            controlRow.className = 'credential-control-row';
+
+            const select = document.createElement('select');
+            select.className = 'form-select credential-select';
+            select.setAttribute('aria-label', 'Credential for this repository');
+
+            // "None" option — always first.
+            const noneOpt = document.createElement('option');
+            noneOpt.value       = '';
+            noneOpt.textContent = 'None';
+            select.appendChild(noneOpt);
+
+            // Determine auto-select: exactly one matching option returned with auto=true.
+            // Auto-select only fires when exactly one option is returned with auto=true.
+            // Multiple options with auto=true intentionally leave the selection on None
+            // so the user must choose explicitly — the backend signals ambiguity by
+            // returning more than one match.
+            const autoOption = Array.isArray(options) && options.length === 1 && options[0].auto
+                ? options[0]
+                : null;
+
+            // Add credential options.
+            if (Array.isArray(options)) {
+                options.forEach((opt) => {
+                    const el = document.createElement('option');
+                    el.value = opt.credentialId || '';
+                    const baseLabel = opt.label ? `${opt.label} (${opt.host})` : opt.host || opt.credentialId;
+                    el.textContent = opt.auto ? `${baseLabel} (auto)` : baseLabel;
+                    select.appendChild(el);
+                });
+            }
+
+            // Set pre-selected value:
+            // 1. Stored credentialId takes priority.
+            // 2. Single auto-match is selected when no stored value exists.
+            if (storedCredentialId) {
+                select.value = storedCredentialId;
+            } else if (autoOption) {
+                select.value = autoOption.credentialId || '';
+            }
+
+            controlRow.appendChild(select);
+
+            const statusEl = document.createElement('span');
+            statusEl.className = 'credential-save-status text-muted';
+            controlRow.appendChild(statusEl);
+
+            section.appendChild(controlRow);
+
+            // Persist selection on change.
+            select.addEventListener('change', async () => {
+                const selectedCredentialId = select.value;
+                statusEl.textContent = 'Saving…';
+                statusEl.className   = 'credential-save-status text-muted';
+                try {
+                    await api.repositories.updateCredential(repoId, selectedCredentialId);
+                    statusEl.textContent = 'Saved.';
+                    statusEl.className   = 'credential-save-status text-success';
+                    // Clear "Saved." after 2 seconds.
+                    setTimeout(() => { statusEl.textContent = ''; }, 2000);
+                } catch (err) {
+                    statusEl.textContent = `Error: ${err.message || 'Failed to save.'}`;
+                    statusEl.className   = 'credential-save-status text-error';
+                    showToast(err.message || 'Failed to update credential.', 'error');
+                }
+            });
+        })
+        .catch(() => {
+            section.removeChild(loadingEl);
+            const errEl = document.createElement('span');
+            errEl.className   = 'text-error';
+            errEl.textContent = 'Failed to load credential options.';
+            section.appendChild(errEl);
+        });
+
+    return section;
+}
+
+// ---------------------------------------------------------------------------
 // Loading helper
 // ---------------------------------------------------------------------------
 
@@ -682,7 +799,10 @@ export function renderRepositoryDetail(container, params) {
             ? `Last refreshed: ${formatRelativeTime(new Date(repo.LastRefreshedAt))}`
             : 'Last refreshed: Never';
 
+        const credentialSection = buildCredentialSection(repoId, repo.credentialId);
+
         container.appendChild(header);
+        container.appendChild(credentialSection);
         container.appendChild(statusSection);
 
         // Show a warning toast if some fetches failed (partial data).

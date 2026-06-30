@@ -16,7 +16,7 @@ import { showToast } from '../components/toast.js';
 import { showConfirm } from '../components/confirm-dialog.js';
 import { createFormField, validateRequired } from '../components/form-helpers.js';
 import { normaliseRepo } from '../utils/normalise.js';
-import { clearElement } from '../utils/dom.js';
+import { clearElement, buildCredentialBadge } from '../utils/dom.js';
 import { APP_NAME_SHORT } from '../utils/constants.js';
 
 // ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ function buildTableHead() {
     const thead = document.createElement('thead');
     const tr    = document.createElement('tr');
 
-    ['ID', 'Name', 'URL', 'Actions'].forEach((label) => {
+    ['ID', 'Name', 'URL', 'Credential', 'Actions'].forEach((label) => {
         const th = document.createElement('th');
         th.textContent = label;
         tr.appendChild(th);
@@ -96,6 +96,12 @@ function buildRepoRow(repo, onDeleted) {
     urlLink.className = 'repo-url-link';
     urlCell.appendChild(urlLink);
     tr.appendChild(urlCell);
+
+    // ---- Credential status cell ----
+    const credentialCell = document.createElement('td');
+    credentialCell.className = 'repo-credential-cell';
+    credentialCell.appendChild(buildCredentialBadge(repo.credentialId));
+    tr.appendChild(credentialCell);
 
     // ---- Actions cell ----
     const actionsCell = document.createElement('td');

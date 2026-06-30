@@ -20,6 +20,46 @@
  *     "Rename Workspace" (disabled for STABLE), "Delete Workspace" (disabled
  *     for STABLE).
  *
+ * ## Credential-error display
+ *
+ * When a repository's clone fails because no credential is configured for its
+ * host, the setup orchestrators emit an error message containing the sentinel
+ * text defined by `CREDENTIAL_MISSING_SENTINEL` ("requires a credential for
+ * host"). The view detects this via `applySetupResultCredentialErrors()` and
+ * replaces the generic "No data" badge in the status table with an amber
+ * "Missing Credential" badge (`.status-badge-credential`) that links directly
+ * to `#/repositories/:id` so the user can assign a credential without leaving
+ * the workflow.
+ *
+ * Key helpers in this subsystem:
+ *   - `CREDENTIAL_MISSING_SENTINEL` — the exact string matched against error
+ *     messages. Defined in `gui/public/js/utils/constants.js`; imported here.
+ *     Must stay in sync with the orchestrator error templates.
+ *   - `buildMissingCredentialBadge(repoId)` — renders the amber `<a>` badge
+ *     (`.status-badge-credential`) and wires SPA navigation via `_router`
+ *     (with `href` as a fallback). **Distinct from `buildCredentialBadge()`
+ *     in `utils/dom.js`:** this badge is an `<a>` element that signals a
+ *     *clone failure* in the workspace status table and links to the
+ *     repository settings page; `buildCredentialBadge()` is a `<span>` that
+ *     shows the *assignment status* of a credential in the repository list
+ *     (`.credential-badge--set` / `.credential-badge--none`). The two badges
+ *     serve different views and must not be conflated.
+ *   - `applySetupResultCredentialErrors(setupResult)` — called after every
+ *     setup invocation (Setup button, Retry Setup, health alert) to add or
+ *     remove repos from the in-memory `credentialErrorRepoIds` Set and update
+ *     their badge cell in the DOM immediately.
+ *   - `applyStatusMapUpdate()` — clears the credential-error flag when a repo
+ *     transitions from no-data to having live status data (i.e. after a
+ *     successful re-clone following credential assignment).
+ *
+ * **Known limitation:** `credentialErrorRepoIds` is an in-memory Set populated
+ * only by explicit `setup()` calls during the current page session. If the page
+ * is reloaded after a prior credential-missing failure, the badge will not
+ * appear until the next Setup run because the error state is not persisted in
+ * the workspace health report or the status map. Surfacing this on page load
+ * would require a new API endpoint or server-side persistence — out of scope
+ * for the current implementation.
+ *
  * ## Router integration
  *
  * The view uses the same router-injection pattern as `project-detail.js`:
@@ -42,7 +82,7 @@ import { showConfirm }       from '../components/confirm-dialog.js';
 import { buildRepoStatusCells, makeBranchTrigger, updateRepoStatusCells } from '../components/repo-status-cells.js';
 import { createFormField, validateRequired, WORKSPACE_ID_PATTERN } from '../components/form-helpers.js';
 import { normaliseProject, normaliseWorkspace } from '../utils/normalise.js';
-import { STABLE_WS_ID, APP_NAME_SHORT } from '../utils/constants.js';
+import { STABLE_WS_ID, APP_NAME_SHORT, CREDENTIAL_MISSING_SENTINEL } from '../utils/constants.js';
 import { clearElement } from '../utils/dom.js';
 
 // ---------------------------------------------------------------------------
@@ -68,8 +108,6 @@ export function setRouter(router) {
 
 /** Default polling interval in milliseconds (fallback when config fetch fails). */
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
-
-
 
 // ---------------------------------------------------------------------------
 // Normalisation helpers — imported from utils/normalise.js
@@ -130,11 +168,60 @@ function showLoading(el, label = 'Loading…') {
 }
 
 // ---------------------------------------------------------------------------
+// Credential-missing badge helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a "Missing Credential" badge element for a repository row.
+ *
+ * Rendered in the Status (badge) cell when a clone failed because no credential
+ * was associated with the repository.  The badge links to the repository detail
+ * view (`#/repositories/:id`) where the user can assign a credential.
+ *
+ * @param {string} repoId - Repository ID used to build the link target.
+ * @returns {HTMLElement} A wrapper `<div>` containing the badge `<a>` element.
+ */
+function buildMissingCredentialBadge(repoId) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'status-badge-wrapper';
+
+    const badge = document.createElement('a');
+    badge.className = 'status-badge status-badge-credential';
+    badge.href      = `#/repositories/${encodeURIComponent(repoId)}`;
+    badge.title     = 'This repository has no credential assigned. Click to open repository settings.';
+    badge.setAttribute('aria-label', `Missing credential for ${repoId} — click to configure`);
+
+    // Wire SPA navigation when a router is available so the hash-change is
+    // handled by the router rather than a full page reload.
+    if (_router) {
+        badge.addEventListener('click', (e) => {
+            e.preventDefault();
+            _router.navigate(`#/repositories/${encodeURIComponent(repoId)}`);
+        });
+    }
+
+    const dot = document.createElement('span');
+    dot.className = 'status-badge-dot';
+    dot.setAttribute('aria-hidden', 'true');
+
+    badge.appendChild(dot);
+    badge.appendChild(document.createTextNode('Missing Credential'));
+
+    wrapper.appendChild(badge);
+    return wrapper;
+}
+
+// ---------------------------------------------------------------------------
 // Setup helper
 // ---------------------------------------------------------------------------
 
 /**
  * Run workspace setup and show appropriate toast notification.
+ *
+ * When one or more clone failures are caused by missing credentials (detected
+ * via {@link CREDENTIAL_MISSING_SENTINEL}), the toast message specifically
+ * mentions the credential issue so the user knows where to go to fix it.
+ * Non-credential failures continue to show the generic "Failed to clone" message.
  *
  * @param {string} projectId
  * @param {string} workspaceId
@@ -146,8 +233,37 @@ async function runSetup(projectId, workspaceId, successMessage) {
     const result = await api.workspaces.setup(projectId, workspaceId);
     const failures = (result && result.results || []).filter((r) => !r.success);
     if (failures.length > 0) {
-        const names = failures.map((f) => f.repositoryId).join(', ');
-        showToast(`Setup complete with errors. Failed to clone: ${names}`, 'warning', 8000);
+        const credentialFailures = failures.filter(
+            (f) => typeof f.error === 'string' && f.error.includes(CREDENTIAL_MISSING_SENTINEL),
+        );
+        const otherFailures = failures.filter(
+            (f) => !(typeof f.error === 'string' && f.error.includes(CREDENTIAL_MISSING_SENTINEL)),
+        );
+
+        if (credentialFailures.length > 0 && otherFailures.length === 0) {
+            // All failures are credential-related.
+            const names = credentialFailures.map((f) => f.repositoryId).join(', ');
+            showToast(
+                `Setup complete with credential errors. Missing credentials for: ${names}. ` +
+                'Select a credential in each repository\'s settings.',
+                'warning',
+                10000,
+            );
+        } else if (credentialFailures.length > 0) {
+            // Mixed: some credential failures, some generic failures.
+            const credNames  = credentialFailures.map((f) => f.repositoryId).join(', ');
+            const otherNames = otherFailures.map((f) => f.repositoryId).join(', ');
+            showToast(
+                `Setup complete with errors. Missing credentials for: ${credNames}. ` +
+                `Failed to clone: ${otherNames}.`,
+                'warning',
+                10000,
+            );
+        } else {
+            // No credential failures — generic message.
+            const names = otherFailures.map((f) => f.repositoryId).join(', ');
+            showToast(`Setup complete with errors. Failed to clone: ${names}`, 'warning', 8000);
+        }
     } else {
         showToast(successMessage, 'success');
     }
@@ -167,6 +283,10 @@ async function runSetup(projectId, workspaceId, successMessage) {
  * {@link updateRepoStatusCells} can locate and replace badge contents in-place
  * without touching the rest of the row.
  *
+ * When `statusInfo` is `null` and `credentialErrorRepoIds` contains `repoId`,
+ * the generic "No data" badge is replaced with a "Missing Credential" badge
+ * that links to the repository detail view.
+ *
  * @param {Object} opts
  * @param {string} opts.repoId      - Unique repository identifier (e.g. `"my-repo"`).
  * @param {string} opts.repoName    - Human-readable display name; falls back to
@@ -184,9 +304,15 @@ async function runSetup(projectId, workspaceId, successMessage) {
  * @param {string|null} [opts.webserverUrl] - Base URL of the local webserver. When
  *                                    truthy, a "Browse" button is prepended before
  *                                    the "Git GUI" button.
+ * @param {Set<string>} [opts.credentialErrorRepoIds] - Set of repository IDs whose
+ *                                    last clone attempt failed due to a missing
+ *                                    credential.  When `statusInfo` is `null` and the
+ *                                    repo is in this set, a "Missing Credential" badge
+ *                                    with a link to the repository detail view is
+ *                                    shown instead of the generic "No data" badge.
  * @returns {HTMLTableRowElement}
  */
-function buildRepoStatusRow({ repoId, repoName, statusInfo, projectId, wid, isStable, onBranchCellClick, webserverUrl }) {
+function buildRepoStatusRow({ repoId, repoName, statusInfo, projectId, wid, isStable, onBranchCellClick, webserverUrl, credentialErrorRepoIds }) {
     const tr = document.createElement('tr');
     tr.dataset.repoId   = repoId;
     tr.dataset.repoName = repoName;
@@ -219,6 +345,18 @@ function buildRepoStatusRow({ repoId, repoName, statusInfo, projectId, wid, isSt
         onError: (msg) => showToast(msg, 'error'),
     });
     tr.appendChild(branchCell);
+
+    // Replace the generic "No data" badge with a "Missing Credential" badge
+    // when the repo has no status data because its clone failed due to a
+    // missing credential.
+    if (!statusInfo && credentialErrorRepoIds && credentialErrorRepoIds.has(repoId)) {
+        const badgeWrapper = badgeCell.querySelector(`div[data-repo-id]`);
+        if (badgeWrapper) {
+            clearElement(badgeWrapper);
+            badgeWrapper.appendChild(buildMissingCredentialBadge(repoId));
+        }
+    }
+
     tr.appendChild(badgeCell);
     tr.appendChild(actionsCell);
 
@@ -384,9 +522,10 @@ function buildOpenVscodeButton(projectId, workspaceId) {
  * @param {string} projectId
  * @param {{ id: string, description: string, initialized: boolean, folderPath: string }} workspace
  * @param {boolean} isStable
- * @param {function(): void} [onSetupSuccess] - Called after a successful workspace setup, *after* the
- *   DOM mutation is complete (setupBtn removed from mgmtRow, vscodeBtn inserted before renameBtn,
- *   and `workspace.initialized` set to `true`). Intended to trigger a status refresh in the caller.
+ * @param {function(Object): void} [onSetupSuccess] - Called after a successful workspace setup, *after*
+ *   the DOM mutation is complete (setupBtn removed from mgmtRow, vscodeBtn inserted before renameBtn,
+ *   and `workspace.initialized` set to `true`). Receives the raw setup result from the API.
+ *   Intended to trigger a status refresh and apply credential error tracking in the caller.
  * @returns {HTMLElement}
  */
 function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
@@ -478,7 +617,7 @@ function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
             setupBtn.textContent = 'Setting up…';
 
             try {
-                await runSetup(projectId, workspace.id,
+                const result = await runSetup(projectId, workspace.id,
                     `Workspace "${workspace.id}" set up successfully.`);
 
                 // Update DOM in-place — remove setup button, insert "Open in VS Code",
@@ -487,7 +626,7 @@ function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
                 workspace.initialized = true;
                 const vscodeBtn = buildOpenVscodeButton(projectId, workspace.id);
                 mgmtRow.insertBefore(vscodeBtn, renameBtn);
-                if (onSetupSuccess) onSetupSuccess();
+                if (onSetupSuccess) onSetupSuccess(result);
             } catch (err) {
                 showToast(err.message || 'Failed to set up workspace.', 'error');
                 setupBtn.disabled = false;
@@ -566,9 +705,11 @@ function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
  *   Callback forwarded to each `buildRepoStatusRow()` call.
  * @param {string|null} [webserverUrl] - Base URL for the Browse button. When
  *   truthy, each row gains a "Browse" button before the "Git GUI" button.
+ * @param {Set<string>} [credentialErrorRepoIds] - Set of repository IDs whose
+ *   clone failed due to a missing credential. Forwarded to each row builder.
  * @returns {{ section: HTMLElement, tbody: HTMLTableSectionElement }}
  */
-function buildStatusTableSection(repos, statusMap, projectId, wid, isStable, onBranchCellClick, webserverUrl) {
+function buildStatusTableSection(repos, statusMap, projectId, wid, isStable, onBranchCellClick, webserverUrl, credentialErrorRepoIds) {
     const section = document.createElement('section');
     section.className = 'workspace-status-section';
 
@@ -597,7 +738,7 @@ function buildStatusTableSection(repos, statusMap, projectId, wid, isStable, onB
 
     repos.forEach(({ repoId, repoName }) => {
         const statusInfo = statusMap[repoId] ?? null;
-        tbody.appendChild(buildRepoStatusRow({ repoId, repoName, statusInfo, projectId, wid, isStable, onBranchCellClick, webserverUrl }));
+        tbody.appendChild(buildRepoStatusRow({ repoId, repoName, statusInfo, projectId, wid, isStable, onBranchCellClick, webserverUrl, credentialErrorRepoIds }));
     });
 
     table.appendChild(tbody);
@@ -666,8 +807,20 @@ function buildRefreshToolbar() {
  * caller can inject async handlers that match the surrounding view's
  * closure state (project/workspace IDs, toast helper, etc.).
  *
+ * **When to use a callback vs. direct navigation:**
+ * Use a callback (i.e., add a property to `callbacks`) when the fix action
+ * must coordinate with the parent view's async state — for example, it needs
+ * access to IDs held in the view's closure, triggers a loading indicator, or
+ * awaits a network request. Use direct navigation (e.g., `window.location.hash`)
+ * when the action is self-contained and requires no view-level coordination.
+ * The `configure-credential` branch is an example of the latter: it navigates
+ * directly to `#/repositories` without involving `callbacks` at all.
+ *
  * @param {{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }|null} healthReport
  * @param {{ onRegenerate: function(): Promise<void>, onSetup: function(): Promise<void> }} callbacks
+ *   Async handlers for fix actions that require parent-view coordination.
+ *   Self-contained fix actions (e.g. `configure-credential`) bypass this
+ *   object and handle navigation directly.
  * @returns {HTMLElement|null}
  */
 function buildHealthAlertSection(healthReport, callbacks) {
@@ -734,6 +887,19 @@ function buildHealthAlertSection(healthReport, callbacks) {
                     btn.disabled = false;
                     btn.textContent = 'Fix Setup';
                 }
+            });
+            actionWrap.appendChild(btn);
+            row.appendChild(actionWrap);
+        } else if (issue.fixAction === 'configure-credential') {
+            const actionWrap = document.createElement('span');
+            actionWrap.className = 'health-alert-issue__action';
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-secondary btn-sm';
+            btn.textContent = 'Configure';
+            btn.addEventListener('click', () => {
+                window.location.hash = '#/repositories';
             });
             actionWrap.appendChild(btn);
             row.appendChild(actionWrap);
@@ -883,8 +1049,25 @@ export function renderWorkspaceDetail(container, params) {
             ? webserverUrlConfig.webserverUrl
             : null;
 
+        // Set of repository IDs whose last clone attempt failed due to a missing
+        // credential.  Populated from the health report on initial load (persists
+        // across page reloads) and updated on every setup invocation.  Cleared
+        // per-repo when that repo starts reporting live status data (indicating a
+        // successful re-clone after credential assignment).
+        const credentialErrorRepoIds = new Set();
+
+        // Populate from the initial health report so the badge persists across
+        // page reloads without requiring a new Setup run.
+        if (healthReport && Array.isArray(healthReport.issues)) {
+            for (const issue of healthReport.issues) {
+                if (issue.type === 'credential-missing' && issue.repositoryId) {
+                    credentialErrorRepoIds.add(issue.repositoryId);
+                }
+            }
+        }
+
         // Build status table first to obtain tbody reference for helpers.
-        const { section: statusSection, tbody } = buildStatusTableSection(repos, statusMap || {}, projectId, wid, isStable, onBranchCellClick, webserverUrl);
+        const { section: statusSection, tbody } = buildStatusTableSection(repos, statusMap || {}, projectId, wid, isStable, onBranchCellClick, webserverUrl, credentialErrorRepoIds);
 
         // -------------------------------------------------------------------
         // Refresh helpers (referenced by toolbar, polling, and setup)
@@ -963,7 +1146,8 @@ export function renderWorkspaceDetail(container, params) {
                 },
                 onSetup: async () => {
                     try {
-                        await runSetup(projectId, wid, 'Workspace setup complete.');
+                        const result = await runSetup(projectId, wid, 'Workspace setup complete.');
+                        applySetupResultCredentialErrors(result);
                         doRefresh();
                         await fetchAndRenderHealth();
                     } catch (err) {
@@ -992,6 +1176,37 @@ export function renderWorkspaceDetail(container, params) {
         }
 
         /**
+         * Apply a fresh status map to the status table rows.
+         *
+         * For each repo in `freshStatusMap`:
+         *  - Updates branch and badge cells via `updateRepoStatusCells`.
+         *  - When a repo that previously had a credential error now has status
+         *    data (i.e. it was successfully re-cloned), removes it from
+         *    `credentialErrorRepoIds` so the generic status badge is used from
+         *    that point on.
+         *
+         * For repos in `credentialErrorRepoIds` that are still absent from
+         * `freshStatusMap` the credential badge is left in place (it was already
+         * rendered correctly by `buildRepoStatusRow`).
+         *
+         * @param {Record<string, Object|null>} freshStatusMap
+         */
+        function applyStatusMapUpdate(freshStatusMap) {
+            for (const [repoId, statusInfo] of Object.entries(freshStatusMap)) {
+                const row = tbody ? tbody.querySelector(`tr[data-repo-id="${CSS.escape(repoId)}"]`) : null;
+                if (!row) continue;
+
+                // If this repo had a credential error but now has status data,
+                // clear the error flag so the next badge update uses the regular badge.
+                if (statusInfo && credentialErrorRepoIds.has(repoId)) {
+                    credentialErrorRepoIds.delete(repoId);
+                }
+
+                updateRepoStatusCells(row, repoId, statusInfo, isStable, onBranchCellClick);
+            }
+        }
+
+        /**
          * Automatic poll — uses cached status endpoint.
          */
         async function doPoll() {
@@ -1005,11 +1220,7 @@ export function renderWorkspaceDetail(container, params) {
                 if (container.isConnected) {
                     renderHealthSection(freshHealth);
                     if (fresh) {
-                        for (const [repoId, statusInfo] of Object.entries(fresh)) {
-                            const row = tbody.querySelector(`tr[data-repo-id="${CSS.escape(repoId)}"]`);
-                            if (!row) continue;
-                            updateRepoStatusCells(row, repoId, statusInfo, isStable, onBranchCellClick);
-                        }
+                        applyStatusMapUpdate(fresh);
                         updateMissingReposRow(fresh);
                     }
                 }
@@ -1039,11 +1250,7 @@ export function renderWorkspaceDetail(container, params) {
                 if (container.isConnected) {
                     renderHealthSection(freshHealth);
                     if (fresh) {
-                        for (const [repoId, statusInfo] of Object.entries(fresh)) {
-                            const row = tbody.querySelector(`tr[data-repo-id="${CSS.escape(repoId)}"]`);
-                            if (!row) continue;
-                            updateRepoStatusCells(row, repoId, statusInfo, isStable, onBranchCellClick);
-                        }
+                        applyStatusMapUpdate(fresh);
                         updateMissingReposRow(fresh);
                     }
                 }
@@ -1103,8 +1310,54 @@ export function renderWorkspaceDetail(container, params) {
                 .catch(() => { showToast('Failed to load branch switcher.', 'error'); });
         }
 
+        /**
+         * Populate `credentialErrorRepoIds` from a setup API result.
+         *
+         * Any repository result that was unsuccessful and whose error message
+         * contains the credential-missing sentinel text is added to the set.
+         * Repos that succeeded (or failed for other reasons) are removed from
+         * the set so their badges revert to the standard state on the next poll.
+         *
+         * @param {Object|null} setupResult - The value returned by `runSetup()`.
+         */
+        function applySetupResultCredentialErrors(setupResult) {
+            const results = setupResult && Array.isArray(setupResult.results)
+                ? setupResult.results
+                : [];
+
+            for (const r of results) {
+                if (
+                    !r.success &&
+                    typeof r.error === 'string' &&
+                    r.error.includes(CREDENTIAL_MISSING_SENTINEL)
+                ) {
+                    credentialErrorRepoIds.add(r.repositoryId);
+
+                    // Update the badge cell in-place for this repo so the
+                    // "Missing Credential" badge appears immediately (without
+                    // waiting for the next poll cycle).
+                    if (tbody) {
+                        const row = tbody.querySelector(`tr[data-repo-id="${CSS.escape(r.repositoryId)}"]`);
+                        if (row) {
+                            const badgeWrapper = row.querySelector(`div[data-repo-id="${CSS.escape(r.repositoryId)}"]`);
+                            if (badgeWrapper) {
+                                clearElement(badgeWrapper);
+                                badgeWrapper.appendChild(buildMissingCredentialBadge(r.repositoryId));
+                            }
+                        }
+                    }
+                } else {
+                    // Success or non-credential failure — clear any prior
+                    // credential-error flag for this repo.
+                    credentialErrorRepoIds.delete(r.repositoryId);
+                }
+            }
+        }
+
         // Setup success callback — hides setup button, triggers refresh.
-        const onSetupSuccess = () => {
+        // Receives the raw setup result so credential errors can be tracked.
+        const onSetupSuccess = (result) => {
+            applySetupResultCredentialErrors(result);
             doRefresh();
             if (!countdownInterval && tbody && repos.length > 0) {
                 startCountdown();
@@ -1163,10 +1416,12 @@ export function renderWorkspaceDetail(container, params) {
                 retryBtn.textContent = 'Setting up\u2026';
 
                 try {
-                    await runSetup(projectId, workspace.id,
+                    const result = await runSetup(projectId, workspace.id,
                         'All repositories cloned successfully.');
 
-                    // Trigger immediate refresh to update the status table.
+                    // Track credential errors from this setup run, then trigger
+                    // an immediate refresh to update the status table.
+                    applySetupResultCredentialErrors(result);
                     doRefresh();
                 } catch (err) {
                     showToast(err.message || 'Failed to set up workspace.', 'error');

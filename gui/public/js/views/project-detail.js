@@ -46,6 +46,7 @@ import { showConfirm } from '../components/confirm-dialog.js';
 import { createFormField, validateRequired, WORKSPACE_ID_PATTERN } from '../components/form-helpers.js';
 import { normaliseProject, normaliseRepo, normaliseWorkspace } from '../utils/normalise.js';
 import { STABLE_WS_ID, APP_NAME_SHORT } from '../utils/constants.js';
+import { buildCredentialBadge } from '../utils/dom.js';
 
 // ---------------------------------------------------------------------------
 // Router reference — injected from app.js via setRouter()
@@ -239,7 +240,7 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
 
         const thead = document.createElement('thead');
         const htr   = document.createElement('tr');
-        ['Name', 'ID', 'Actions'].forEach((label) => {
+        ['Name', 'ID', 'Credential', 'Actions'].forEach((label) => {
             const th = document.createElement('th');
             th.textContent = label;
             htr.appendChild(th);
@@ -263,6 +264,12 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
             idCell.className = 'text-muted font-mono';
             idCell.textContent = repoId;
             tr.appendChild(idCell);
+
+            // Credential status cell
+            const credCell = document.createElement('td');
+            credCell.className = 'repo-credential-cell';
+            credCell.appendChild(buildCredentialBadge(repo && repo.credentialId));
+            tr.appendChild(credCell);
 
             // Actions cell
             const actCell = document.createElement('td');

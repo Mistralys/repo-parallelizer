@@ -21,3 +21,19 @@ export const STABLE_WS_ID = 'STABLE';
  * @type {string}
  */
 export const APP_NAME_SHORT = 'Paralizer';
+
+/**
+ * Sentinel substring present in credential-missing error messages emitted by
+ * the workspace and repository orchestrators.
+ *
+ * When a clone failure's error string contains this text the workspace detail
+ * view surfaces a "Missing Credential" badge instead of the generic "No data"
+ * error badge.
+ *
+ * Must remain in sync with the error message template in:
+ *   src/orchestration/workspace-orchestrator.ts
+ *   src/orchestration/repository-orchestrator.ts
+ *
+ * @type {string}
+ */
+export const CREDENTIAL_MISSING_SENTINEL = 'requires a credential for host';
