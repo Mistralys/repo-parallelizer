@@ -18,8 +18,19 @@ High-level composite operations that coordinate models and Git commands to imple
 | `workspace-orchestrator.ts` | Create, delete, rename workspaces (clones repos into new workspace) |
 | `branch-orchestrator.ts` | Multi-repo branch switching with conflict detection |
 | `vscode-workspace.ts` | Generate `.code-workspace` files for VS Code |
+| `workspace-health.ts` | Side-effect-free health checks for workspaces (missing files, uncloned repos, credential errors) |
+
+## Credential Success Logging
+
+After a successful credential-based clone, both `WorkspaceOrchestrator.createWorkspace()` and `RepositoryOrchestrator.addRepositoryToProject()` write a `Source: 'credentials'`, `Severity: 'info'` entry to the error log. This entry is used by `checkWorkspaceHealth()` to suppress stale credential-missing health badges without deleting history.
+
+- **`workspace-setup` operation** — written by `WorkspaceOrchestrator.createWorkspace()`.
+- **`add-repository` operation** — written by `RepositoryOrchestrator.addRepositoryToProject()`.
+- **SSH clones** (`credential === null`) do not produce a credentials log entry.
+
+`checkWorkspaceHealth()` inspects the most recent `Source: 'credentials'` entry per repository: a `Severity: 'info'` entry suppresses the badge; a `Severity: 'error'` entry surfaces it. See `workspace-health.ts` `@remarks` for the full stale-badge resolution description.
 
 ## Integration Points
 
-- **Dependencies**: `config`, `models` (ProjectManager, RepositoryManager, WorkspaceManager), `git` (clone, branch, status).
+- **Dependencies**: `config`, `models` (ProjectManager, RepositoryManager, WorkspaceManager), `git` (clone, branch, status), `error-log` (ErrorLogManager — optional, for credential health checks).
 - **Consumed by**: Server route handlers, CLI.

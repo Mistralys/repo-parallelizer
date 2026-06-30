@@ -8,7 +8,7 @@ Built-in HTTP server providing a REST API and static file serving for the GUI. U
 - **Static file server**: Serves the `gui/public/` directory for the frontend SPA.
 - **Polling Manager**: Periodically fetches git status for active workspaces, caching results for the GUI.
 - **REST API**: Full CRUD for repositories, projects, workspaces, plus branch operations, status polling, and error log access.
-- **Error Log**: `startServer()` creates a single `ErrorLogManager` instance and shares it across all subsystems (WorkspaceOrchestrator, BranchOrchestrator, PollingManager, and Router). No external reference is returned; the instance is internal to the server lifecycle.
+- **Error Log**: `startServer()` creates a single `ErrorLogManager` instance and shares it across all subsystems (WorkspaceOrchestrator, BranchOrchestrator, PollingManager, Router, and credential route handlers). The credential route handlers (`config.ts`, `repositories.ts`) emit `Severity: 'audit'` entries with `Source: 'credential-audit'` on every successful credential mutation. No external reference to the manager is returned; the instance is internal to the server lifecycle.
 
 ## Folder Structure
 

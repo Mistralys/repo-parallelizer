@@ -21,9 +21,40 @@ This is a strict requirement of the `Node16` module resolution setting. TypeScri
 - Error messages use only `args[0]` (the subcommand name), never the full args array, to avoid leaking credential-bearing URLs.
 - `RepositoryManager.add()` redacts embedded credentials from URLs before interpolating into error messages.
 - `runGit()` always sets `GIT_TERMINAL_PROMPT=0` and `GIT_ASKPASS=echo` on every spawned subprocess. This prevents interactive credential prompts and credential-helper (osxkeychain, libsecret) blocking on unauthenticated requests. Do not remove either env var.
-- **Standing rule — credential stripping in git error output:** When credential injection is wired into future WPs (i.e., `injectCredentials()` is used to append tokens to URLs before passing to `runGit()`/`runGitOrThrow()`), all code paths that surface `GitResult.stderr` in thrown Error messages, log output, or API responses **must** apply `stripEmbeddedCredentials()` (from `src/git/git-credentials.ts`) to the stderr string first. Git may echo the credentialed URL back in error messages (e.g., `fatal: repository https://ghp_token@github.com/... not found`), which would expose the PAT. This is a non-optional security control for every credential-injection WP.
-- **Credential injection lifetime contract:** `injectCredentials()` must only be called immediately before a git subprocess invocation — never stored or returned through API boundaries. The injected URL must not appear in log output, API responses, or Error messages without first passing through `stripEmbeddedCredentials()`.
-- **Pre-embedded-credentials passthrough:** If a repo URL already contains embedded credentials (detected via `hasEmbeddedCredentials()`) and the URL’s host is not present in the `gitCredentials` map, `injectCredentials()` returns the URL unchanged — including its pre-existing credentials. Orchestrator implementations **must** call `hasEmbeddedCredentials()` before `injectCredentials()` and decide explicitly whether to strip and re-inject or reject the URL.- **Token masking rule (API responses):** The `gitCredentials` field in `AppConfig` / `config.json` stores **plaintext** tokens. No API handler, logger, or error message may expose a plaintext token in any response. All credential API responses must pass the map through `buildMaskedCredentials()` (in `src/server/routes/config.ts`) before serialisation — this applies `maskToken()` to every value, producing `****` + last-4-chars (e.g. `****abc1`). Tokens shorter than 4 characters are fully masked as `****`. This is a non-optional security control: any new credential endpoint **must** apply `buildMaskedCredentials()` before calling `sendJson()`.
+- **Standing rule — credential stripping in git error output:** When credential injection is wired into future WPs (i.e., `injectCredentialToken()` is used to append tokens to URLs before passing to `runGit()`/`runGitOrThrow()`), all code paths that surface `GitResult.stderr` in thrown Error messages, log output, or API responses **must** apply `stripEmbeddedCredentials()` (from `src/git/git-credentials.ts`) to the stderr string first. Git may echo the credentialed URL back in error messages (e.g., `fatal: repository https://ghp_token@github.com/... not found`), which would expose the PAT. This is a non-optional security control for every credential-injection WP.
+- **Credential injection lifetime contract:** `injectCredentialToken()` must only be called immediately before a git subprocess invocation — never stored or returned through API boundaries. The injected URL must not appear in log output, API responses, or Error messages without first passing through `stripEmbeddedCredentials()`.
+- **Pre-embedded-credentials passthrough:** If a repo URL already contains embedded credentials (detected via `hasEmbeddedCredentials()`) orchestrator implementations **must** call `hasEmbeddedCredentials()` before invoking `resolveCredential()` + `injectCredentialToken()` and decide explicitly whether to strip and re-inject or reject the URL.- **Token masking rule (API responses):** The `gitCredentials` field in `AppConfig` / `config.json` stores **plaintext** tokens. No API handler, logger, or error message may expose a plaintext token in any response. All credential API responses must pass the array through `buildMaskedCredentials()` (in `src/server/routes/config.ts`) before serialisation — this applies `maskToken()` to every `token` field in each `GitCredentialEntry`, producing `****` + last-4-chars (e.g. `****abc1`). Tokens shorter than 4 characters are fully masked as `****`. This is a non-optional security control: any new credential endpoint **must** apply `buildMaskedCredentials()` before calling `sendJson()`.
+## Credential Field Validation
+
+### Hostname Format (`host` field)
+
+The `host` field in a `GitCredentialEntry` must not contain `/`, `\`, null bytes (`\0`), or whitespace characters. These characters are invalid in a hostname and are rejected with HTTP 400 by `PUT /api/config/credentials`. The validation regex is `/[/\\\0\s]/`. Valid examples: `github.com`, `gitlab.example.com`.
+
+### Per-Field Length Limits
+
+| Field | Maximum length |
+|---|---|
+| `id` | 100 characters |
+| `label` | 200 characters |
+| `host` | 253 characters |
+| `token` | 500 characters |
+
+These limits are enforced both at the API boundary (`PUT /api/config/credentials` → HTTP 400 on violation) and during config file parsing (`parseGitCredentials()` → `Error` thrown on violation). Values exactly at each limit are accepted.
+
+**API whitespace normalization:** `PUT /api/config/credentials` trims leading and trailing whitespace from `id`, `label`, and `token` before storage. This is intentional UX normalization (e.g., clipboard pastes with trailing newlines). The stored value may therefore differ from what was submitted. The `host` field is handled differently: whitespace is rejected outright (HTTP 400) rather than stripped, because whitespace is structurally invalid in a hostname.
+
+**Config parser trim-on-parse:** `parseGitCredentials()` trims leading and trailing whitespace from all four credential fields before returning. Specifically:
+- **New-format array entries** (`GitCredentialEntry[]`): all four fields (`id`, `label`, `host`, `token`) are trimmed in the final `.map()` pass before the array is returned.
+- **Legacy-format entries** (`Record<string, string>` hostname→token map): all three of `label`, `host`, and `token` are trimmed when constructing each `GitCredentialEntry`. `label` is derived from the hostname key after trimming, consistent with the new-format path.
+
+The in-memory `GitCredentialEntry[]` returned by `parseGitCredentials()` therefore always contains normalized (trimmed) values for all fields in both formats. The API route handler also produces and stores clean (trimmed) values, ensuring consistency between programmatically created credentials and those loaded from a manually edited `config.json`.
+
+### Host/Credential Coherence (`PUT /api/repositories/:id/credential`)
+
+When assigning a credential to a repository, the API validates that `credential.host` matches the hostname extracted from the repository's URL via `extractHost()`. If they do not match, the request is rejected with HTTP 400 and a descriptive error message indicating both the credential's host and the repository URL's host. This guard prevents silent credential misrouting. The check is skipped when:
+- `credentialId` is `null` (clearing the association is always allowed).
+- The repository URL is not an HTTPS URL (SSH URLs return `null` from `extractHost()`).
+
 ## Stateless Managers
 
 All model managers (`RepositoryManager`, `ProjectManager`, `WorkspaceManager`) re-read their backing JSON file from disk on **every** public method call. There is no in-memory cache. This ensures concurrent writes from other processes are always reflected.
@@ -55,6 +86,16 @@ Both `storageFolder` and `projectsFolder` in `config.json` accept relative or ab
 - The `_instructions` key in `config.dist.json` is an editorial note and is not a valid config field. Remove it from `config.json`.
 - `initializeStorage()` is idempotent — re-running it does not overwrite existing files.
 - **`DEFAULTS` Pick maintenance:** The exported `DEFAULTS` constant in `src/config/config.ts` is typed as `Pick<AppConfig, 'cloneDepth' | 'serverPort' | 'gitPollingIntervalSeconds' | 'notesCardHeight' | 'notesColumns'>`. When a new non-optional, non-required `AppConfig` field with a sensible default is added, **three** coordinated changes are required: (1) add the field key to the `Pick` union, (2) add the field's default value to the `DEFAULTS` object literal, and (3) add the fallback guard in `loadConfig()` (e.g. `typeof raw['field'] === 'number' ? raw['field'] : DEFAULTS.field`). Omitting step (1) is a TypeScript compile error; omitting steps (2)–(3) causes the field to be `undefined` at runtime for configs that predate the new field.
+- **`_defaultsCoverageGuard` pattern:** Immediately after `DEFAULTS`, a `const _defaultsCoverageGuard: AppConfig = { ...DEFAULTS, projectsFolder: '', storageFolder: '' } satisfies AppConfig` expression is declared and voided. The `satisfies AppConfig` clause is a compile-time completeness guard: if a new required field is added to `AppConfig` without a corresponding entry in `DEFAULTS` or the guard literal, TypeScript emits a type error at that exact line. Do not remove this guard — it is the automated enforcement mechanism for the DEFAULTS maintenance rule above.
+
+## Schema Version Policy
+
+The `SchemaVersion` field on `BaseStore` tracks structural changes to persisted JSON store files. The rule is defined in `src/storage/storage.types.ts`:
+
+- **Do NOT bump `SCHEMA_VERSION`** when adding an **optional** field. Existing JSON files that lack the field are still valid — no migration is required.
+- **Do bump `SCHEMA_VERSION`** (and add a migration step) for breaking changes: removing a required field, renaming a field, or changing the type of an existing field in a way that would cause older JSON files to fail validation or produce incorrect behaviour.
+
+**Example:** `Repository.CredentialId` is an optional field addition — existing `repositories.json` files remain valid without it. No `SCHEMA_VERSION` bump was needed for this change.
 
 ## Test Conventions
 

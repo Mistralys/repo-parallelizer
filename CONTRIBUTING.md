@@ -59,7 +59,11 @@ process.on('exit', () => {
 
 ### Server-layer test helpers
 
-`src/server/__tests__/helpers/mock-http.ts` provides shared HTTP mock utilities for route-level unit tests:
+The `src/server/__tests__/helpers/` directory contains shared stub and mock utilities for route-level unit tests. Add new helpers here when a mock is needed by more than one test file.
+
+#### `mock-http.ts` — HTTP mocks
+
+`src/server/__tests__/helpers/mock-http.ts` provides shared HTTP mock utilities:
 
 | Export | Description |
 |---|---|
@@ -71,11 +75,28 @@ Import these in any `src/server/__tests__` test file:
 
 ```typescript
 import { mockRequest, mockResponse, MockResponse } from '../helpers/mock-http.js';
-// or from a subdirectory:
+// or from a top-level __tests__ file:
 import { mockRequest, mockResponse, MockResponse } from './helpers/mock-http.js';
 ```
 
 > **Note:** `statusCode` is intentionally initialised as `undefined`, not `0`. This lets tests distinguish "the handler never called `writeHead()`" from a deliberate `200 OK`.
+
+#### `mock-error-log-manager.ts` — ErrorLogManager stub
+
+`src/server/__tests__/helpers/mock-error-log-manager.ts` provides a minimal in-memory `ErrorLogManager` stub for route tests that exercise credential audit logging:
+
+| Export | Description |
+|---|---|
+| `makeMockErrorLogManager()` | Returns an `ErrorLogManager` stub extended with an `appendedEntries` array. Every `append()` call pushes the entry to `appendedEntries` and returns it with a synthetic `Id` and `Timestamp`. |
+
+```typescript
+import { makeMockErrorLogManager } from '../helpers/mock-error-log-manager.js';
+
+const errorLogManager = makeMockErrorLogManager();
+// After calling the handler under test:
+expect(errorLogManager.appendedEntries).toHaveLength(1);
+expect(errorLogManager.appendedEntries[0].Source).toBe('credential-audit');
+```
 
 ### Core test helpers (`src/tests/test-helpers.ts`)
 

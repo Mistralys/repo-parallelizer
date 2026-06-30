@@ -16,10 +16,21 @@ Stateless functions wrapping Git CLI subprocess calls. All operations spawn `git
 |---|---|
 | `git.types.ts` | Type definitions: GitResult, GitStatusInfo, BranchInfo, CloneOptions |
 | `git-cli.ts` | Low-level `runGit()` and `runGitOrThrow()` subprocess execution |
-| `git-credentials.ts` | URL credential utilities: `extractHost()`, `injectCredentials()`, `hasEmbeddedCredentials()`, `stripEmbeddedCredentials()` |
+| `git-credentials.ts` | URL credential utilities: `resolveCredential()`, `injectCredentialToken()`, `extractHost()`, `hasEmbeddedCredentials()`, `stripEmbeddedCredentials()`. |
 | `git-clone.ts` | `cloneRepository()` with depth and timeout options |
 | `git-branch.ts` | Branch listing, creation, switching, existence checks |
 | `git-status.ts` | Repository status: current branch, uncommitted changes, conflicts |
+
+## Credential Pipeline
+
+`git-credentials.ts` implements a two-step pipeline for injecting HTTPS credentials into clone URLs:
+
+1. **`resolveCredential(url, credentials, credentialId?)`** — selects the correct `GitCredentialEntry` from the configured credential array. When `credentialId` is supplied it performs an exact ID lookup; otherwise it auto-selects the single credential whose `host` matches the URL's hostname (returns `null` if zero or multiple matches are found).
+2. **`injectCredentialToken(url, token)`** — embeds the resolved token into the URL as the WHATWG URL username (`https://<token>@<host>/...`). Token characters are automatically percent-encoded; no string concatenation is used.
+
+SSH URLs (`git@…`, `ssh://…`) return `null` from `extractHost()` and are bypassed by both steps — authentication is delegated to the SSH agent.
+
+**Security note:** When `credentialId` is explicit, `resolveCredential()` does not cross-validate the credential's `host` against the URL's hostname. Callers (i.e. the orchestrators) are responsible for ensuring coherence — see the `@remarks` block in `resolveCredential()`.
 
 ## Integration Points
 
