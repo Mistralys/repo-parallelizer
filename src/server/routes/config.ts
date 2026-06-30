@@ -1,9 +1,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Router } from '../router.js';
-import type { AppConfig } from '../../config/config.types.js';
+import type { AppConfig, GitCredentialEntry } from '../../config/config.types.js';
 import type { PollingManager } from '../pollingManager.js';
+import type { ErrorLogManager } from '../../error-log/error-log.manager.js';
 import { saveConfigField } from '../../config/config.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
+import { toKebabCase } from '../../utils/slug.js';
 
 // Polling-interval bounds — shared with settings UI (gui/public/js/views/settings.js).
 import {
@@ -13,6 +15,10 @@ import {
     MAX_NOTES_CARD_HEIGHT,
     MIN_NOTES_COLUMNS,
     MAX_NOTES_COLUMNS,
+    MAX_CREDENTIAL_ID_LENGTH,
+    MAX_CREDENTIAL_LABEL_LENGTH,
+    MAX_CREDENTIAL_HOST_LENGTH,
+    MAX_CREDENTIAL_TOKEN_LENGTH,
 } from '../../config/config.constants.js';
 
 // ---------------------------------------------------------------------------
@@ -52,17 +58,45 @@ function isValidFiniteInteger(value: unknown): value is number {
 }
 
 /**
- * Returns a copy of the credentials map with all tokens masked.
+ * Returns a copy of the credentials array with all tokens masked.
  */
 function buildMaskedCredentials(
-    credentials: Record<string, string> | undefined,
-): Record<string, string> {
-    if (!credentials) return {};
-    const masked: Record<string, string> = {};
-    for (const [host, token] of Object.entries(credentials)) {
-        masked[host] = maskToken(token);
+    credentials: GitCredentialEntry[] | undefined,
+): GitCredentialEntry[] {
+    if (!credentials) return [];
+    return credentials.map((entry) => ({ ...entry, token: maskToken(entry.token) }));
+}
+
+/**
+ * Generates a unique kebab-case ID from a label, appending a numeric suffix
+ * (-2, -3, ...) when the base ID is already taken.
+ *
+ * @param label - The human-readable label to derive an ID from.
+ * @param existingIds - The set of IDs already in use; the returned ID is
+ *   guaranteed not to be a member of this set.
+ * @returns A kebab-case string ID that is unique within `existingIds`.
+ *
+ * @remarks
+ * When `toKebabCase(label)` returns an empty string (e.g. because `label`
+ * consists entirely of special characters such as `"!!!"`), the function falls
+ * back to `"credential"` as the base ID. Suffix disambiguation (-2, -3, …)
+ * is still applied when needed, so labels like `"!!!"` and `"???"` resolve to
+ * `"credential"` and `"credential-2"` respectively.
+ *
+ * @example
+ * generateUniqueId('GitHub Personal', new Set())       // → 'github-personal'
+ * generateUniqueId('GitHub Personal', new Set(['github-personal'])) // → 'github-personal-2'
+ * generateUniqueId('!!!', new Set())                   // → 'credential'
+ */
+function generateUniqueId(label: string, existingIds: Set<string>): string {
+    const baseId = toKebabCase(label) || 'credential';
+    let candidateId = baseId;
+    let suffix = 2;
+    while (existingIds.has(candidateId)) {
+        candidateId = `${baseId}-${suffix}`;
+        suffix++;
     }
-    return masked;
+    return candidateId;
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +114,8 @@ export interface ConfigRoutesOptions {
     configPath?: string;
     /** Optional `PollingManager`. When provided, PUT /api/config/polling restarts the loop. */
     pollingManager?: PollingManager;
+    /** Optional `ErrorLogManager`. When provided, credential mutations are audit-logged. */
+    errorLogManager?: ErrorLogManager;
 }
 
 /**
@@ -92,7 +128,18 @@ export interface ConfigRoutesOptions {
  * |--------|-----------------------------------|---------------------------|
  * | GET    | /api/config/credentials           | List credentials (masked) |
  * | PUT    | /api/config/credentials           | Add / update an entry     |
- * | DELETE | /api/config/credentials/:host     | Remove an entry           |
+ * | DELETE | /api/config/credentials/:id       | Remove an entry           |
+ *
+ * `GET` returns a `GitCredentialEntry[]` array with tokens masked (`****` + last 4 chars).
+ *
+ * `PUT` request body: `{ id?: string, label: string, host: string, token: string }`.
+ * When `id` is omitted, an ID is auto-generated from `label` as a kebab-case string
+ * with a numeric suffix (-2, -3, …) appended on collision.
+ * When `id` matches an existing entry, that entry is updated in-place (upsert).
+ * Response: the updated `GitCredentialEntry[]` array with tokens masked.
+ *
+ * `DELETE` response: the remaining `GitCredentialEntry[]` array with tokens masked
+ * (empty array `[]` when the last entry is removed). Returns 404 when the `id` is unknown.
  *
  * **Polling endpoints:**
  *
@@ -119,16 +166,21 @@ export interface ConfigRoutesOptions {
  * are persisted to `config.json` via `saveConfigField()`.
  *
  * **Security:** tokens are never returned in full — only the last 4 characters
- * are exposed. The `host` field is validated against an injection-safe pattern.
+ * are exposed. The `host` field is validated to reject `/`, `\`, null bytes,
+ * and whitespace (see WP-004 / constraints.md § Hostname Format).
  *
- * @param options - Named-options bag: `router`, `appConfig`, optional
- *   `configPath` (defaults to tool-root `config.json`), optional
- *   `pollingManager` (restarts polling loop when present).
+ * @param options - Named-options bag.
+ * @param options.router - Express-style router to register routes on.
+ * @param options.appConfig - Live application config object (mutated in-place on PUT).
+ * @param options.configPath - Optional absolute path to `config.json`. Defaults to the tool-root `config.json`.
+ * @param options.pollingManager - Optional `PollingManager`; when provided, `PUT /api/config/polling` restarts the polling loop.
+ * @param options.errorLogManager - Optional `ErrorLogManager`; when provided, credential mutations (create, update, delete) are audit-logged at `Severity: 'audit'`, `Source: 'credential-audit'`.
  */
 export function registerConfigRoutes(options: ConfigRoutesOptions): void {
-    const { router, appConfig, configPath, pollingManager } = options;
+    const { router, appConfig, configPath, pollingManager, errorLogManager } = options;
     // ------------------------------------------------------------------
     // GET /api/config/credentials — list all (tokens masked)
+    // Returns GitCredentialEntry[] with tokens masked.
     // ------------------------------------------------------------------
     router.get('/api/config/credentials', (
         _req: IncomingMessage,
@@ -140,6 +192,19 @@ export function registerConfigRoutes(options: ConfigRoutesOptions): void {
 
     // ------------------------------------------------------------------
     // PUT /api/config/credentials — add or update a single entry
+    //
+    // Request body: { id?: string, label: string, host: string, token: string }
+    //
+    // - When `id` is omitted: auto-generates a kebab-case ID from `label`,
+    //   appending a numeric suffix (-2, -3, …) if needed to avoid collisions.
+    //   Always creates a new entry.
+    // - When `id` is provided and matches an existing entry: upserts (replaces)
+    //   the existing entry in-place.
+    // - When `id` is provided and does NOT match any existing entry: creates a
+    //   new entry with the given ID (after checking the ID is not already taken).
+    //
+    // Returns 400 when the resulting ID would collide with an existing entry
+    // that is NOT the one being updated (duplicate-ID rejection).
     // ------------------------------------------------------------------
     router.put('/api/config/credentials', async (
         req: IncomingMessage,
@@ -159,79 +224,149 @@ export function registerConfigRoutes(options: ConfigRoutesOptions): void {
             return;
         }
 
-        const { host, token } = body as { host?: unknown; token?: unknown };
+        const { id, label, host, token } = body as {
+            id?: unknown;
+            label?: unknown;
+            host?: unknown;
+            token?: unknown;
+        };
 
+        // Validate required string fields.
+        if (typeof label !== 'string' || label.trim() === '') {
+            sendError(res, 400, 'Missing or invalid field "label": must be a non-empty string.');
+            return;
+        }
         if (typeof host !== 'string' || host.trim() === '') {
             sendError(res, 400, 'Missing or invalid field "host": must be a non-empty string.');
             return;
         }
-
+        // Reject host values containing path separators, null bytes, or whitespace —
+        // a hostname should contain none of these characters.
+        if (/[/\\\0\s]/.test(host)) {
+            sendError(res, 400, 'Invalid field "host": must not contain /, \\, null bytes, or whitespace.');
+            return;
+        }
         if (typeof token !== 'string' || token.trim() === '') {
             sendError(res, 400, 'Missing or invalid field "token": must be a non-empty string.');
             return;
         }
 
+        // Validate optional `id` field when provided.
+        if (id !== undefined && (typeof id !== 'string' || id.trim() === '')) {
+            sendError(res, 400, 'Field "id", when provided, must be a non-empty string.');
+            return;
+        }
+
+        // Per-field length limits.
+        if (typeof id === 'string' && id.trim().length > MAX_CREDENTIAL_ID_LENGTH) {
+            sendError(res, 400, `"id" exceeds maximum length of ${MAX_CREDENTIAL_ID_LENGTH} characters.`);
+            return;
+        }
+        if (label.trim().length > MAX_CREDENTIAL_LABEL_LENGTH) {
+            sendError(res, 400, `"label" exceeds maximum length of ${MAX_CREDENTIAL_LABEL_LENGTH} characters.`);
+            return;
+        }
+        if (host.trim().length > MAX_CREDENTIAL_HOST_LENGTH) {
+            sendError(res, 400, `"host" exceeds maximum length of ${MAX_CREDENTIAL_HOST_LENGTH} characters.`);
+            return;
+        }
+        if (token.trim().length > MAX_CREDENTIAL_TOKEN_LENGTH) {
+            sendError(res, 400, `"token" exceeds maximum length of ${MAX_CREDENTIAL_TOKEN_LENGTH} characters.`);
+            return;
+        }
+
+        const cleanLabel = label.trim();
         const cleanHost = host.trim();
-
-        // Security: reject hosts with path separators or whitespace to prevent
-        // key injection that could interfere with URL credential injection.
-        if (/[\s/\\]/.test(cleanHost)) {
-            sendError(res, 400, 'Field "host" must not contain path separators or whitespace.');
-            return;
-        }
-
-        // Defence-in-depth: reject prototype-pollution keys.
-        if (['__proto__', 'constructor', 'prototype'].includes(cleanHost)) {
-            sendError(res, 400, 'Field "host" contains a reserved name.');
-            return;
-        }
-
         const cleanToken = token.trim();
 
-        // Update in-memory config.
-        if (!appConfig.gitCredentials) {
-            appConfig.gitCredentials = {};
+        const existingCredentials: GitCredentialEntry[] = appConfig.gitCredentials ?? [];
+
+        let savedEntry: GitCredentialEntry;
+        let auditOperation: string;
+
+        if (id !== undefined) {
+            // --- Upsert path: id is explicitly provided ---
+            const cleanId = (id as string).trim();
+            const existingIndex = existingCredentials.findIndex((e) => e.id === cleanId);
+
+            if (existingIndex === -1) {
+                // New entry with an explicit ID — no existing entry matches, so create.
+                savedEntry = { id: cleanId, label: cleanLabel, host: cleanHost, token: cleanToken };
+                appConfig.gitCredentials = [...existingCredentials, savedEntry];
+                auditOperation = 'create-credential';
+            } else {
+                // Replace the existing entry at the same position.
+                savedEntry = { id: cleanId, label: cleanLabel, host: cleanHost, token: cleanToken };
+                const updated = [...existingCredentials];
+                updated[existingIndex] = savedEntry;
+                appConfig.gitCredentials = updated;
+                auditOperation = 'update-credential';
+            }
+        } else {
+            // --- Create path: no id provided — auto-generate from label ---
+            const existingIds = new Set(existingCredentials.map((e) => e.id));
+            const newId = generateUniqueId(cleanLabel, existingIds);
+            savedEntry = { id: newId, label: cleanLabel, host: cleanHost, token: cleanToken };
+            appConfig.gitCredentials = [...existingCredentials, savedEntry];
+            auditOperation = 'create-credential';
         }
-        appConfig.gitCredentials[cleanHost] = cleanToken;
 
         // Persist to disk.
         saveConfigField('gitCredentials', appConfig.gitCredentials, configPath);
+
+        // Audit log — never include the token value.
+        errorLogManager?.append({
+            Severity: 'audit',
+            Source: 'credential-audit',
+            Operation: auditOperation,
+            Context: {},
+            Message: `Credential "${savedEntry.id}" (label: "${savedEntry.label}", host: "${savedEntry.host}") was ${auditOperation === 'create-credential' ? 'created' : 'updated'}.`,
+        });
 
         sendJson(res, 200, buildMaskedCredentials(appConfig.gitCredentials));
     });
 
     // ------------------------------------------------------------------
-    // DELETE /api/config/credentials/:host — remove a single entry
+    // DELETE /api/config/credentials/:id — remove a single entry by id
     // Sync handler (no request body to parse — unlike the async PUT above).
     // ------------------------------------------------------------------
-    router.delete('/api/config/credentials/:host', (
+    router.delete('/api/config/credentials/:id', (
         _req: IncomingMessage,
         res: ServerResponse,
         params: Record<string, string>,
     ): void => {
-        let host: string;
+        let credId: string;
         try {
-            host = decodeURIComponent(params['host']);
+            credId = decodeURIComponent(params['id']);
         } catch {
-            sendError(res, 400, 'Malformed host parameter.');
+            sendError(res, 400, 'Malformed id parameter.');
             return;
         }
 
-        if (!appConfig.gitCredentials || !(host in appConfig.gitCredentials)) {
-            sendError(res, 404, `No credential entry found for host "${host}".`);
+        const existing = appConfig.gitCredentials ?? [];
+        const idx = existing.findIndex((e) => e.id === credId);
+
+        if (idx === -1) {
+            sendError(res, 404, `No credential entry found with id "${credId}".`);
             return;
         }
 
-        delete appConfig.gitCredentials[host];
+        const deletedEntry = existing[idx];
+        const updated = existing.filter((_, i) => i !== idx);
 
-        // When the map is empty, remove the field entirely (undefined removes
-        // it from config.json via saveConfigField).
-        const isEmpty = Object.keys(appConfig.gitCredentials).length === 0;
-        if (isEmpty) {
-            appConfig.gitCredentials = undefined;
-        }
+        // When the array is empty, remove the field entirely.
+        appConfig.gitCredentials = updated.length > 0 ? updated : undefined;
 
         saveConfigField('gitCredentials', appConfig.gitCredentials, configPath);
+
+        // Audit log — never include the token value.
+        errorLogManager?.append({
+            Severity: 'audit',
+            Source: 'credential-audit',
+            Operation: 'delete-credential',
+            Context: {},
+            Message: `Credential "${deletedEntry.id}" (label: "${deletedEntry.label}", host: "${deletedEntry.host}") was deleted.`,
+        });
 
         sendJson(res, 200, buildMaskedCredentials(appConfig.gitCredentials));
     });

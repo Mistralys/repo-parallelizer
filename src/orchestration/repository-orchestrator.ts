@@ -4,7 +4,7 @@ import type { AppConfig } from '../config/config.types.js';
 import type { ProjectManager } from '../models/project/project.manager.js';
 import type { RepositoryManager } from '../models/repository/repository.manager.js';
 import { cloneRepository } from '../git/git-clone.js';
-import { injectCredentials, stripEmbeddedCredentials } from '../git/git-credentials.js';
+import { resolveCredential, injectCredentialToken, extractHost, stripEmbeddedCredentials } from '../git/git-credentials.js';
 import {
     generateWorkspaceFile,
     getWorkspaceFilePath,
@@ -89,6 +89,19 @@ export class RepositoryOrchestrator {
      *   exception propagates out of the `Promise.all` callback and converts a
      *   per-workspace clone failure into a full rejection of this method.
      *   Logging exceptions are **not** swallowed.
+     * @remarks **Credential coherence:** When a repository has an explicit
+     *   `CredentialId`, `resolveCredential()` performs only an ID lookup and does
+     *   **not** cross-validate the credential's configured host against the
+     *   repository URL's hostname. The `credential-options` endpoint already
+     *   filters available credentials by host, so mismatches are unlikely in
+     *   practice — but callers that set `CredentialId` programmatically must
+     *   ensure coherence themselves.
+     *   See {@link resolveCredential} for the full security note.
+     * @remarks **Credential success logging:** After a successful credential-based
+     *   clone (`credential !== null`), a `Source: 'credentials'`, `Severity: 'info'`
+     *   log entry is written. This allows `checkWorkspaceHealth()` to suppress
+     *   stale `credential-missing` badges by inspecting the most recent entry per
+     *   repository.
      */
     async addRepositoryToProject(
         projectId: string,
@@ -122,7 +135,35 @@ export class RepositoryOrchestrator {
                     );
                 }
 
-                const cloneUrl = injectCredentials(repo.Url, this.config.gitCredentials ?? {});
+                const credentials = this.config.gitCredentials ?? [];
+                const credential = resolveCredential(repo.Url, credentials, repo.CredentialId);
+                const host = extractHost(repo.Url);
+
+                // When no credential resolves for an HTTPS URL, report a descriptive
+                // error rather than attempting an unauthenticated clone that would
+                // likely fail with an unhelpful git error message.
+                if (credential === null && host !== null) {
+                    const errorMessage =
+                        `Repository '${repo.Name}' requires a credential for host '${host}'. ` +
+                        `Please select a credential in the repository settings.`;
+                    this.errorLogManager?.append({
+                        Severity: 'error',
+                        Source: 'credentials',
+                        Operation: 'add-repository',
+                        Context: { ProjectId: projectId, WorkspaceId: workspaceId, RepositoryId: repositoryId },
+                        Message: errorMessage,
+                    });
+                    return {
+                        workspaceId,
+                        success: false,
+                        error: errorMessage,
+                    };
+                }
+
+                const cloneUrl = credential !== null
+                    ? injectCredentialToken(repo.Url, credential.token)
+                    : repo.Url;
+
                 const gitResult = await cloneRepository(cloneUrl, destination, {
                     depth: this.config.cloneDepth > 0 ? this.config.cloneDepth : undefined,
                     timeoutMs: CLONE_TIMEOUT_MS,
@@ -142,6 +183,18 @@ export class RepositoryOrchestrator {
                         success: false,
                         error: errorMessage,
                     };
+                }
+
+                // Write a credential success entry so that checkWorkspaceHealth()
+                // can suppress stale credential-missing badges for this repository.
+                if (credential !== null) {
+                    this.errorLogManager?.append({
+                        Severity: 'info',
+                        Source: 'credentials',
+                        Operation: 'add-repository',
+                        Context: { ProjectId: projectId, WorkspaceId: workspaceId, RepositoryId: repositoryId },
+                        Message: `Repository '${repo.Name}' cloned successfully using credential '${credential.label}'.`,
+                    });
                 }
 
                 return { workspaceId, success: true };

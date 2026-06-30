@@ -143,10 +143,14 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
 
+# Workflow Ledger temporary files
 /docs/agents/**/work.md
 /docs/agents/**/work/
 /docs/agents/**/audit.md
+/docs/agents/**/design-review.md
 /docs/agents/**/dependency-analysis.md
 /docs/agents/**/work-packages-draft.md
 /docs/agents/**/pipeline-configuration.md
+/docs/agents/**/.orchestrator-run.json
+
 /data/storage/
