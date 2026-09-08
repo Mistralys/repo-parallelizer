@@ -5,6 +5,11 @@
  * The overlay uses CSS classes defined in styles.css (`.modal-overlay`,
  * `.modal`, `.modal-title`, `.modal-body`, `.modal-actions`).
  *
+ * Built on the shared `modal-shell.js` primitive, which supplies the
+ * overlay/modal/ARIA DOM, focus trap, focus restoration, and
+ * Escape/backdrop-cancel wiring — see `repository-modal.js` for the other
+ * consumer of the same shell.
+ *
  * Usage:
  *   import { showConfirm } from './components/confirm-dialog.js';
  *
@@ -15,6 +20,8 @@
  *     // User clicked Cancel or pressed Escape → abort
  *   }
  */
+
+import { createModalShell } from './modal-shell.js';
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -34,23 +41,8 @@
 export function showConfirm(title, message) {
     return new Promise((resolve, reject) => {
         // ------------------------------------------------------------------
-        // Build DOM
+        // Build body/actions content (the shell builds overlay/modal/title)
         // ------------------------------------------------------------------
-        const overlay = document.createElement('div');
-        overlay.className = 'modal-overlay';
-        overlay.setAttribute('role', 'dialog');
-        overlay.setAttribute('aria-modal', 'true');
-        overlay.setAttribute('aria-labelledby', 'confirm-dialog-title');
-        overlay.setAttribute('aria-describedby', 'confirm-dialog-body');
-
-        const modal = document.createElement('div');
-        modal.className = 'modal';
-
-        const titleEl = document.createElement('h2');
-        titleEl.className = 'modal-title';
-        titleEl.id = 'confirm-dialog-title';
-        titleEl.textContent = title;
-
         const bodyEl = document.createElement('p');
         bodyEl.className = 'modal-body';
         bodyEl.id = 'confirm-dialog-body';
@@ -72,38 +64,27 @@ export function showConfirm(title, message) {
         actionsEl.appendChild(cancelBtn);
         actionsEl.appendChild(confirmBtn);
 
-        modal.appendChild(titleEl);
-        modal.appendChild(bodyEl);
-        modal.appendChild(actionsEl);
-        overlay.appendChild(modal);
-
         // ------------------------------------------------------------------
-        // Helpers
+        // Shell — Escape/backdrop-cancel, focus trap, focus restoration
         // ------------------------------------------------------------------
-
-        /** Remove the overlay from the DOM and detach keyboard listener. */
-        function cleanup() {
-            document.removeEventListener('keydown', onKeydown);
-            if (overlay.parentNode) {
-                overlay.parentNode.removeChild(overlay);
-            }
-        }
-
-        function onConfirm() {
-            cleanup();
-            resolve();
-        }
-
         function onCancel() {
-            cleanup();
+            shell.close();
             reject(new Error('User cancelled'));
         }
 
-        /** Close on Escape key. */
-        function onKeydown(event) {
-            if (event.key === 'Escape') {
-                onCancel();
-            }
+        const shell = createModalShell({
+            titleText: title,
+            ariaLabelledbyId: 'confirm-dialog-title',
+            ariaDescribedbyId: 'confirm-dialog-body',
+            onCancel,
+        });
+
+        shell.modal.appendChild(bodyEl);
+        shell.modal.appendChild(actionsEl);
+
+        function onConfirm() {
+            shell.close();
+            resolve();
         }
 
         // ------------------------------------------------------------------
@@ -112,21 +93,12 @@ export function showConfirm(title, message) {
         confirmBtn.addEventListener('click', onConfirm);
         cancelBtn.addEventListener('click', onCancel);
 
-        // Click on the backdrop (overlay itself, not the modal) cancels.
-        overlay.addEventListener('click', (event) => {
-            if (event.target === overlay) {
-                onCancel();
-            }
-        });
-
-        document.addEventListener('keydown', onKeydown);
-
         // ------------------------------------------------------------------
         // Mount & focus
         // ------------------------------------------------------------------
-        document.body.appendChild(overlay);
-
-        // Move focus into the dialog for accessibility.
-        confirmBtn.focus();
+        // Confirm button (not Cancel or the dialog itself) receives initial
+        // focus, matching pre-refactor behavior.
+        shell.mount(confirmBtn);
     });
 }
+

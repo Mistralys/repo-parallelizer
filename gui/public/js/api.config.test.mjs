@@ -421,6 +421,78 @@ test('api.repositories.credentialOptions(id) throws when response is not ok', as
 });
 
 // ---------------------------------------------------------------------------
+// api.repositories.credentialOptionsForUrl()
+// ---------------------------------------------------------------------------
+
+test('api.repositories.credentialOptionsForUrl(url) sends GET /api/repositories/credential-options?url= URL-encoded', async () => {
+    nextResponse = {
+        status: 200,
+        body: { credentials: [], autoSelected: undefined },
+        contentType: 'application/json',
+    };
+
+    await api.repositories.credentialOptionsForUrl('https://github.com/org/repo.git');
+
+    assert.equal(calls.length, 1, 'exactly one fetch call expected');
+    assert.equal(calls[0].method, 'GET');
+    assert.equal(
+        calls[0].url,
+        `/api/repositories/credential-options?url=${encodeURIComponent('https://github.com/org/repo.git')}`,
+    );
+});
+
+test('api.repositories.credentialOptionsForUrl(url) transforms the real { credentials, autoSelected } wire shape into a flat array', async () => {
+    nextResponse = {
+        status: 200,
+        body: {
+            credentials: [
+                { id: 'github-personal', label: 'GitHub personal account', host: 'github.com', token: '***' },
+            ],
+            autoSelected: 'github-personal',
+        },
+        contentType: 'application/json',
+    };
+
+    const result = await api.repositories.credentialOptionsForUrl('https://github.com/org/repo.git');
+
+    assert.deepEqual(result, [
+        { credentialId: 'github-personal', label: 'GitHub personal account', host: 'github.com', auto: true },
+    ]);
+});
+
+test('api.repositories.credentialOptionsForUrl(url) marks no option as auto when autoSelected is absent', async () => {
+    nextResponse = {
+        status: 200,
+        body: {
+            credentials: [
+                { id: 'cred-1', label: 'One', host: 'github.com', token: '***' },
+                { id: 'cred-2', label: 'Two', host: 'github.com', token: '***' },
+            ],
+        },
+        contentType: 'application/json',
+    };
+
+    const result = await api.repositories.credentialOptionsForUrl('https://github.com/org/repo.git');
+
+    assert.deepEqual(result, [
+        { credentialId: 'cred-1', label: 'One', host: 'github.com', auto: false },
+        { credentialId: 'cred-2', label: 'Two', host: 'github.com', auto: false },
+    ]);
+});
+
+test('api.repositories.credentialOptionsForUrl(url) throws when response is not ok', async () => {
+    nextResponse = { status: 400, body: { error: 'url query parameter is required.' }, contentType: 'application/json' };
+
+    await assert.rejects(
+        () => api.repositories.credentialOptionsForUrl(''),
+        (err) => {
+            assert.ok(err instanceof Error, 'should throw an Error');
+            return true;
+        },
+    );
+});
+
+// ---------------------------------------------------------------------------
 // api.repositories.updateCredential()
 // ---------------------------------------------------------------------------
 
@@ -437,14 +509,14 @@ test('api.repositories.updateCredential(id, credentialId) sends PUT /api/reposit
     assert.deepEqual(result, expected);
 });
 
-test('api.repositories.updateCredential(id, "") sends empty credentialId to clear association', async () => {
-    nextResponse = { status: 200, body: { Id: 'repo-abc', CredentialId: '' }, contentType: 'application/json' };
+test('api.repositories.updateCredential(id, "") normalizes the empty string to null to clear association', async () => {
+    nextResponse = { status: 200, body: { Id: 'repo-abc', CredentialId: null }, contentType: 'application/json' };
 
     await api.repositories.updateCredential('repo-abc', '');
 
     assert.equal(calls[0].method, 'PUT');
     assert.equal(calls[0].url, '/api/repositories/repo-abc/credential');
-    assert.deepEqual(calls[0].body, { credentialId: '' });
+    assert.deepEqual(calls[0].body, { credentialId: null });
 });
 
 test('api.repositories.updateCredential(id, credentialId) URL-encodes the repository ID', async () => {

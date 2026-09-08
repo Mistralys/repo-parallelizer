@@ -158,11 +158,17 @@ export class RepositoryManager {
     }
 
     /**
-     * Updates the `Name` of an existing repository.
+     * Updates the `Name` of an existing repository, and optionally its `Url`.
      *
-     * @throws {Error} If no repository with the given ID exists.
+     * When `url` is provided, it is trimmed and any embedded credentials are
+     * stripped before storage (mirroring `add()`'s URL-handling pattern), and
+     * the cleaned URL is checked for duplicates against every other repository
+     * (self-excluded by `Id`).
+     *
+     * @throws {NotFoundError} If no repository with the given ID exists.
+     * @throws {Error} If the cleaned `url` duplicates another repository's URL.
      */
-    update(id: string, params: { name: string }): Repository {
+    update(id: string, params: { name: string; url?: string }): Repository {
         const store = this.load();
         const index = store.Repositories.findIndex((r) => r.Id === id);
 
@@ -170,9 +176,33 @@ export class RepositoryManager {
             throw new NotFoundError(`Cannot update: repository with ID "${id}" does not exist.`);
         }
 
-        store.Repositories[index] = { ...store.Repositories[index], Name: params.name };
+        let updated: Repository = { ...store.Repositories[index], Name: params.name };
+        let credentialsWereStripped = false;
+
+        if (params.url !== undefined) {
+            let cleanUrl = params.url.trim();
+            if (hasEmbeddedCredentials(cleanUrl)) {
+                cleanUrl = stripEmbeddedCredentials(cleanUrl);
+                credentialsWereStripped = true;
+            }
+
+            const duplicateUrl = store.Repositories.find((r) => r.Id !== id && r.Url === cleanUrl);
+            if (duplicateUrl) {
+                throw new Error(
+                    `A repository with URL "${redactUrl(cleanUrl)}" already exists (ID: "${duplicateUrl.Id}").`
+                );
+            }
+
+            updated = { ...updated, Url: cleanUrl };
+        }
+
+        store.Repositories[index] = updated;
         this.save(store);
-        return store.Repositories[index];
+
+        if (credentialsWereStripped) {
+            return { ...updated, credentialsStripped: true };
+        }
+        return updated;
     }
 
     /**

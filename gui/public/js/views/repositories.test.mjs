@@ -1,12 +1,16 @@
 /**
- * Unit tests for views/repositories.js — WP-004.
+ * Unit tests for views/repositories.js — WP-004, WP-008.
  *
  * Acceptance Criteria verified:
  *   AC1  — Each repository's Name column renders as a clickable <a> element.
  *   AC2  — Clicking a repository name navigates to #/repositories/:id
  *           (where :id is the repository's encoded ID).
- *   AC3  — The inline edit (Edit/Save/Cancel) behaviour on the Name cell
- *           continues to work correctly after the span→link refactor.
+ *   AC3  — The Edit button opens the repository modal (showRepositoryModal)
+ *           in edit mode, pre-filled with the row's data and a disabled ID
+ *           field; Cancel makes no update call; a successful Save calls
+ *           api.repositories.update({name, url}) and re-renders the table.
+ *   AC-Add — The "+ Add Repository" button opens the repository modal in
+ *           create mode; a successful create re-renders the table.
  *
  * Uses Node's built-in test runner with jsdom for a minimal DOM environment.
  * Run individually with:
@@ -63,15 +67,23 @@ const { api } = await import('../api.js');
 /** Tracks calls made to api.repositories.update. */
 const updateCalls = [];
 
+/** Tracks calls made to api.repositories.create. */
+const createCalls = [];
+
 api.repositories.list = async () => [
     { Id: REPO_ID, Name: REPO_NAME, Url: REPO_URL },
 ];
 api.repositories.update = async (id, data) => {
     updateCalls.push({ id, data });
-    return {};
+    return { Id: id, Name: data.name, Url: data.url };
 };
 api.repositories.delete = async () => ({});
-api.repositories.create = async () => ({});
+api.repositories.create = async (data) => {
+    createCalls.push(data);
+    return { Id: 'new-repo', Name: data.name || '', Url: data.url };
+};
+api.repositories.credentialOptionsForUrl = async () => [];
+api.repositories.updateCredential = async (id, credentialId) => ({ Id: id, CredentialId: credentialId || undefined });
 
 // ---------------------------------------------------------------------------
 // Import module under test
@@ -180,88 +192,145 @@ test('AC2 — Name link href encodes special characters in repo ID', async () =>
     }
 });
 
-test('AC3 — Entering edit mode hides the name link and shows the input', async () => {
+test('AC3 — Edit button opens the repository modal pre-filled with the row\'s data, ID field disabled', async () => {
     const container = await renderAndWait();
     try {
-        const nameCell  = container.querySelector('td.repo-name-cell');
-        const nameLink  = nameCell.querySelector('a.repo-name-display');
-        const nameInput = nameCell.querySelector('input.repo-name-input');
-        const editBtn   = container.querySelector('td.repo-actions-cell .btn-secondary');
+        const editBtn = container.querySelector('td.repo-actions-cell .btn-secondary');
+        assert.ok(editBtn, 'Edit button should exist');
 
-        assert.ok(nameLink,  'Name link should exist before edit');
-        assert.ok(nameInput, 'Name input should exist before edit');
-        assert.ok(editBtn,   'Edit button should exist');
-
-        // Initially: link visible, input hidden.
-        assert.strictEqual(nameLink.hidden,  false, 'Name link should be visible initially');
-        assert.strictEqual(nameInput.hidden, true,  'Name input should be hidden initially');
-
-        // Click Edit.
         editBtn.click();
-
-        assert.strictEqual(nameLink.hidden,  true,  'Name link should be hidden in edit mode');
-        assert.strictEqual(nameInput.hidden, false, 'Name input should be visible in edit mode');
-    } finally {
-        cleanupContainers();
-    }
-});
-
-test('AC3 — Cancelling edit restores the name link', async () => {
-    const container = await renderAndWait();
-    try {
-        const nameCell     = container.querySelector('td.repo-name-cell');
-        const nameLink     = nameCell.querySelector('a.repo-name-display');
-        const nameInput    = nameCell.querySelector('input.repo-name-input');
-        const actionsCell  = container.querySelector('td.repo-actions-cell');
-        const editBtn      = actionsCell.querySelector('.btn-secondary');
-
-        // Enter edit mode.
-        editBtn.click();
-        assert.strictEqual(nameLink.hidden,  true);
-        assert.strictEqual(nameInput.hidden, false);
-
-        // Click the Cancel button (the second .btn-secondary, now visible).
-        const cancelBtn = [...actionsCell.querySelectorAll('button')].find(
-            (btn) => btn.textContent === 'Cancel' && !btn.hidden,
-        );
-        assert.ok(cancelBtn, 'Cancel button should be visible in edit mode');
-        cancelBtn.click();
-
-        assert.strictEqual(nameLink.hidden,  false, 'Name link should be restored after cancel');
-        assert.strictEqual(nameInput.hidden, true,  'Name input should be hidden after cancel');
-    } finally {
-        cleanupContainers();
-    }
-});
-
-test('AC3 — Saving updates the name link text', async () => {
-    const container = await renderAndWait();
-    try {
-        const nameCell    = container.querySelector('td.repo-name-cell');
-        const nameLink    = nameCell.querySelector('a.repo-name-display');
-        const nameInput   = nameCell.querySelector('input.repo-name-input');
-        const actionsCell = container.querySelector('td.repo-actions-cell');
-        const editBtn     = actionsCell.querySelector('.btn-secondary');
-
-        // Enter edit mode.
-        editBtn.click();
-
-        // Change the value.
-        nameInput.value = 'Updated Name';
-
-        // Click Save.
-        const saveBtn = [...actionsCell.querySelectorAll('button')].find(
-            (btn) => btn.textContent === 'Save' && !btn.hidden,
-        );
-        assert.ok(saveBtn, 'Save button should be visible in edit mode');
-        saveBtn.click();
-
-        // Flush micro-tasks for async save handler.
         await new Promise((resolve) => setTimeout(resolve, 0));
 
-        assert.strictEqual(nameLink.textContent, 'Updated Name', 'Name link text should update after save');
-        assert.strictEqual(nameLink.hidden,  false, 'Name link should be visible after save');
-        assert.strictEqual(nameInput.hidden, true,  'Name input should be hidden after save');
+        const modal = document.querySelector('.modal--form');
+        assert.ok(modal, 'Repository modal should be open');
+
+        const urlInput  = modal.querySelector('[name="url"]');
+        const nameInput = modal.querySelector('[name="name"]');
+        const idInput   = modal.querySelector('[name="id"]');
+
+        assert.equal(urlInput.value, REPO_URL);
+        assert.equal(nameInput.value, REPO_NAME);
+        assert.equal(idInput.value, REPO_ID);
+        assert.equal(idInput.disabled, true, 'ID field should be disabled in edit mode');
+
+        const cancelBtn = [...modal.querySelectorAll('.modal-actions button')].find((b) => b.textContent === 'Cancel');
+        cancelBtn.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+        cleanupContainers();
+    }
+});
+
+test('AC3 — Cancelling the edit modal makes no api.repositories.update call, and the table is left unchanged', async () => {
+    updateCalls.length = 0;
+    const container = await renderAndWait();
+    try {
+        const editBtn = container.querySelector('td.repo-actions-cell .btn-secondary');
+        editBtn.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const modal = document.querySelector('.modal--form');
+        assert.ok(modal, 'Repository modal should be open');
+
+        const cancelBtn = [...modal.querySelectorAll('.modal-actions button')].find((b) => b.textContent === 'Cancel');
+        cancelBtn.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.equal(updateCalls.length, 0, 'Cancel should not call api.repositories.update');
+        assert.equal(document.querySelector('.modal--form'), null, 'modal should be closed after Cancel');
+
+        const nameLink = container.querySelector('td.repo-name-cell a.repo-name-display');
+        assert.equal(nameLink.textContent, REPO_NAME, 'table row should be left unchanged');
+    } finally {
+        cleanupContainers();
+    }
+});
+
+test('AC3 — Saving the edit modal calls api.repositories.update(id, { name, url }) and re-renders the table', async () => {
+    updateCalls.length = 0;
+    const container = await renderAndWait();
+    try {
+        const editBtn = container.querySelector('td.repo-actions-cell .btn-secondary');
+        editBtn.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const modal = document.querySelector('.modal--form');
+        const nameInput = modal.querySelector('[name="name"]');
+        nameInput.value = 'Updated Name';
+
+        const submitBtn = [...modal.querySelectorAll('.modal-actions button')].find((b) => b.type === 'submit');
+        submitBtn.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.equal(updateCalls.length, 1);
+        assert.equal(updateCalls[0].id, REPO_ID);
+        assert.deepEqual(updateCalls[0].data, { name: 'Updated Name', url: REPO_URL });
+
+        assert.equal(document.querySelector('.modal--form'), null, 'modal should close after a successful save');
+
+        // Flush the renderRepoTable() re-render triggered by onChanged().
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const table = container.querySelector('table.repositories-table');
+        assert.ok(table, 'table should still be present after re-render');
+    } finally {
+        cleanupContainers();
+    }
+});
+
+// ---------------------------------------------------------------------------
+// AC-Add — "+ Add Repository" button (create-mode modal)
+// ---------------------------------------------------------------------------
+
+test('AC-Add — clicking "+ Add Repository" opens the repository modal in create mode; a successful create re-renders the table', async () => {
+    createCalls.length = 0;
+    const container = await renderAndWait();
+    try {
+        const addBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '+ Add Repository');
+        assert.ok(addBtn, '"+ Add Repository" button should exist');
+
+        addBtn.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const modal = document.querySelector('.modal--form');
+        assert.ok(modal, 'Repository modal should open in create mode');
+
+        const idInput = modal.querySelector('[name="id"]');
+        assert.equal(idInput.disabled, false, 'ID field should be editable in create mode');
+
+        modal.querySelector('[name="url"]').value = 'https://github.com/org/new-repo.git';
+
+        const submitBtn = [...modal.querySelectorAll('.modal-actions button')].find((b) => b.type === 'submit');
+        submitBtn.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.equal(createCalls.length, 1);
+        assert.equal(createCalls[0].url, 'https://github.com/org/new-repo.git');
+        assert.equal(document.querySelector('.modal--form'), null, 'modal should close after a successful create');
+
+        // Flush the renderRepoTable() re-render triggered by onSuccess().
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const table = container.querySelector('table.repositories-table');
+        assert.ok(table, 'table should still be present after re-render');
+    } finally {
+        cleanupContainers();
+    }
+});
+
+test('AC-Add — Cancelling the create modal makes no api.repositories.create call', async () => {
+    createCalls.length = 0;
+    const container = await renderAndWait();
+    try {
+        const addBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '+ Add Repository');
+        addBtn.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const modal = document.querySelector('.modal--form');
+        const cancelBtn = [...modal.querySelectorAll('.modal-actions button')].find((b) => b.textContent === 'Cancel');
+        cancelBtn.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.equal(createCalls.length, 0, 'Cancel should not call api.repositories.create');
+        assert.equal(document.querySelector('.modal--form'), null, 'modal should be closed after Cancel');
     } finally {
         cleanupContainers();
     }

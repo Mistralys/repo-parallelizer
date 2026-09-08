@@ -264,7 +264,7 @@ class RepositoryManager {
     getById(id: string): Repository | undefined
     exists(id: string): boolean
     add(params: { url: string; name?: string; id?: string }): Repository
-    update(id: string, params: { name: string }): Repository
+    update(id: string, params: { name: string; url?: string }): Repository
     remove(id: string): void
     updateCredential(id: string, credentialId: string | null): Repository
     touchRefreshTimestamp(id: string): Repository
@@ -272,6 +272,8 @@ class RepositoryManager {
 ```
 
 > **`updateCredential()`:** Associates or removes a named credential on a repository. Pass a `credentialId` string to pin the repository to a specific `GitCredentialEntry`; pass `null` to clear the association and revert to host-based auto-selection at runtime. When `null` is passed, the `CredentialId` key is removed entirely from `repositories.json` (not set to `undefined`) so the JSON remains clean. Throws `NotFoundError` if the repository ID does not exist. See `Repository.CredentialId` for the auto-selection fallback behaviour.
+
+> **`update()`'s optional `url`:** When `url` is provided, it is trimmed and any embedded credentials are stripped (mirroring `add()`'s URL-handling pattern), then checked for duplicates against every other repository's `Url`, self-excluded by `Id`. Returns the repository spread with `credentialsStripped: true` when stripping occurred (transient, not persisted). Throws `NotFoundError` if the ID does not exist, or a plain `Error` if the cleaned URL duplicates another repository's URL. When `url` is omitted, behavior is unchanged (name-only update). **Known gap:** an empty or whitespace-only `url` is silently persisted with no rejection, unlike `add()`'s empty-slug guard — callers passing raw form input should validate non-empty before calling.
 
 ### Project
 
@@ -859,6 +861,30 @@ Vanilla JS HTTP client for the SPA frontend. All methods return Promises and thr
 
 **Import:** `import { api } from './api.js';`
 
+### `api.repositories`
+
+Credential-matching and association methods for the create/edit repository modal. (Pre-existing `api.repositories` methods such as `list()`, `get()`, `create()`, `update()`, `delete()` are not documented here — out of scope for this section.)
+
+```js
+// Fetch credentials compatible with an arbitrary (not-yet-registered or
+// in-edit) repository URL's hostname, without requiring an existing
+// repository record. Transforms the server's { credentials, autoSelected }
+// response into a flat array.
+// url: string — the Git remote URL to match credentials against
+// Returns: Promise<Array<{ credentialId: string, label: string, host: string, auto: boolean }>>
+api.repositories.credentialOptionsForUrl(url)
+
+// Associate (or disassociate) a credential with a repository.
+// id: string — repository ID
+// credentialId: string — the credential ID to associate, or '' to clear
+//   (normalized to `null` before being sent — the server expects `null`,
+//   not '', to clear the association)
+// Returns: Promise<Object> — the updated repository
+api.repositories.updateCredential(id, credentialId)
+```
+
+> **`updateCredential` caller contract:** `credentialId` must always be a `string`. Passing `undefined` causes `JSON.stringify` to silently strip the key from the request body, producing an empty `{}` payload instead of `{ credentialId: null }`. Always pass `''` when the intent is to clear the association.
+
 ### `api.config.credentials`
 
 Manages named git credentials. Each credential has a unique `id`, a human-readable `label`, a `host`, and a `token`. All tokens are **always returned masked** by the API (e.g. `****abc1`) — the plaintext token is never surfaced in any response.
@@ -929,6 +955,63 @@ api.config.notesDisplay.set(data)
 | `notesColumns` | `number` | `[1, 6]` | `2` | Number of columns in the notes view grid. |
 
 **Validation:** `set()` rejects with HTTP 400 when a provided field is non-numeric, non-integer, or outside its allowed range. Omitting a field leaves its current value unchanged. An empty body `{}` is valid and returns the current settings unchanged.
+
+---
+
+## GUI Components (`gui/public/js/components/`)
+
+### `createModalShell` (`components/modal-shell.js`)
+
+Shared overlay/modal DOM construction, ARIA wiring, Escape/backdrop-cancel handling, Tab/Shift+Tab focus trap, focus restoration, and busy-gating primitive used by every modal dialog (`confirm-dialog.js`; future modal consumers build on it too).
+
+```js
+import { createModalShell } from './components/modal-shell.js';
+
+// options: {
+//   titleText: string,             — text shown in the modal's title heading
+//   ariaLabelledbyId: string,      — id applied to the title heading and referenced by aria-labelledby
+//   ariaDescribedbyId?: string,    — id referenced by aria-describedby, when the caller has a description element
+//   className?: string,           — additional class applied to the .modal element alongside the base 'modal' class
+//   onCancel: () => void,         — invoked on Escape or backdrop click (while not busy)
+// }
+// Returns: {
+//   overlay: HTMLDivElement,             — the .modal-overlay element (not yet attached to the DOM)
+//   modal: HTMLDivElement,               — the .modal element, already appended to overlay; callers append their own body/actions content here
+//   mount: (initialFocusEl?: HTMLElement) => void,  — attaches overlay to document.body, wires listeners, and moves focus
+//   close: () => void,                   — detaches overlay, removes listeners, and restores focus to the pre-open element
+//   setBusy: (busy: boolean) => void,    — toggles whether Escape/backdrop-cancel are currently no-ops
+// }
+const shell = createModalShell({ titleText, ariaLabelledbyId, ariaDescribedbyId, className, onCancel });
+shell.modal.appendChild(bodyEl);
+shell.mount(initialFocusEl);
+// … later, on submit or successful confirm:
+shell.close();
+```
+
+> **Caller responsibility:** the shell has no knowledge of which buttons a caller built — callers remain responsible for disabling their own Confirm/Cancel/Submit buttons in response to `setBusy()`.
+
+### `showRepositoryModal` (`components/repository-modal.js`)
+
+Create/edit modal for a repository. A single implementation serves both flows since they share all four fields (URL, Name, ID, Credential), differing only in pre-fill values and which fields are disabled. Built on `createModalShell` with `className: 'modal--form'`.
+
+```js
+import { showRepositoryModal } from './components/repository-modal.js';
+
+// config: {
+//   mode: 'create'|'edit',
+//   repo?: { id, name, url, credentialId? },  — required (and only used) in 'edit' mode
+// }
+// Returns: Promise<Repository>  — normalised, saved repository;
+//   rejects with Error('User cancelled') on Cancel/Escape/backdrop-click.
+const repo = await showRepositoryModal({ mode: 'create' });
+const repo = await showRepositoryModal({ mode: 'edit', repo: existingRepo });
+```
+
+- URL is required and editable in both modes; Name is optional and editable in both modes.
+- ID is editable in create mode; disabled and excluded from the edit-mode `update()` payload.
+- Credential is a `<select>` repopulated after every `api.repositories.credentialOptionsForUrl()` fetch, selecting: the stored credential ID when still present among the options, else the single option flagged `auto: true` when exactly one exists, else `''` (None).
+- Edit mode fetches credential options once on mount (keyed by `repo.url`); create mode skips the initial fetch. Both modes debounce (~400ms) a re-fetch on URL-field `input` events.
+- Submit: create mode calls `create()` then `updateCredential()` when a credential is selected; edit mode calls `update(repo.id, { name, url })` then `updateCredential()` only when the selection differs from `repo.credentialId ?? ''`. A rejected `updateCredential()` still resolves the Promise with the pre-credential-update repository (with an error toast); a rejected primary call re-enables all controls, shows a toast, and keeps the modal open.
 
 ---
 

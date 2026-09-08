@@ -147,7 +147,7 @@ const repositories = {
     /**
      * Update a repository's metadata.
      * @param {string} id
-     * @param {{ name: string }} data
+     * @param {{ name?: string, url?: string }} data - `url` is optional; when omitted, the repository's URL is left unchanged.
      * @returns {Promise<Object>}
      */
     update(id, data) {
@@ -188,13 +188,37 @@ const repositories = {
     },
 
     /**
+     * Fetch the list of credentials that can be associated with an arbitrary
+     * (not-yet-registered or in-edit) repository URL.
+     *
+     * Returns all credentials whose host matches the URL's hostname, plus an
+     * `autoSelected` credential ID when exactly one matches. Used by the
+     * create/edit repository modal to populate the credential selector before
+     * a repository exists, or live as the URL field is edited.
+     *
+     * @param {string} url - The Git remote URL to match credentials against.
+     * @returns {Promise<Array<{ credentialId: string, label: string, host: string, auto: boolean }>>}
+     */
+    credentialOptionsForUrl(url) {
+        return request('GET', `/api/repositories/credential-options?url=${encodeURIComponent(url)}`)
+            .then(({ credentials, autoSelected }) => credentials.map((c) => ({
+                credentialId: c.id,
+                label: c.label,
+                host: c.host,
+                auto: c.id === autoSelected,
+            })));
+    },
+
+    /**
      * Associate (or disassociate) a credential with a repository.
      *
-     * Pass an empty string for `credentialId` to clear the association.
+     * Pass an empty string for `credentialId` to clear the association; it is
+     * normalized to `null` before being sent, which is what the server expects
+     * to clear the association (an empty string is rejected as invalid).
      *
      * **Important:** `credentialId` must be a string. Passing `undefined` will
      * cause `JSON.stringify` to silently omit the key from the request body,
-     * producing an empty `{}` payload instead of `{ credentialId: '' }`. Always
+     * producing an empty `{}` payload instead of `{ credentialId: null }`. Always
      * pass `''` (empty string) when the intent is to clear the association.
      *
      * @param {string} id             - Repository ID.
@@ -203,7 +227,9 @@ const repositories = {
      * @returns {Promise<Object>} The updated repository.
      */
     updateCredential(id, credentialId) {
-        return request('PUT', `/api/repositories/${encodeURIComponent(id)}/credential`, { credentialId });
+        return request('PUT', `/api/repositories/${encodeURIComponent(id)}/credential`, {
+            credentialId: credentialId === '' ? null : credentialId,
+        });
     },
 };
 

@@ -158,6 +158,76 @@ test('update throws NotFoundError for a non-existent ID', () => {
     }
 });
 
+// ─── update: url support ────────────────────────────────────────────────────
+
+test('update without a url param behaves identically to name-only update (regression)', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git', name: 'Old Name' });
+    const updated = manager.update('repo', { name: 'New Name' });
+    assert.strictEqual(updated.Name, 'New Name');
+    assert.strictEqual(updated.Url, 'https://github.com/user/repo.git');
+    assert.strictEqual(updated.credentialsStripped, undefined);
+});
+
+test('update with a url param persists the trimmed, cleaned URL', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git', name: 'Old Name' });
+    const updated = manager.update('repo', { name: 'Old Name', url: '  https://github.com/user/new-repo.git  ' });
+    assert.strictEqual(updated.Url, 'https://github.com/user/new-repo.git');
+    assert.strictEqual(manager.getById('repo')?.Url, 'https://github.com/user/new-repo.git');
+});
+
+test('update strips embedded credentials from a provided url and sets credentialsStripped', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git', name: 'Old Name' });
+    const updated = manager.update('repo', { name: 'Old Name', url: 'https://ghp_abc@github.com/user/repo.git' });
+    assert.strictEqual(updated.Url, 'https://github.com/user/repo.git');
+    assert.strictEqual(updated.credentialsStripped, true);
+});
+
+test('update does not set credentialsStripped when the provided url has no embedded credentials', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git', name: 'Old Name' });
+    const updated = manager.update('repo', { name: 'Old Name', url: 'https://github.com/user/new-repo.git' });
+    assert.strictEqual(updated.credentialsStripped, undefined);
+});
+
+test('update does not persist credentialsStripped to the store', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git', name: 'Old Name' });
+    manager.update('repo', { name: 'Old Name', url: 'https://ghp_abc@github.com/user/repo.git' });
+    const stored = manager.getById('repo');
+    assert.strictEqual(stored?.credentialsStripped, undefined);
+});
+
+test('update rejects with a plain Error when the cleaned url duplicates another repository\'s URL', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/alpha.git' });
+    manager.add({ url: 'https://github.com/user/beta.git' });
+    assert.throws(
+        () => manager.update('beta', { name: 'Beta', url: 'https://github.com/user/alpha.git' }),
+        /already exists/,
+    );
+});
+
+test('update allows setting a url identical to the record\'s own current URL (self-exclusion)', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git', name: 'Old Name' });
+    const updated = manager.update('repo', { name: 'New Name', url: 'https://github.com/user/repo.git' });
+    assert.strictEqual(updated.Url, 'https://github.com/user/repo.git');
+    assert.strictEqual(updated.Name, 'New Name');
+});
+
+test('update duplicate url check compares against the cleaned URL, not the raw input', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/alpha.git' });
+    manager.add({ url: 'https://github.com/user/beta.git' });
+    assert.throws(
+        () => manager.update('beta', { name: 'Beta', url: 'https://ghp_abc@github.com/user/alpha.git' }),
+        /already exists/,
+    );
+});
+
 // ─── remove ──────────────────────────────────────────────────────────────────
 
 test('remove deletes the repository from the store', () => {

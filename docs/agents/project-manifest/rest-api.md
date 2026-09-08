@@ -11,10 +11,33 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 | `GET` | `/api/repositories` | 200 | — | List all repositories. |
 | `GET` | `/api/repositories/:id` | 200 | 404 | Get a single repository by ID. |
 | `POST` | `/api/repositories` | 201 | 400 | Register a new repository. Body: `{ url, name?, id? }`. |
-| `PUT` | `/api/repositories/:id` | 200 | 404, 500 | Update repository metadata. Body: `{ name }`. |
+| `PUT` | `/api/repositories/:id` | 200 | 400, 404 | Update repository metadata. Body: `{ name, url? }`. |
 | `DELETE` | `/api/repositories/:id` | 204 | 404 | Delete a repository. |
 | `PUT` | `/api/repositories/:id/credential` | 200 | 400, 404 | Assign or clear a git credential for a repository. Body: `{ credentialId: string \| null }`. |
 | `GET` | `/api/repositories/:id/credential-options` | 200 | 404 | List credentials compatible with the repository's host, with tokens masked. |
+| `GET` | `/api/repositories/credential-options` | 200 | 400 | List credentials compatible with an arbitrary URL's host (no existing repository required), with tokens masked. Query: `?url=`. |
+
+### `PUT /api/repositories/:id` — Update Repository Metadata
+
+Updates a repository's `Name` and, optionally, its `Url`.
+
+**Request body:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | `string` | **Yes** | New display name. Must be a non-empty string after trimming. |
+| `url` | `string` | No | New remote URL. When provided, must be a non-empty string after trimming. Embedded credentials are stripped before storage, mirroring `POST /api/repositories`. The repository `Id` is never affected by a URL change. |
+
+**400 cases:**
+- `name` is missing, not a string, or empty after trimming.
+- `url` is present but not a string, or empty after trimming.
+- `url` (after credential-stripping) duplicates another repository's URL — the manager's error message is returned verbatim, e.g. `A repository with URL "https://github.com/org/repo.git" already exists (ID: "repo").`.
+
+**404:** repository not found.
+
+**200 Response:** the full updated `Repository` object.
+
+> **Host-incoherence auto-clear:** when `url` is provided and changes the repository's host (as computed by `extractHost()`), any existing `CredentialId` that no longer matches the new host is automatically cleared — the response reflects the repository with `CredentialId` removed. An audit log entry is appended with `Source: 'credential-audit'` and `Operation: 'clear-credential'` (same shape as `PUT /:id/credential`'s clear operation). The auto-clear is skipped when the URL edit keeps the same host, or when the new URL is an SSH URL (`extractHost()` returns `null`) — SSH auth is not handled by credential tokens, so the association is left untouched.
 
 ### `PUT /api/repositories/:id/credential` — Assign or Clear a Credential
 
@@ -88,6 +111,28 @@ Returns the subset of configured git credentials whose `host` matches the reposi
 > **SSH / non-HTTPS URLs:** repositories whose URL is not an HTTPS URL (e.g. `git@github.com:org/repo.git`) always return `{ "credentials": [] }` with no `autoSelected`. The host cannot be extracted from SSH URLs, so no credentials are ever shown for them.
 
 > **Known inconsistency — token mask format:** this endpoint masks tokens with the hardcoded string `"***"` (3 asterisks), while `GET /api/config/credentials` uses the `maskToken()` helper which produces `"****"` + last-4 characters (4 asterisks prefix, e.g. `"****abc1"`). Both surfaces guarantee the full token is never exposed; the format difference is a pre-existing inconsistency and will be unified in a future cleanup pass.
+
+---
+
+### `GET /api/repositories/credential-options` — List Compatible Credentials for an Arbitrary URL
+
+Returns the subset of configured git credentials whose `host` matches the hostname extracted from the `url` query parameter — without requiring an existing repository record. Used by the create/edit repository modal to match credentials live as the user types or edits a URL, before the repository exists (create mode) or as the URL field is edited in place (edit mode). Tokens are always masked before being sent to the client.
+
+**Query parameters:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `url` | `string` | **Yes** | The Git remote URL to match credentials against. `400` when missing or empty. |
+
+**400:** `url` query parameter is missing or an empty/whitespace-only string.
+
+**200 Response shape:** identical to `GET /:id/credential-options` above — `{ credentials: GitCredentialEntry[], autoSelected?: string }`.
+
+> **Shared computation:** this endpoint and `GET /:id/credential-options` both delegate the filter/mask/`autoSelected` computation to the same internal helper, so their behavior cannot drift apart. The only difference is how each derives the hostname to match against — from a repository's stored URL (`:id` variant) versus the raw `url` query parameter (this variant).
+
+> **SSH / non-HTTPS URLs:** as with the by-ID variant, a `url` from which no host can be extracted (e.g. an SSH URL) always returns `{ "credentials": [] }` with no `autoSelected`.
+
+> **Known inconsistency — token mask format:** same `"***"` masking convention and pre-existing inconsistency with `GET /api/config/credentials` noted above.
 
 ---
 

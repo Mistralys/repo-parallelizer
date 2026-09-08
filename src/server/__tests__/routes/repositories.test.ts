@@ -51,12 +51,22 @@ class MockRepositoryManager {
         return repo;
     }
 
-    update(id: string, params: { name: string }): Repository {
+    update(id: string, params: { name: string; url?: string }): Repository {
         const index = this.store.findIndex((r) => r.Id === id);
         if (index === -1) {
             throw new NotFoundError(`Cannot update: repository with ID "${id}" does not exist.`);
         }
-        this.store[index] = { ...this.store[index], Name: params.name };
+
+        let updated: Repository = { ...this.store[index], Name: params.name };
+        if (params.url !== undefined) {
+            const duplicateUrl = this.store.find((r) => r.Id !== id && r.Url === params.url);
+            if (duplicateUrl) {
+                throw new Error(`A repository with URL "${params.url}" already exists (ID: "${duplicateUrl.Id}").`);
+            }
+            updated = { ...updated, Url: params.url };
+        }
+
+        this.store[index] = updated;
         return this.store[index];
     }
 
@@ -327,6 +337,142 @@ test('PUT /api/repositories/:id: returns 400 when name field is missing', async 
     await new Promise<void>((resolve) => process.nextTick(resolve));
 
     assert.strictEqual(mock.statusCode, 400);
+});
+
+test('PUT /api/repositories/:id: returns 200 with both name and url persisted when url is provided', async () => {
+    const { router, manager } = buildSut();
+    manager.seed([{ Id: 'my-repo', Name: 'Old Name', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const payload = { name: 'New Name', url: 'https://gitlab.com/org/my-repo.git' };
+    const req = mockRequest('PUT', '/api/repositories/my-repo', payload);
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as Repository;
+    assert.strictEqual(updated.Name, 'New Name');
+    assert.strictEqual(updated.Url, 'https://gitlab.com/org/my-repo.git');
+});
+
+test('PUT /api/repositories/:id: returns 400 when url field is an empty string', async () => {
+    const { router, manager } = buildSut();
+    manager.seed([{ Id: 'my-repo', Name: 'Current Name', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const payload = { name: 'Current Name', url: '   ' };
+    const req = mockRequest('PUT', '/api/repositories/my-repo', payload);
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 400);
+});
+
+test('PUT /api/repositories/:id: returns 400 with the manager\'s error message when url duplicates another repository\'s URL', async () => {
+    const { router, manager } = buildSut();
+    manager.seed([
+        { Id: 'repo-a', Name: 'Repo A', Url: 'https://github.com/org/repo-a.git' },
+        { Id: 'repo-b', Name: 'Repo B', Url: 'https://github.com/org/repo-b.git' },
+    ]);
+
+    const payload = { name: 'Repo B', url: 'https://github.com/org/repo-a.git' };
+    const req = mockRequest('PUT', '/api/repositories/repo-b', payload);
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 400);
+    const parsed = JSON.parse(mock.body) as { error: string };
+    assert.match(parsed.error, /already exists/);
+});
+
+test('PUT /api/repositories/:id: clears CredentialId and appends a clear-credential audit entry when a url edit changes the host', async () => {
+    const credential: GitCredentialEntry = {
+        id: 'cred-1',
+        label: 'GitHub Personal',
+        host: 'github.com',
+        token: 'ghp_secret',
+    };
+    const errorLogManager = makeMockErrorLogManager();
+    const { router, manager } = buildSut(makeAppConfig([credential]), errorLogManager);
+    manager.seed([{
+        Id: 'my-repo',
+        Name: 'My Repo',
+        Url: 'https://github.com/org/my-repo.git',
+        CredentialId: 'cred-1',
+    }]);
+
+    const payload = { name: 'My Repo', url: 'https://gitlab.com/org/my-repo.git' };
+    const req = mockRequest('PUT', '/api/repositories/my-repo', payload);
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as Repository;
+    assert.strictEqual(updated.CredentialId, undefined);
+
+    assert.strictEqual(errorLogManager.appendedEntries.length, 1);
+    const entry = errorLogManager.appendedEntries[0];
+    assert.strictEqual(entry.Source, 'credential-audit');
+    assert.strictEqual(entry.Severity, 'audit');
+    assert.strictEqual(entry.Operation, 'clear-credential');
+});
+
+test('PUT /api/repositories/:id: leaves CredentialId untouched when a url edit keeps the same host', async () => {
+    const credential: GitCredentialEntry = {
+        id: 'cred-1',
+        label: 'GitHub Personal',
+        host: 'github.com',
+        token: 'ghp_secret',
+    };
+    const errorLogManager = makeMockErrorLogManager();
+    const { router, manager } = buildSut(makeAppConfig([credential]), errorLogManager);
+    manager.seed([{
+        Id: 'my-repo',
+        Name: 'My Repo',
+        Url: 'https://github.com/org/my-repo.git',
+        CredentialId: 'cred-1',
+    }]);
+
+    const payload = { name: 'My Repo', url: 'https://github.com/org/my-repo-renamed.git' };
+    const req = mockRequest('PUT', '/api/repositories/my-repo', payload);
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as Repository;
+    assert.strictEqual(updated.CredentialId, 'cred-1');
+    assert.strictEqual(errorLogManager.appendedEntries.length, 0);
+});
+
+test('PUT /api/repositories/:id: leaves CredentialId untouched when a url edit resolves to an SSH URL (null host)', async () => {
+    const credential: GitCredentialEntry = {
+        id: 'cred-1',
+        label: 'GitHub Personal',
+        host: 'github.com',
+        token: 'ghp_secret',
+    };
+    const errorLogManager = makeMockErrorLogManager();
+    const { router, manager } = buildSut(makeAppConfig([credential]), errorLogManager);
+    manager.seed([{
+        Id: 'my-repo',
+        Name: 'My Repo',
+        Url: 'https://github.com/org/my-repo.git',
+        CredentialId: 'cred-1',
+    }]);
+
+    const payload = { name: 'My Repo', url: 'git@github.com:org/my-repo.git' };
+    const req = mockRequest('PUT', '/api/repositories/my-repo', payload);
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as Repository;
+    assert.strictEqual(updated.CredentialId, 'cred-1');
+    assert.strictEqual(errorLogManager.appendedEntries.length, 0);
 });
 
 // ---------------------------------------------------------------------------
@@ -634,6 +780,147 @@ test('GET /api/repositories/:id/credential-options: returns 404 when repository 
     assert.strictEqual(mock.statusCode, 404);
     const parsed = JSON.parse(mock.body) as { error: string };
     assert.ok(typeof parsed.error === 'string');
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/repositories/credential-options?url= — list matching credentials for
+// an arbitrary URL, without requiring an existing repository record (WP-002)
+// ---------------------------------------------------------------------------
+
+test('GET /api/repositories/credential-options: returns only credentials matching the URL host, with tokens masked', () => {
+    const githubCred: GitCredentialEntry = {
+        id: 'cred-github',
+        label: 'GitHub',
+        host: 'github.com',
+        token: 'ghp_secret',
+    };
+    const gitlabCred: GitCredentialEntry = {
+        id: 'cred-gitlab',
+        label: 'GitLab',
+        host: 'gitlab.com',
+        token: 'glpat_secret',
+    };
+    const { router } = buildSut(makeAppConfig([githubCred, gitlabCred]));
+
+    const req = mockRequest('GET', '/api/repositories/credential-options?url=' + encodeURIComponent('https://github.com/org/my-repo.git'));
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { credentials: GitCredentialEntry[]; autoSelected?: string };
+    assert.strictEqual(body.credentials.length, 1);
+    assert.strictEqual(body.credentials[0].id, 'cred-github');
+    assert.strictEqual(body.credentials[0].token, '***', 'token must be masked');
+});
+
+test('GET /api/repositories/credential-options: includes autoSelected when exactly one credential matches the host', () => {
+    const cred: GitCredentialEntry = {
+        id: 'cred-1',
+        label: 'My Cred',
+        host: 'github.com',
+        token: 'secret',
+    };
+    const { router } = buildSut(makeAppConfig([cred]));
+
+    const req = mockRequest('GET', '/api/repositories/credential-options?url=' + encodeURIComponent('https://github.com/org/my-repo.git'));
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { credentials: GitCredentialEntry[]; autoSelected?: string };
+    assert.strictEqual(body.autoSelected, 'cred-1');
+});
+
+test('GET /api/repositories/credential-options: omits autoSelected when zero credentials match the host', () => {
+    const cred: GitCredentialEntry = {
+        id: 'cred-gitlab',
+        label: 'GitLab',
+        host: 'gitlab.com',
+        token: 'secret',
+    };
+    const { router } = buildSut(makeAppConfig([cred]));
+
+    const req = mockRequest('GET', '/api/repositories/credential-options?url=' + encodeURIComponent('https://github.com/org/my-repo.git'));
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { credentials: GitCredentialEntry[]; autoSelected?: string };
+    assert.strictEqual(body.credentials.length, 0);
+    assert.strictEqual(body.autoSelected, undefined);
+});
+
+test('GET /api/repositories/credential-options: omits autoSelected when multiple credentials match the host', () => {
+    const cred1: GitCredentialEntry = { id: 'cred-a', label: 'Account A', host: 'github.com', token: 'secret-a' };
+    const cred2: GitCredentialEntry = { id: 'cred-b', label: 'Account B', host: 'github.com', token: 'secret-b' };
+    const { router } = buildSut(makeAppConfig([cred1, cred2]));
+
+    const req = mockRequest('GET', '/api/repositories/credential-options?url=' + encodeURIComponent('https://github.com/org/my-repo.git'));
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { credentials: GitCredentialEntry[]; autoSelected?: string };
+    assert.strictEqual(body.credentials.length, 2);
+    assert.strictEqual(body.autoSelected, undefined, 'autoSelected must be absent when multiple credentials match');
+});
+
+test('GET /api/repositories/credential-options: returns 400 when url query parameter is missing', () => {
+    const { router } = buildSut(makeAppConfig([]));
+
+    const req = mockRequest('GET', '/api/repositories/credential-options');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 400);
+    const parsed = JSON.parse(mock.body) as { error: string };
+    assert.ok(typeof parsed.error === 'string');
+});
+
+test('GET /api/repositories/credential-options: returns 400 when url query parameter is an empty string', () => {
+    const { router } = buildSut(makeAppConfig([]));
+
+    const req = mockRequest('GET', '/api/repositories/credential-options?url=%20%20');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 400);
+});
+
+test('GET /api/repositories/credential-options: does not require an existing repository record (no 404 for an unregistered URL)', () => {
+    const cred: GitCredentialEntry = {
+        id: 'cred-1',
+        label: 'My Cred',
+        host: 'github.com',
+        token: 'secret',
+    };
+    const { router } = buildSut(makeAppConfig([cred]));
+
+    // No repository is seeded — the URL does not belong to any existing record.
+    const req = mockRequest('GET', '/api/repositories/credential-options?url=' + encodeURIComponent('https://github.com/org/brand-new-repo.git'));
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { credentials: GitCredentialEntry[]; autoSelected?: string };
+    assert.strictEqual(body.autoSelected, 'cred-1');
+});
+
+test('GET /api/repositories/credential-options: is not shadowed by GET /api/repositories/:id (registration-order regression)', () => {
+    const { router, manager } = buildSut(makeAppConfig([]));
+    // Seed a repository whose ID happens to equal the static route's last segment,
+    // to prove the static route is matched first rather than falling through to /:id.
+    manager.seed([{ Id: 'credential-options', Name: 'Decoy', Url: 'https://example.com/decoy.git' }]);
+
+    const req = mockRequest('GET', '/api/repositories/credential-options?url=' + encodeURIComponent('https://github.com/org/repo.git'));
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { credentials: GitCredentialEntry[]; autoSelected?: string };
+    // The by-ID handler would have returned the seeded "Decoy" repository object,
+    // not a { credentials, autoSelected? } shape.
+    assert.ok(Array.isArray(body.credentials), 'response must be the credential-options shape, not a Repository');
 });
 
 // ---------------------------------------------------------------------------
