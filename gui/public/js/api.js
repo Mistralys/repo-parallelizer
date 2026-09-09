@@ -176,15 +176,29 @@ const repositories = {
     /**
      * Fetch the list of credentials that can be associated with a repository.
      *
-     * Returns "None" (empty credentialId) plus all credentials whose host
-     * matches the repository's URL hostname. Used to populate the credential
-     * selector dropdown on the repository detail view.
+     * The server returns `{ credentials: GitCredentialEntry[], autoSelected?: string }`.
+     * This method transforms that into the array shape `{ credentialId, label, host, auto }`
+     * expected by the GUI's credential-selector components.
+     *
+     * `auto` is `true` only on the entry whose `id` matches `autoSelected` (i.e. exactly
+     * one credential matches the repository's host). When multiple credentials match, no
+     * entry has `auto: true`.
      *
      * @param {string} id - Repository ID.
      * @returns {Promise<Array<{ credentialId: string, label: string, host: string, auto: boolean }>>}
      */
     credentialOptions(id) {
-        return request('GET', `/api/repositories/${encodeURIComponent(id)}/credential-options`);
+        return request('GET', `/api/repositories/${encodeURIComponent(id)}/credential-options`)
+            .then((response) => {
+                const creds       = Array.isArray(response?.credentials) ? response.credentials : [];
+                const autoSelected = response?.autoSelected;
+                return creds.map((c) => ({
+                    credentialId: c.id,
+                    label:        c.label,
+                    host:         c.host,
+                    auto:         c.id === autoSelected,
+                }));
+            });
     },
 
     /**
@@ -682,10 +696,9 @@ const config = {
          * Update an existing credential by ID.
          *
          * @param {string} id   - The credential ID to update.
-         * @param {{ label?: string, token?: string }} data - Fields to update.
-         *   Omit `token` (or leave it as an empty string) to leave the existing
-         *   server-side token unchanged — the server retains the current token
-         *   when no `token` key is present in the request body.
+         * @param {{ label: string, host?: string, token?: string }} data - Fields to update.
+         *   Omit `host` to keep the existing host unchanged.
+         *   Omit `token` (or leave it as an empty string) to keep the existing token unchanged.
          * @returns {Promise<Array<{ id: string, label: string, host: string, maskedToken: string }>>} Updated credentials list.
          */
         update(id, data) {

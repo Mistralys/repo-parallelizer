@@ -347,19 +347,19 @@ Manage named git credential entries stored in the `gitCredentials` array within 
 | Method | Path | Success | Error Codes | Description |
 |---|---|---|---|---|
 | `GET` | `/api/config/credentials` | 200 | — | List all configured credentials with masked tokens. |
-| `PUT` | `/api/config/credentials` | 200 | 400 | Add or update a single credential entry. Body: `{ id?, label, host, token }`. |
+| `PUT` | `/api/config/credentials` | 200 | 400 | Add or update a single credential entry. Body: `{ id?, label, host?, token? }`. |
 | `DELETE` | `/api/config/credentials/:id` | 200 | 404 | Remove a single entry by its `id`. |
 
 ### `PUT /api/config/credentials` — Request Body
 
 | Field | Type | Required | Description |
-|---|---|---|---|
-| `id` | `string` | No | Unique identifier for the entry. When omitted, an ID is auto-generated from `label` as a kebab-case string (e.g. `"My Token"` → `"my-token"`). When the generated ID is already in use, a numeric suffix is appended (`-2`, `-3`, …). When provided and it matches an existing entry, that entry is updated in-place (upsert). When provided and no existing entry matches, a new entry is created with that ID. |
+|---|---|---|
+| `id` | `string` | No | Unique identifier for the entry. When omitted, an ID is auto-generated from `label` as a kebab-case string (e.g. `"My Token"` → `"my-token"`). When the generated ID is already in use, a numeric suffix is appended (`-2`, `-3`, …). When provided and it matches an existing entry, that entry is **updated in-place** (upsert) — on this update path `host` and `token` are optional and default to the existing stored values. When provided and no existing entry matches, a new entry is created with that ID (create-with-explicit-id path — `host` and `token` are required). |
 | `label` | `string` | **Yes** | Human-readable display name (e.g. `"GitHub personal account"`). Must be a non-empty string. |
-| `host` | `string` | **Yes** | Hostname this credential applies to (e.g. `"github.com"`). Must be a non-empty string. Must not contain `/`, `\`, null bytes, or whitespace — these characters are rejected with HTTP 400. See [constraints § Hostname Format](constraints.md#hostname-format-host-field). |
-| `token` | `string` | **Yes** | Personal Access Token or other credential string. Must be a non-empty string. |
+| `host` | `string` | **Yes (create)** / No (update) | Hostname this credential applies to (e.g. `"github.com"`). Must be a non-empty string. Must not contain `/`, `\`, null bytes, or whitespace — these characters are rejected with HTTP 400. Omitting `host` on the update path retains the existing value. See [constraints § Hostname Format](constraints.md#hostname-format-host-field). |
+| `token` | `string` | **Yes (create)** / No (update) | Personal Access Token or other credential string. Must be a non-empty string. Omitting `token` on the update path retains the existing value. |
 
-**400 cases:** missing or invalid `label`, `host`, or `token`; `host` contains `/`, `\`, null bytes, or whitespace; `id` present but empty or not a string.
+**400 cases:** missing or invalid `label`; missing `host` or `token` on the create path; `host` contains `/`, `\`, null bytes, or whitespace; `id` present but empty or not a string.
 
 ### `GET /api/config/credentials` Response
 
@@ -374,14 +374,19 @@ Returns a `GitCredentialEntry[]` array with tokens masked. An empty array `[]` i
 
 ### `PUT /api/config/credentials` Request / Response
 
-**Request body (create — no `id`, auto-generates ID from label):**
+**Request body (create — no `id`, auto-generates ID from label; `host` and `token` required):**
 ```json
 { "label": "GitHub personal account", "host": "github.com", "token": "ghp_fulltoken" }
 ```
 
-**Request body (upsert — explicit `id` updates the matching entry in-place):**
+**Request body (upsert — explicit `id` updates the matching entry in-place; `host` and `token` optional):**
 ```json
 { "id": "github-personal", "label": "GitHub personal account", "host": "github.com", "token": "ghp_newtoken" }
+```
+
+**Request body (label-only update — retain existing host and token):**
+```json
+{ "id": "github-personal", "label": "My Renamed Token" }
 ```
 
 **Response** (full masked array after update):

@@ -388,7 +388,7 @@ test('PUT /api/config/credentials: returns 400 when label is missing', async () 
     assert.ok(body.error.includes('"label"'), 'error must mention field name');
 });
 
-test('PUT /api/config/credentials: returns 400 when host is missing', async () => {
+test('PUT /api/config/credentials: returns 400 when host is missing (create path — no id)', async () => {
     const configPath = makeConfigFile();
     const appConfig = makeAppConfig();
     const router = buildSut(appConfig, configPath);
@@ -404,7 +404,7 @@ test('PUT /api/config/credentials: returns 400 when host is missing', async () =
     assert.ok(body.error.includes('"host"'), 'error must mention field name');
 });
 
-test('PUT /api/config/credentials: returns 400 when token is missing', async () => {
+test('PUT /api/config/credentials: returns 400 when token is missing (create path — no id)', async () => {
     const configPath = makeConfigFile();
     const appConfig = makeAppConfig();
     const router = buildSut(appConfig, configPath);
@@ -418,6 +418,96 @@ test('PUT /api/config/credentials: returns 400 when token is missing', async () 
     assert.strictEqual(mock.statusCode, 400);
     const body = JSON.parse(mock.body) as { error: string };
     assert.ok(body.error.includes('"token"'), 'error must mention field name');
+});
+
+test('PUT /api/config/credentials: update path retains host when host is omitted', async () => {
+    const existingCred = makeCredential({ id: 'github-personal', label: 'GitHub Personal', host: 'github.com', token: 'ghp_old' });
+    const configPath = makeConfigFile({ gitCredentials: [existingCred] });
+    const appConfig = makeAppConfig({ gitCredentials: [existingCred] });
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/credentials', {
+        id: 'github-personal',
+        label: 'GitHub Personal Renamed',
+        token: 'ghp_new',
+    });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as GitCredentialEntry[];
+    assert.strictEqual(body.length, 1);
+    assert.strictEqual(body[0]?.host, 'github.com', 'host must be retained from existing entry');
+    assert.strictEqual(body[0]?.label, 'GitHub Personal Renamed');
+    assert.strictEqual(appConfig.gitCredentials?.[0]?.token, 'ghp_new');
+});
+
+test('PUT /api/config/credentials: update path retains token when token is omitted', async () => {
+    const existingCred = makeCredential({ id: 'github-personal', label: 'GitHub Personal', host: 'github.com', token: 'ghp_secret' });
+    const configPath = makeConfigFile({ gitCredentials: [existingCred] });
+    const appConfig = makeAppConfig({ gitCredentials: [existingCred] });
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/credentials', {
+        id: 'github-personal',
+        label: 'GitHub Personal Renamed',
+    });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as GitCredentialEntry[];
+    assert.strictEqual(body.length, 1);
+    assert.strictEqual(body[0]?.label, 'GitHub Personal Renamed');
+    assert.strictEqual(appConfig.gitCredentials?.[0]?.token, 'ghp_secret', 'token must be retained from existing entry');
+});
+
+test('PUT /api/config/credentials: update path retains both host and token when both are omitted', async () => {
+    const existingCred = makeCredential({ id: 'github-personal', label: 'GitHub Personal', host: 'github.com', token: 'ghp_secret' });
+    const configPath = makeConfigFile({ gitCredentials: [existingCred] });
+    const appConfig = makeAppConfig({ gitCredentials: [existingCred] });
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/credentials', {
+        id: 'github-personal',
+        label: 'Label Only Update',
+    });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as GitCredentialEntry[];
+    assert.strictEqual(body[0]?.host, 'github.com', 'host must be retained');
+    assert.strictEqual(appConfig.gitCredentials?.[0]?.token, 'ghp_secret', 'token must be retained');
+    assert.strictEqual(body[0]?.label, 'Label Only Update');
+});
+
+test('PUT /api/config/credentials: returns 400 when host is missing and id does not match any existing entry', async () => {
+    const existingCred = makeCredential({ id: 'other-cred', label: 'Other', host: 'gitlab.com', token: 'tok' });
+    const configPath = makeConfigFile({ gitCredentials: [existingCred] });
+    const appConfig = makeAppConfig({ gitCredentials: [existingCred] });
+    const router = buildSut(appConfig, configPath);
+
+    // id provided but no existing match → create path → host required
+    const req = mockRequest('PUT', '/api/config/credentials', {
+        id: 'new-explicit-id',
+        label: 'New Entry',
+        token: 'ghp_abc',
+    });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 400);
+    const body = JSON.parse(mock.body) as { error: string };
+    assert.ok(body.error.includes('"host"'), 'error must mention host');
 });
 
 test('PUT /api/config/credentials: returns 400 when id is provided but empty string', async () => {

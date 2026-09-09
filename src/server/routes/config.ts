@@ -132,10 +132,12 @@ export interface ConfigRoutesOptions {
  *
  * `GET` returns a `GitCredentialEntry[]` array with tokens masked (`****` + last 4 chars).
  *
- * `PUT` request body: `{ id?: string, label: string, host: string, token: string }`.
- * When `id` is omitted, an ID is auto-generated from `label` as a kebab-case string
- * with a numeric suffix (-2, -3, …) appended on collision.
- * When `id` matches an existing entry, that entry is updated in-place (upsert).
+ * `PUT` request body: `{ id?: string, label: string, host?: string, token?: string }`.
+ * When `id` is omitted (create): `host` and `token` are required; an ID is
+ * auto-generated from `label` as a kebab-case string with a numeric suffix
+ * (-2, -3, …) appended on collision.
+ * When `id` matches an existing entry (update): `host` and `token` are optional;
+ * omitting either retains the existing stored value. Only `label` is always required.
  * Response: the updated `GitCredentialEntry[]` array with tokens masked.
  *
  * `DELETE` response: the remaining `GitCredentialEntry[]` array with tokens masked
@@ -193,15 +195,16 @@ export function registerConfigRoutes(options: ConfigRoutesOptions): void {
     // ------------------------------------------------------------------
     // PUT /api/config/credentials — add or update a single entry
     //
-    // Request body: { id?: string, label: string, host: string, token: string }
+    // Request body: { id?: string, label: string, host?: string, token?: string }
     //
-    // - When `id` is omitted: auto-generates a kebab-case ID from `label`,
-    //   appending a numeric suffix (-2, -3, …) if needed to avoid collisions.
-    //   Always creates a new entry.
-    // - When `id` is provided and matches an existing entry: upserts (replaces)
-    //   the existing entry in-place.
-    // - When `id` is provided and does NOT match any existing entry: creates a
-    //   new entry with the given ID (after checking the ID is not already taken).
+    // - When `id` is omitted (create path): `host` and `token` are required.
+    //   Auto-generates a kebab-case ID from `label`, appending a numeric suffix
+    //   (-2, -3, …) if needed to avoid collisions.
+    // - When `id` is provided and matches an existing entry (update path):
+    //   `host` and `token` are optional — omitting them retains the existing
+    //   values. Only `label` is always required.
+    // - When `id` is provided and does NOT match any existing entry: treated as
+    //   a create with an explicit ID; `host` and `token` are required.
     //
     // Returns 400 when the resulting ID would collide with an existing entry
     // that is NOT the one being updated (duplicate-ID rejection).
@@ -231,29 +234,47 @@ export function registerConfigRoutes(options: ConfigRoutesOptions): void {
             token?: unknown;
         };
 
-        // Validate required string fields.
+        // Validate label — always required.
         if (typeof label !== 'string' || label.trim() === '') {
             sendError(res, 400, 'Missing or invalid field "label": must be a non-empty string.');
-            return;
-        }
-        if (typeof host !== 'string' || host.trim() === '') {
-            sendError(res, 400, 'Missing or invalid field "host": must be a non-empty string.');
-            return;
-        }
-        // Reject host values containing path separators, null bytes, or whitespace —
-        // a hostname should contain none of these characters.
-        if (/[/\\\0\s]/.test(host)) {
-            sendError(res, 400, 'Invalid field "host": must not contain /, \\, null bytes, or whitespace.');
-            return;
-        }
-        if (typeof token !== 'string' || token.trim() === '') {
-            sendError(res, 400, 'Missing or invalid field "token": must be a non-empty string.');
             return;
         }
 
         // Validate optional `id` field when provided.
         if (id !== undefined && (typeof id !== 'string' || id.trim() === '')) {
             sendError(res, 400, 'Field "id", when provided, must be a non-empty string.');
+            return;
+        }
+
+        const existingCredentials: GitCredentialEntry[] = appConfig.gitCredentials ?? [];
+
+        // Resolve the existing entry early — needed to determine whether host/token
+        // may be omitted (update path) or are required (create path).
+        let resolvedExistingIndex = -1;
+        let resolvedExistingEntry: GitCredentialEntry | undefined;
+        if (typeof id === 'string' && id.trim() !== '') {
+            const cleanIdEarly = id.trim();
+            resolvedExistingIndex = existingCredentials.findIndex((e) => e.id === cleanIdEarly);
+            if (resolvedExistingIndex !== -1) {
+                resolvedExistingEntry = existingCredentials[resolvedExistingIndex];
+            }
+        }
+        const isUpdatePath = resolvedExistingEntry !== undefined;
+
+        // Validate host: required for create, optional for update (retains existing value).
+        if (!isUpdatePath && (typeof host !== 'string' || host.trim() === '')) {
+            sendError(res, 400, 'Missing or invalid field "host": must be a non-empty string.');
+            return;
+        }
+        // Reject unsafe host values when host is explicitly provided.
+        if (typeof host === 'string' && host.trim() !== '' && /[/\\\0\s]/.test(host)) {
+            sendError(res, 400, 'Invalid field "host": must not contain /, \\, null bytes, or whitespace.');
+            return;
+        }
+
+        // Validate token: required for create, optional for update (retains existing value).
+        if (!isUpdatePath && (typeof token !== 'string' || token.trim() === '')) {
+            sendError(res, 400, 'Missing or invalid field "token": must be a non-empty string.');
             return;
         }
 
@@ -266,20 +287,23 @@ export function registerConfigRoutes(options: ConfigRoutesOptions): void {
             sendError(res, 400, `"label" exceeds maximum length of ${MAX_CREDENTIAL_LABEL_LENGTH} characters.`);
             return;
         }
-        if (host.trim().length > MAX_CREDENTIAL_HOST_LENGTH) {
+        if (typeof host === 'string' && host.trim().length > MAX_CREDENTIAL_HOST_LENGTH) {
             sendError(res, 400, `"host" exceeds maximum length of ${MAX_CREDENTIAL_HOST_LENGTH} characters.`);
             return;
         }
-        if (token.trim().length > MAX_CREDENTIAL_TOKEN_LENGTH) {
+        if (typeof token === 'string' && token.trim().length > MAX_CREDENTIAL_TOKEN_LENGTH) {
             sendError(res, 400, `"token" exceeds maximum length of ${MAX_CREDENTIAL_TOKEN_LENGTH} characters.`);
             return;
         }
 
         const cleanLabel = label.trim();
-        const cleanHost = host.trim();
-        const cleanToken = token.trim();
-
-        const existingCredentials: GitCredentialEntry[] = appConfig.gitCredentials ?? [];
+        // Use the provided value; on the update path fall back to the existing entry's value.
+        const cleanHost = (typeof host === 'string' && host.trim() !== '')
+            ? host.trim()
+            : resolvedExistingEntry!.host;
+        const cleanToken = (typeof token === 'string' && token.trim() !== '')
+            ? token.trim()
+            : resolvedExistingEntry!.token;
 
         let savedEntry: GitCredentialEntry;
         let auditOperation: string;
@@ -287,10 +311,10 @@ export function registerConfigRoutes(options: ConfigRoutesOptions): void {
         if (id !== undefined) {
             // --- Upsert path: id is explicitly provided ---
             const cleanId = (id as string).trim();
-            const existingIndex = existingCredentials.findIndex((e) => e.id === cleanId);
 
-            if (existingIndex === -1) {
+            if (resolvedExistingIndex === -1) {
                 // New entry with an explicit ID — no existing entry matches, so create.
+                // host and token were validated as required above (isUpdatePath === false).
                 savedEntry = { id: cleanId, label: cleanLabel, host: cleanHost, token: cleanToken };
                 appConfig.gitCredentials = [...existingCredentials, savedEntry];
                 auditOperation = 'create-credential';
@@ -298,7 +322,7 @@ export function registerConfigRoutes(options: ConfigRoutesOptions): void {
                 // Replace the existing entry at the same position.
                 savedEntry = { id: cleanId, label: cleanLabel, host: cleanHost, token: cleanToken };
                 const updated = [...existingCredentials];
-                updated[existingIndex] = savedEntry;
+                updated[resolvedExistingIndex] = savedEntry;
                 appConfig.gitCredentials = updated;
                 auditOperation = 'update-credential';
             }
