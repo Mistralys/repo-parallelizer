@@ -35,39 +35,33 @@ startServer(serverConfig)
 
 ```
 User → POST /api/projects { name, repositoryIds, description?, id? }
-  └→ ProjectOrchestrator.createProject()
-       └→ ProjectManager.create()             # Validate IDs, write project JSON + index
-            └→ Auto-creates STABLE workspace entry with current timestamp
-       └→ WorkspaceOrchestrator.createWorkspace("STABLE")
-            └→ For each repository (concurrent via Promise.all):
-                 cloneRepository(url, clonePath, { depth })
-            └→ generateWorkspaceFile()         # Write .code-workspace file
-       └→ Return OrchestrationResult (per-repo success/failure)
+  └→ ProjectManager.create()                  # Validate IDs, write project JSON + index
+       └→ Auto-creates STABLE workspace entry with current timestamp
+  └→ Return persisted ProjectData record
 ```
+
+> **Filesystem setup is separate:** `POST /api/projects` only persists the project record — it does not clone repositories or write workspace files. Call `POST /api/projects/:id/workspaces/:wid/setup` afterward to initialize the workspace on disk.
 
 ## 4. Add a Repository to a Project
 
 ```
 User → POST /api/projects/:id/repositories { repositoryId }
-  └→ RepositoryOrchestrator.addRepositoryToProject()
-       └→ ProjectManager.addRepository()      # Append repo ID to project data
-       └→ For each workspace in the project (concurrent):
-            cloneRepository(url, clonePath)    # Clone into each workspace dir
-            generateWorkspaceFile()            # Regenerate .code-workspace file
-       └→ Return AddRepositoryResult (per-workspace success/failure)
+  └→ ProjectManager.addRepository()           # Append repo ID to project data
+  └→ Return updated ProjectData record
 ```
+
+> **No clone or workspace regeneration here:** `POST .../repositories` only appends the repository ID to the project's data record. Cloning and workspace-file regeneration are performed by `RepositoryOrchestrator.addRepositoryToProject()`, which is invoked by a separate orchestration path (not by this REST endpoint).  
+> To clone the newly-added repository into existing workspaces after adding it, use the workspace setup endpoint for each workspace.
 
 ## 5. Create a Workspace
 
 ```
-User → POST /api/projects/:id/workspaces { id: workspaceId }
-  └→ WorkspaceOrchestrator.createWorkspace()
-       └→ WorkspaceManager.create()           # Validate ID, add workspace entry
-       └→ For each repository (concurrent via Promise.all):
-            cloneRepository(url, clonePath)    # Clone into workspace sub-directory
-       └→ generateWorkspaceFile()              # Write {project}-{workspace}.code-workspace
-       └→ Return OrchestrationResult
+User → POST /api/projects/:id/workspaces { workspaceId, description? }
+  └→ WorkspaceManager.create()                # Validate ID, add workspace entry
+  └→ Return persisted WorkspaceInfo record
 ```
+
+> **Filesystem setup is separate:** `POST /api/projects/:id/workspaces` only persists the workspace record. Call `POST /api/projects/:id/workspaces/:wid/setup` to clone repositories and generate the `.code-workspace` file on disk. That endpoint invokes `WorkspaceOrchestrator.createWorkspace()`, which runs the clones and generates the file.
 
 ## 6. Branch Switch (Multi-Repository)
 
@@ -79,7 +73,7 @@ User → POST /api/projects/:id/workspaces/:wid/branches/switch { assignments: {
               ├→ yes: switchBranch(repoPath, branchName)   # git checkout
               └→ no:  createBranch(repoPath, branchName)   # git checkout -b
             └→ On failure: scan stderr for conflict patterns
-       └→ WorkspaceManager.update() → set DateModified
+       └→ WorkspaceManager.update() → set DateModified  (only when at least one switch succeeded)
        └→ Return BranchSwitchResult { results: { [repoId]: { success, conflict, error? } } }
 ```
 
@@ -126,11 +120,7 @@ Browser → hash change (e.g. #/projects/my-app)
 ## 9. Credential-Bearing Git Operation (Private Repository)
 
 ```
-Orchestrator (future WP) receives a repo URL (e.g. https://github.com/org/private.git)
-  └→ hasEmbeddedCredentials(url)?
-       ├→ true:  URL already has credentials — decide: strip-and-reinject or reject
-       └→ false: proceed to injection
-  └→ extractHost(url)                          # → 'github.com'
+Orchestrator receives a repo URL (e.g. https://github.com/org/private.git)
   └→ resolveCredential(url, config.gitCredentials, repo.credentialId)?
        │  # Looks up GitCredentialEntry[] by credentialId, or auto-selects
        │  # the sole entry whose host matches extractHost(url)
@@ -149,7 +139,7 @@ Orchestrator (future WP) receives a repo URL (e.g. https://github.com/org/privat
 **Credential injection rules (standing constraints):**
 - `injectCredentialToken()` must only be called immediately before a git subprocess call — never stored or passed through API boundaries.
 - `stripEmbeddedCredentials()` must be applied to any `GitResult.stderr` and `Error.message` before the string is logged or returned in an API response.
-- `hasEmbeddedCredentials()` must be checked before calling `injectCredentialToken()` when the URL originates from user input.
+- **`hasEmbeddedCredentials()` pre-check requirement (constraint, not yet enforced):** When the URL may already carry embedded credentials (e.g. from user input), callers should invoke `hasEmbeddedCredentials(url)` before calling `resolveCredential()` + `injectCredentialToken()` and decide explicitly whether to strip and re-inject or reject. The active clone orchestrators (`WorkspaceOrchestrator`, `RepositoryOrchestrator`) currently skip this check and proceed directly to `resolveCredential()`.
 
 ---
 
@@ -184,6 +174,7 @@ toast UI.
 {storageFolder}/
   ├── repositories.json              # { Repositories: [...], SchemaVersion: 1 }
   ├── projects-index.json            # { Projects: [{ Id, Name }], SchemaVersion: 1 }
+  ├── error-log.json                 # { Entries: [...], SchemaVersion: 1 }
   └── projects/
        └── {project-id}.json         # Full ProjectData (workspaces embedded)
 
@@ -236,7 +227,7 @@ User → GET /api/projects/:id/workspaces/:wid/health
 
 **GUI integration:**
 - `project-detail.js`: health fetched in parallel with status for all initialized workspaces via `Promise.allSettled`. Failing fetches degrade gracefully (health cell left empty).
-- `workspace-detail.js`: health report fetched on initial load and every poll cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix action buttons. A `credential-missing` issue renders a **"Configure"** button (`fixAction: 'configure-credential'`) that navigates to `#/repositories/:repoId` so the user can assign a credential.
+- `workspace-detail.js`: health report fetched on initial load and every poll cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix action buttons. A `credential-missing` issue renders a **"Configure"** button (`fixAction: 'configure-credential'`) that navigates to `#/repositories` (the repositories list — the affected repository ID is not preserved in the navigation).
 
 ---
 
@@ -260,14 +251,23 @@ User → POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file
 
 ## 14. Credential Success Log Entry and Stale Badge Suppression
 
-When a workspace setup or repository addition completes a **credential-based clone** (i.e. a credential was resolved and injected), both `WorkspaceOrchestrator.createWorkspace()` and `RepositoryOrchestrator.addRepositoryToProject()` write a success entry to the error log:
+When a workspace setup or repository addition completes a **credential-based clone** (i.e. a credential was resolved and injected), both `WorkspaceOrchestrator.createWorkspace()` and `RepositoryOrchestrator.addRepositoryToProject()` write a success entry to the error log. The `Operation` value differs by call site:
 
 ```
-Successful credential-based clone (per repository):
+Successful credential-based clone — WorkspaceOrchestrator:
   └→ errorLogManager.append({
          Severity: 'info',
          Source:   'credentials',
-         Operation: 'clone',
+         Operation: 'workspace-setup',
+         Context:  { ProjectId, WorkspaceId, RepositoryId },
+         Message:  'Credential used successfully for clone.',
+     })
+
+Successful credential-based clone — RepositoryOrchestrator:
+  └→ errorLogManager.append({
+         Severity: 'info',
+         Source:   'credentials',
+         Operation: 'add-repository',
          Context:  { ProjectId, WorkspaceId, RepositoryId },
          Message:  'Credential used successfully for clone.',
      })

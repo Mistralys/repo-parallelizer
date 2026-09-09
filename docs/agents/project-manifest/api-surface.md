@@ -201,7 +201,10 @@ interface ErrorLogListOptions {
     severity?: ErrorSeverity;   // Filter by severity; omit to return all
     source?: string;            // Exact-match filter on Source; omit to return all
     limit?: number;             // Max entries to return; omit to return all matching.
-                                // limit=0 or negative → empty entries, total unaffected.
+                                // limit=0 → empty entries, total unaffected.
+                                // Negative limit: passed directly to Array.slice(0, limit) —
+                                //   returns all entries *except* the final |limit| entries
+                                //   (e.g. limit=-1 on 50 entries returns 49, not 0).
     offset?: number;            // Zero-based offset into filtered results (default: 0).
                                 // offset ≥ total → empty entries, total unaffected.
                                 // Negative offset treated as 0 (slice semantics).
@@ -348,7 +351,7 @@ interface WorkspaceInfo {
 }
 
 // Re-exported from project.types.ts:
-type ProjectWorkspace = import('../project/project.types.js').ProjectWorkspace;
+export type { ProjectWorkspace }  // from '../project/project.types.js'
 ```
 
 #### Manager (`workspace.manager.ts`)
@@ -462,6 +465,7 @@ class BranchOrchestrator {
 function getWorkspaceFilePath(projectsFolder: string, projectSlug: string, workspaceId: string): string
 function generateWorkspaceFile(workspaceId: string, repoPaths: { slug: string; path: string }[], filePath: string): void
 function removeWorkspaceFile(filePath: string): void
+function migrateWorkspaceFiles(projectsFolder: string, projectSlugs: string[]): void  // Startup migration utility — renames legacy workspace files; called by startServer() on boot
 ```
 
 ### Workspace Health (`workspace-health.ts`)
@@ -606,7 +610,7 @@ function runSetup(io?: SetupIO): Promise<void>
 // Injectable helpers (exported for testing — treat as internal)
 function _promptPath(
     label: string,
-    defaultValue: string,
+    defaultValue?: string,          // optional; undefined = no default shown
     _ask?: typeof askQuestion,
     _confirm?: typeof askYesNo,
 ): Promise<string>
@@ -614,8 +618,8 @@ function _promptPath(
 function _promptNumber(
     label: string,
     defaultValue: number,
-    min: number,
-    max: number,
+    min?: number,                   // optional; undefined = -Infinity
+    max?: number,                   // optional; undefined = Infinity
     _ask?: typeof askQuestion,
 ): Promise<number>
 ```
@@ -794,6 +798,7 @@ class PollingManager {
 
     start(intervalSeconds: number): void
     stop(): void
+    restart(intervalSeconds: number): void  // stop() + start() — used by PUT /api/config/polling to apply a changed interval
     getStatus(repoPath: string): GitStatusInfo | null
     refreshWorkspace(projectId: string, workspaceId: string): Promise<void>
 }
@@ -842,6 +847,15 @@ function registerBranchRoutes(router: Router, orchestrator: BranchOrchestrator, 
 // status.ts
 function registerStatusRoutes(router: Router, pollingManager: PollingManager, projectManager: ProjectManager, workspaceManager: WorkspaceManager, config: AppConfig): void
 
+// error-log.ts
+function registerErrorLogRoutes(router: Router, errorLogManager: ErrorLogManager): void
+
+// notes.ts
+function registerNotesRoutes(router: Router, projectManager: ProjectManager, workspaceManager: WorkspaceManager): void
+
+// version.ts
+function registerVersionRoute(router: Router): void
+
 // config.ts — accepts a named-options bag
 interface ConfigRoutesOptions {
     router: Router;
@@ -863,7 +877,21 @@ Vanilla JS HTTP client for the SPA frontend. All methods return Promises and thr
 
 ### `api.repositories`
 
-Credential-matching and association methods for the create/edit repository modal. (Pre-existing `api.repositories` methods such as `list()`, `get()`, `create()`, `update()`, `delete()` are not documented here — out of scope for this section.)
+Full CRUD plus credential methods for the repositories resource.
+
+```js
+api.repositories.list()                          // GET /api/repositories
+api.repositories.get(id)                         // GET /api/repositories/:id
+api.repositories.create(data)                    // POST /api/repositories
+api.repositories.update(id, data)               // PUT  /api/repositories/:id
+api.repositories.delete(id)                      // DELETE /api/repositories/:id
+api.repositories.touchRefreshTimestamp(id)       // POST /api/repositories/:id/refresh-timestamp
+api.repositories.credentialOptions(id)           // GET /api/repositories/:id/credential-options
+api.repositories.credentialOptionsForUrl(url)    // GET /api/repositories/credential-options?url=
+api.repositories.updateCredential(id, credentialId) // PUT /api/repositories/:id/credential
+```
+
+Credential-matching and association detail:
 
 ```js
 // Fetch credentials compatible with an arbitrary (not-yet-registered or
@@ -955,6 +983,78 @@ api.config.notesDisplay.set(data)
 | `notesColumns` | `number` | `[1, 6]` | `2` | Number of columns in the notes view grid. |
 
 **Validation:** `set()` rejects with HTTP 400 when a provided field is non-numeric, non-integer, or outside its allowed range. Omitting a field leaves its current value unchanged. An empty body `{}` is valid and returns the current settings unchanged.
+
+### `api.projects`
+
+```js
+api.projects.list()                      // GET /api/projects
+api.projects.get(id)                     // GET /api/projects/:id
+api.projects.create(data)               // POST /api/projects
+api.projects.update(id, data)           // PUT  /api/projects/:id
+api.projects.rename(id, newId)          // PUT  /api/projects/:id/rename
+api.projects.delete(id)                 // DELETE /api/projects/:id
+api.projects.addRepository(pid, rid)    // POST /api/projects/:id/repositories
+api.projects.removeRepository(pid, rid) // DELETE /api/projects/:id/repositories/:repoId
+```
+
+### `api.workspaces`
+
+```js
+api.workspaces.list(pid)                     // GET /api/projects/:id/workspaces
+api.workspaces.get(pid, wid)                 // GET /api/projects/:id/workspaces/:wid
+api.workspaces.create(pid, data)             // POST /api/projects/:id/workspaces
+api.workspaces.update(pid, wid, data)        // PUT  /api/projects/:id/workspaces/:wid
+api.workspaces.rename(pid, wid, newId)       // PUT  /api/projects/:id/workspaces/:wid/rename
+api.workspaces.delete(pid, wid)              // DELETE /api/projects/:id/workspaces/:wid
+api.workspaces.setup(pid, wid)               // POST /api/projects/:id/workspaces/:wid/setup
+api.workspaces.health(pid, wid)              // GET /api/projects/:id/workspaces/:wid/health
+api.workspaces.regenerateFile(pid, wid)      // POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file
+api.workspaces.launch.vscode(pid, wid)       // POST /api/projects/:id/workspaces/:wid/launch/vscode
+api.workspaces.launch.githubDesktop(pid, wid, rid)  // POST /api/projects/:id/workspaces/:wid/launch/github-desktop/:rid
+```
+
+### `api.branches`
+
+```js
+api.branches.list(pid, wid)            // GET /api/projects/:id/workspaces/:wid/branches
+api.branches.switch(pid, wid, assignments) // POST /api/projects/:id/workspaces/:wid/branches/switch
+```
+
+### `api.status`
+
+```js
+api.status.get(pid, wid)      // GET /api/projects/:id/workspaces/:wid/status
+api.status.refresh(pid, wid)  // POST /api/projects/:id/workspaces/:wid/status/refresh
+```
+
+### `api.config.webserverUrl`
+
+```js
+api.config.webserverUrl.get()       // GET /api/config/webserver-url
+api.config.webserverUrl.set(url)    // PUT /api/config/webserver-url
+```
+
+### `api.errorLog`
+
+```js
+api.errorLog.list(params?)  // GET /api/error-log[?...]
+api.errorLog.get(id)        // GET /api/error-log/:id
+api.errorLog.clear()        // DELETE /api/error-log
+api.errorLog.sources()      // GET /api/error-log/sources
+api.errorLog.count()        // GET /api/error-log?limit=0 (returns { entries: [], total: N })
+```
+
+### `api.notes`
+
+```js
+api.notes.list()   // GET /api/notes — returns all workspace notes grouped by project
+```
+
+### `api.version`
+
+```js
+api.version.get()  // GET /api/version — returns { appVersion: string, guiVersion: string }
+```
 
 ---
 

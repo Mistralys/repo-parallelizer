@@ -138,6 +138,10 @@ All validation bounds for `AppConfig` fields are defined in `src/config/config.c
 
 | Constant | Value | Field | Description |
 |---|---|---|---|
+| `MIN_CLONE_DEPTH` | 0 | `cloneDepth` | Minimum clone depth (unbounded history) |
+| `MAX_CLONE_DEPTH` | 2,147,483,647 | `cloneDepth` | Maximum clone depth |
+| `MIN_SERVER_PORT` | 1 | `serverPort` | Minimum server port |
+| `MAX_SERVER_PORT` | 65,535 | `serverPort` | Maximum server port |
 | `MIN_POLLING_INTERVAL_SECONDS` | 10 | `gitPollingIntervalSeconds` | Minimum polling interval (seconds) |
 | `MAX_POLLING_INTERVAL_SECONDS` | 86,400 | `gitPollingIntervalSeconds` | Maximum polling interval (24 hours) |
 | `MIN_NOTES_CARD_HEIGHT` | 120 | `notesCardHeight` | Minimum note card height (px) |
