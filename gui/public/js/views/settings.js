@@ -476,9 +476,21 @@ function buildCredentialsSection() {
     const credSection = document.createElement('section');
     credSection.className = 'settings-section';
 
+    const credHeadingRow = document.createElement('div');
+    credHeadingRow.className = 'settings-section-heading-row';
+
     const credHeading = document.createElement('h2');
     credHeading.textContent = 'Git Credentials';
-    credSection.appendChild(credHeading);
+    credHeadingRow.appendChild(credHeading);
+
+    const helpLink = document.createElement('a');
+    helpLink.href = '#/docs/git-tokens';
+    helpLink.className = 'settings-help-link';
+    helpLink.textContent = 'How to set up tokens →';
+    helpLink.setAttribute('aria-label', 'How to set up Git tokens — documentation');
+    credHeadingRow.appendChild(helpLink);
+
+    credSection.appendChild(credHeadingRow);
 
     const credDescription = document.createElement('p');
     credDescription.textContent =

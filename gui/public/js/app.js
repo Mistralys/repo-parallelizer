@@ -14,10 +14,12 @@
  *   #/settings                                   → Settings            (WP-009)
  *   #/error-log                                  → Error Log           (WP-011)
  *   #/notes                                      → Notes Collected     (WP-008)
+ *   #/docs/git-tokens                              → Git Token Setup Docs
  */
 
 import { Router }                                        from './router.js';
 import { renderDashboard, setRouter }                    from './views/dashboard.js';
+import { renderDocsGitTokens }                           from './views/docs-git-tokens.js';
 import { renderRepositories }                            from './views/repositories.js';
 import { renderRepositoryDetail, setRouter as setRepositoryDetailRouter } from './views/repository-detail.js';
 import { renderProjectDetail, setRouter as setProjectDetailRouter } from './views/project-detail.js';
@@ -70,6 +72,9 @@ router.register('#/error-log', renderErrorLog);
 
 // Notes Collected (WP-008)
 router.register('#/notes', renderNotesCollected);
+
+// Documentation: Git Token Setup
+router.register('#/docs/git-tokens', renderDocsGitTokens);
 
 // ---------------------------------------------------------------------------
 // Theme toggle — apply saved theme before first render to avoid flash
