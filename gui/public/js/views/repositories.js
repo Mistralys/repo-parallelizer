@@ -3,8 +3,8 @@
  *
  * Renders a full CRUD management page for all registered repositories:
  *   - Table listing all repositories (ID, Name, URL).
- *   - "Add Repository" inline form (URL required, Name optional, ID optional).
- *   - Inline edit for repository Name per row.
+ *   - "+ Add Repository" button opening the create/edit modal in create mode.
+ *   - Edit button per row opening the same modal in edit mode.
  *   - Delete per row with a confirmation dialog.
  *
  * @param {HTMLElement} container - The `#app` root element supplied by the router.
@@ -14,7 +14,7 @@
 import { api } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { showConfirm } from '../components/confirm-dialog.js';
-import { createFormField, validateRequired } from '../components/form-helpers.js';
+import { showRepositoryModal } from '../components/repository-modal.js';
 import { normaliseRepo } from '../utils/normalise.js';
 import { clearElement, buildCredentialBadge } from '../utils/dom.js';
 import { APP_NAME_SHORT } from '../utils/constants.js';
@@ -46,15 +46,15 @@ function buildTableHead() {
  * Build a single `<tr>` for one repository.
  *
  * The row starts in read mode.  The Name cell renders as a clickable `<a>`
- * link navigating to `#/repositories/:id`.  Clicking Edit switches the Name
- * cell to an inline `<input>` and replaces the action buttons with Save / Cancel.
+ * link navigating to `#/repositories/:id`.  Clicking Edit opens the
+ * create/edit modal in edit mode, pre-filled with the row's current data.
  * Clicking Delete shows a confirmation dialog and calls the API on confirm.
  *
  * @param {{ id: string, name: string, url: string }} repo
- * @param {function(): void} onDeleted - Callback to refresh the table after deletion.
+ * @param {function(): void} onChanged - Callback to refresh the table after a change (edit save or delete).
  * @returns {HTMLTableRowElement}
  */
-function buildRepoRow(repo, onDeleted) {
+function buildRepoRow(repo, onChanged) {
     const tr = document.createElement('tr');
     tr.dataset.repoId = repo.id;
 
@@ -64,7 +64,7 @@ function buildRepoRow(repo, onDeleted) {
     idCell.textContent = repo.id;
     tr.appendChild(idCell);
 
-    // ---- Name cell (editable) ----
+    // ---- Name cell ----
     const nameCell = document.createElement('td');
     nameCell.className = 'repo-name-cell';
 
@@ -73,15 +73,6 @@ function buildRepoRow(repo, onDeleted) {
     nameLink.href      = `#/repositories/${encodeURIComponent(repo.id)}`;
     nameLink.textContent = repo.name || '—';
     nameCell.appendChild(nameLink);
-
-    // Inline edit input (hidden initially)
-    const nameInput = document.createElement('input');
-    nameInput.type       = 'text';
-    nameInput.className  = 'form-input repo-name-input';
-    nameInput.value      = repo.name;
-    nameInput.hidden     = true;
-    nameInput.setAttribute('aria-label', `Name for repository ${repo.id}`);
-    nameCell.appendChild(nameInput);
 
     tr.appendChild(nameCell);
 
@@ -107,7 +98,6 @@ function buildRepoRow(repo, onDeleted) {
     const actionsCell = document.createElement('td');
     actionsCell.className = 'repo-actions-cell';
 
-    // Read-mode buttons
     const editBtn = document.createElement('button');
     editBtn.type      = 'button';
     editBtn.className = 'btn btn-secondary btn-sm';
@@ -118,89 +108,23 @@ function buildRepoRow(repo, onDeleted) {
     deleteBtn.className = 'btn btn-danger btn-sm';
     deleteBtn.textContent = 'Delete';
 
-    // Edit-mode buttons (hidden initially)
-    const saveBtn = document.createElement('button');
-    saveBtn.type      = 'button';
-    saveBtn.className = 'btn btn-primary btn-sm';
-    saveBtn.textContent = 'Save';
-    saveBtn.hidden    = true;
-
-    const cancelEditBtn = document.createElement('button');
-    cancelEditBtn.type      = 'button';
-    cancelEditBtn.className = 'btn btn-secondary btn-sm';
-    cancelEditBtn.textContent = 'Cancel';
-    cancelEditBtn.hidden    = true;
-
     actionsCell.appendChild(editBtn);
     actionsCell.appendChild(deleteBtn);
-    actionsCell.appendChild(saveBtn);
-    actionsCell.appendChild(cancelEditBtn);
     tr.appendChild(actionsCell);
 
     // -------------------------------------------------------------------------
     // Behaviour
     // -------------------------------------------------------------------------
 
-    // Enter edit mode
-    editBtn.addEventListener('click', () => {
-        nameLink.hidden  = true;
-        nameInput.hidden = false;
-        nameInput.value  = repo.name;
-        nameInput.focus();
-        nameInput.select();
-
-        editBtn.hidden   = true;
-        deleteBtn.hidden = true;
-        saveBtn.hidden   = false;
-        cancelEditBtn.hidden = false;
-    });
-
-    // Cancel edit mode
-    cancelEditBtn.addEventListener('click', () => {
-        nameInput.hidden = true;
-        nameLink.hidden  = false;
-
-        editBtn.hidden   = false;
-        deleteBtn.hidden = false;
-        saveBtn.hidden   = true;
-        cancelEditBtn.hidden = true;
-    });
-
-    // Save name change
-    saveBtn.addEventListener('click', async () => {
-        const newName = nameInput.value.trim();
-        saveBtn.disabled = true;
-        saveBtn.textContent = 'Saving…';
-
+    // Edit via modal
+    editBtn.addEventListener('click', async () => {
         try {
-            await api.repositories.update(repo.id, { name: newName });
-            repo.name = newName;
-            nameLink.textContent = newName || '—';
-            showToast(`Repository "${repo.id}" updated.`, 'success');
-
-            // Return to read mode
-            nameInput.hidden = true;
-            nameLink.hidden  = false;
-            editBtn.hidden   = false;
-            deleteBtn.hidden = false;
-            saveBtn.hidden   = true;
-            cancelEditBtn.hidden = true;
-        } catch (err) {
-            showToast(err.message || 'Failed to update repository.', 'error');
-        } finally {
-            saveBtn.disabled = false;
-            saveBtn.textContent = 'Save';
+            await showRepositoryModal({ mode: 'edit', repo });
+        } catch {
+            // User cancelled — do nothing.
+            return;
         }
-    });
-
-    // Allow pressing Enter in the name input to save
-    nameInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            saveBtn.click();
-        } else if (e.key === 'Escape') {
-            cancelEditBtn.click();
-        }
+        onChanged();
     });
 
     // Delete with confirmation
@@ -221,7 +145,7 @@ function buildRepoRow(repo, onDeleted) {
         try {
             await api.repositories.delete(repo.id);
             showToast(`Repository "${repo.name || repo.id}" deleted.`, 'success');
-            onDeleted();
+            onChanged();
         } catch (err) {
             showToast(err.message || 'Failed to delete repository.', 'error');
             deleteBtn.disabled = false;
@@ -297,128 +221,34 @@ async function renderRepoTable(tableContainer) {
 }
 
 // ---------------------------------------------------------------------------
-// Add Repository form
+// Add Repository button
 // ---------------------------------------------------------------------------
 
 /**
- * Build and return the "Add Repository" inline form section.
- * On success, `onSuccess` is called so the caller can re-render the table.
+ * Build the "+ Add Repository" button, opening the create/edit modal in
+ * create mode. On success, `onSuccess` is called so the caller can
+ * re-render the table.
  *
  * @param {function(): void} onSuccess
  * @returns {HTMLElement}
  */
-function buildAddRepoSection(onSuccess) {
-    const section = document.createElement('section');
-    section.className = 'add-repo-section';
+function buildAddRepoButton(onSuccess) {
+    const addBtn = document.createElement('button');
+    addBtn.type      = 'button';
+    addBtn.className = 'btn btn-primary';
+    addBtn.textContent = '+ Add Repository';
 
-    // Toggle button
-    const toggleBtn = document.createElement('button');
-    toggleBtn.type = 'button';
-    toggleBtn.className = 'btn btn-primary';
-    toggleBtn.textContent = '+ Add Repository';
-    section.appendChild(toggleBtn);
-
-    // Collapsible form wrapper (hidden by default)
-    const formWrapper = document.createElement('div');
-    formWrapper.className = 'add-repo-form-wrapper';
-    formWrapper.hidden = true;
-    section.appendChild(formWrapper);
-
-    // Form
-    const form = document.createElement('form');
-    form.className = 'add-repo-form card';
-    form.noValidate = true;
-
-    const formTitle = document.createElement('h3');
-    formTitle.className = 'form-section-title';
-    formTitle.textContent = 'New Repository';
-    form.appendChild(formTitle);
-
-    const urlField = createFormField('URL', 'url', 'url', {
-        required: true,
-        placeholder: 'https://github.com/org/repo.git',
-    });
-    form.appendChild(urlField);
-
-    const nameField = createFormField('Name', 'text', 'name', {
-        placeholder: 'Optional — human-readable name.',
-    });
-    form.appendChild(nameField);
-
-    const idField = createFormField('ID', 'text', 'id', {
-        placeholder: 'Optional — auto-inferred from URL when left blank.',
-        hint: 'Leave blank to auto-infer from the repository URL.',
-    });
-    form.appendChild(idField);
-
-    // Action row
-    const actions = document.createElement('div');
-    actions.className = 'form-actions';
-
-    const submitBtn = document.createElement('button');
-    submitBtn.type      = 'submit';
-    submitBtn.className = 'btn btn-primary';
-    submitBtn.textContent = 'Add';
-
-    const cancelBtn = document.createElement('button');
-    cancelBtn.type      = 'button';
-    cancelBtn.className = 'btn btn-secondary';
-    cancelBtn.textContent = 'Cancel';
-
-    actions.appendChild(submitBtn);
-    actions.appendChild(cancelBtn);
-    form.appendChild(actions);
-
-    formWrapper.appendChild(form);
-
-    // -------------------------------------------------------------------------
-    // Behaviour
-    // -------------------------------------------------------------------------
-
-    toggleBtn.addEventListener('click', () => {
-        formWrapper.hidden = !formWrapper.hidden;
-        if (!formWrapper.hidden) {
-            const urlInput = form.querySelector('[name="url"]');
-            if (urlInput) urlInput.focus();
-        }
-    });
-
-    cancelBtn.addEventListener('click', () => {
-        form.reset();
-        formWrapper.hidden = true;
-    });
-
-    form.addEventListener('submit', async (e) => {
-        e.preventDefault();
-
-        if (!validateRequired(form, ['url'])) return;
-
-        const url  = form.querySelector('[name="url"]').value.trim();
-        const name = form.querySelector('[name="name"]').value.trim();
-        const id   = form.querySelector('[name="id"]').value.trim();
-
-        submitBtn.disabled = true;
-        submitBtn.textContent = 'Adding…';
-
+    addBtn.addEventListener('click', async () => {
         try {
-            await api.repositories.create({
-                url,
-                name: name || undefined,
-                id:   id   || undefined,
-            });
-            showToast('Repository added successfully.', 'success');
-            form.reset();
-            formWrapper.hidden = true;
-            onSuccess();
-        } catch (err) {
-            showToast(err.message || 'Failed to add repository.', 'error');
-        } finally {
-            submitBtn.disabled = false;
-            submitBtn.textContent = 'Add';
+            await showRepositoryModal({ mode: 'create' });
+        } catch {
+            // User cancelled — do nothing.
+            return;
         }
+        onSuccess();
     });
 
-    return section;
+    return addBtn;
 }
 
 // ---------------------------------------------------------------------------
@@ -454,12 +284,12 @@ export async function renderRepositories(container, _params) {
     container.appendChild(tableContainer);
 
     // -----------------------------------------------------------------------
-    // Add Repository section
+    // Add Repository button
     // -----------------------------------------------------------------------
-    const addSection = buildAddRepoSection(() => {
+    const addBtn = buildAddRepoButton(() => {
         renderRepoTable(tableContainer);
     });
-    container.appendChild(addSection);
+    container.appendChild(addBtn);
 
     // -----------------------------------------------------------------------
     // Initial load

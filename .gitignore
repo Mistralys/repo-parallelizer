@@ -152,5 +152,7 @@ vite.config.ts.timestamp-*
 /docs/agents/**/work-packages-draft.md
 /docs/agents/**/pipeline-configuration.md
 /docs/agents/**/.orchestrator-run.json
+/docs/agents/implementation-history/**/insights.jsonl
+/docs/agents/implementation-history/**/research-brief.md
 
 /data/storage/

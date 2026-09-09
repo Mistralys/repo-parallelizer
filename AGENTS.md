@@ -84,7 +84,7 @@ Do not scan the `src/` tree looking for a function when the manifest already lis
 |---|---|
 | **Language** | TypeScript 5.4+ (strict mode) |
 | **Runtime** | Node.js >= 18 |
-| **Architecture** | Layered: Storage → Models → Git → Orchestration → Server/CLI |
+| **Architecture** | Layered: Storage → Models → Error Log → Git → Orchestration → Server → CLI |
 | **Module system** | Node16 ESM (`.js` extensions in all relative imports) |
 | **Package manager** | npm >= 9 |
 | **Test framework** | Node.js built-in test runner (`node --test`) |

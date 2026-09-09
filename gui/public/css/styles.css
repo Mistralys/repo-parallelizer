@@ -901,6 +901,13 @@ td.mono {
     gap: 8px;
 }
 
+/* Wider variant for the repository create/edit form (repository-modal.js),
+   which carries four fields instead of a short confirmation message. */
+.modal--form {
+    max-width: 600px;
+    min-width: 560px;
+}
+
 @keyframes fadeIn {
     from { opacity: 0; }
     to   { opacity: 1; }
@@ -909,6 +916,13 @@ td.mono {
 @keyframes slideUp {
     from { opacity: 0; transform: translateY(8px); }
     to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .modal-overlay,
+    .modal {
+        animation-duration: 0.01ms;
+    }
 }
 
 /* --------------------------------------------------------------------------

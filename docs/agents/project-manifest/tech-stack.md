@@ -120,7 +120,7 @@ Both scripts `cd` to their own directory before invoking `node dist/index.js men
 | Field | Value | Purpose |
 |---|---|---|
 | `main` | `dist/index.js` | Entry point for `require('repo-parallelizer')` |
-| `files` | `dist/`, `gui/public/`, `config.dist.json`, `menu.sh`, `menu.cmd` | Controls what's included in the published tarball |
+| `files` | Curated per-subdirectory list: `dist/cli/`, `dist/config/`, `dist/git/`, `dist/models/`, `dist/orchestration/`, `dist/server/*.js[.map]`, `dist/server/routes/`, `dist/storage/`, `dist/utils/`, `dist/errors.js[.map]`, `dist/index.js[.map]`, `gui/public/`, `config.dist.json`, `menu.sh`, `menu.cmd` | Controls what's included in the published tarball. Compiled test artefacts (`dist/tests/`, `dist/server/__tests__/`) are excluded by this curated list and by `.npmignore`. |
 | `keywords` | `git`, `repository`, `workspace`, `vscode`, `parallel`, `clone`, `branch`, `cli` | npm search discoverability |
 | `repository` | `{ type: "git", url: "..." }` | Source repository link on npmjs.com |
 
@@ -128,5 +128,4 @@ Both scripts `cd` to their own directory before invoking `node dist/index.js men
 
 > **Pre-publish checklist:**
 > 1. Replace the placeholder `repository.url` with the actual repository URL.
-> 2. Add a `.npmignore` to exclude `dist/tests/` and `dist/server/__tests__/` (compiled test artefacts add ~700kB to the unpacked tarball).
-> 3. Add `menu.sh text eol=lf` to `.gitattributes` to prevent CRLF conversion on Windows checkouts.
+> 2. Add `menu.sh text eol=lf` to `.gitattributes` to prevent CRLF conversion on Windows checkouts.

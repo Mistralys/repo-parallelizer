@@ -11,10 +11,34 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 | `GET` | `/api/repositories` | 200 | — | List all repositories. |
 | `GET` | `/api/repositories/:id` | 200 | 404 | Get a single repository by ID. |
 | `POST` | `/api/repositories` | 201 | 400 | Register a new repository. Body: `{ url, name?, id? }`. |
-| `PUT` | `/api/repositories/:id` | 200 | 404, 500 | Update repository metadata. Body: `{ name }`. |
+| `PUT` | `/api/repositories/:id` | 200 | 400, 404 | Update repository metadata. Body: `{ name, url? }`. |
 | `DELETE` | `/api/repositories/:id` | 204 | 404 | Delete a repository. |
 | `PUT` | `/api/repositories/:id/credential` | 200 | 400, 404 | Assign or clear a git credential for a repository. Body: `{ credentialId: string \| null }`. |
 | `GET` | `/api/repositories/:id/credential-options` | 200 | 404 | List credentials compatible with the repository's host, with tokens masked. |
+| `POST` | `/api/repositories/:id/refresh-timestamp` | 200 | 404 | Persist the repository's manual refresh timestamp to the current UTC time and return the updated `Repository` object. Used by the repository-detail view's Refresh button. |
+| `GET` | `/api/repositories/credential-options` | 200 | 400 | List credentials compatible with an arbitrary URL's host (no existing repository required), with tokens masked. Query: `?url=`. |
+
+### `PUT /api/repositories/:id` — Update Repository Metadata
+
+Updates a repository's `Name` and, optionally, its `Url`.
+
+**Request body:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | `string` | **Yes** | New display name. Must be a non-empty string after trimming. |
+| `url` | `string` | No | New remote URL. When provided, must be a non-empty string after trimming. Embedded credentials are stripped before storage, mirroring `POST /api/repositories`. The repository `Id` is never affected by a URL change. |
+
+**400 cases:**
+- `name` is missing, not a string, or empty after trimming.
+- `url` is present but not a string, or empty after trimming.
+- `url` (after credential-stripping) duplicates another repository's URL — the manager's error message is returned verbatim, e.g. `A repository with URL "https://github.com/org/repo.git" already exists (ID: "repo").`.
+
+**404:** repository not found.
+
+**200 Response:** the full updated `Repository` object.
+
+> **Host-incoherence auto-clear:** when `url` is provided and changes the repository's host (as computed by `extractHost()`), any existing `CredentialId` that no longer matches the new host is automatically cleared — the response reflects the repository with `CredentialId` removed. An audit log entry is appended with `Source: 'credential-audit'` and `Operation: 'clear-credential'` (same shape as `PUT /:id/credential`'s clear operation). The auto-clear is skipped when the URL edit keeps the same host, or when the new URL is an SSH URL (`extractHost()` returns `null`) — SSH auth is not handled by credential tokens, so the association is left untouched.
 
 ### `PUT /api/repositories/:id/credential` — Assign or Clear a Credential
 
@@ -91,6 +115,28 @@ Returns the subset of configured git credentials whose `host` matches the reposi
 
 ---
 
+### `GET /api/repositories/credential-options` — List Compatible Credentials for an Arbitrary URL
+
+Returns the subset of configured git credentials whose `host` matches the hostname extracted from the `url` query parameter — without requiring an existing repository record. Used by the create/edit repository modal to match credentials live as the user types or edits a URL, before the repository exists (create mode) or as the URL field is edited in place (edit mode). Tokens are always masked before being sent to the client.
+
+**Query parameters:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `url` | `string` | **Yes** | The Git remote URL to match credentials against. `400` when missing or empty. |
+
+**400:** `url` query parameter is missing or an empty/whitespace-only string.
+
+**200 Response shape:** identical to `GET /:id/credential-options` above — `{ credentials: GitCredentialEntry[], autoSelected?: string }`.
+
+> **Shared computation:** this endpoint and `GET /:id/credential-options` both delegate the filter/mask/`autoSelected` computation to the same internal helper, so their behavior cannot drift apart. The only difference is how each derives the hostname to match against — from a repository's stored URL (`:id` variant) versus the raw `url` query parameter (this variant).
+
+> **SSH / non-HTTPS URLs:** as with the by-ID variant, a `url` from which no host can be extracted (e.g. an SSH URL) always returns `{ "credentials": [] }` with no `autoSelected`.
+
+> **Known inconsistency — token mask format:** same `"***"` masking convention and pre-existing inconsistency with `GET /api/config/credentials` noted above.
+
+---
+
 ## Projects
 
 | Method | Path | Success | Error Codes | Description |
@@ -98,9 +144,9 @@ Returns the subset of configured git credentials whose `host` matches the reposi
 | `GET` | `/api/projects` | 200 | — | List all projects (index entries). |
 | `GET` | `/api/projects/:id` | 200 | 404 | Get full project data by ID. Response includes an optional `LastActivity?: string` field (ISO 8601) when the project has recorded git activity via the polling layer; absent on projects that have never been polled. |
 | `POST` | `/api/projects` | 201 | 400 | Create a new project. Body: `{ name, repositoryIds, description?, id? }`. |
-| `PUT` | `/api/projects/:id` | 200 | 404 | Update project metadata. Body: `{ Name?, Description? }`. |
+| `PUT` | `/api/projects/:id` | 200 | 400, 404 | Update project metadata. Body: `{ Name?, Description? }`. 400 when body is not a valid JSON object or contains no recognized updatable fields. |
 | `PUT` | `/api/projects/:id/rename` | 200 | 400, 404 | Rename project (change ID). Body: `{ newId }`. |
-| `DELETE` | `/api/projects/:id` | 204 | 404 | Delete project and all workspace files. |
+| `DELETE` | `/api/projects/:id` | 204 | 404 | Delete project data record. Does not remove workspace folders or `.code-workspace` files from disk. |
 | `POST` | `/api/projects/:id/repositories` | 200 | 400, 404 | Add repository to project. Body: `{ repositoryId }`. |
 | `DELETE` | `/api/projects/:id/repositories/:repoId` | 204 | 404 | Remove repository from project. |
 
@@ -112,11 +158,11 @@ Returns the subset of configured git credentials whose `host` matches the reposi
 |---|---|---|---|---|
 | `GET` | `/api/projects/:id/workspaces` | 200 | 404 | List workspaces in a project. Response includes `Initialized` boolean and `FolderPath` string. |
 | `GET` | `/api/projects/:id/workspaces/:wid` | 200 | 404 | Get a single workspace. Response includes `Initialized` boolean and `FolderPath` string. |
-| `POST` | `/api/projects/:id/workspaces` | 201 | 400, 404 | Create workspace. Body: `{ id, description? }`. |
+| `POST` | `/api/projects/:id/workspaces` | 201 | 400, 404 | Create workspace. Body: `{ workspaceId, description? }`. |
 | `PUT` | `/api/projects/:id/workspaces/:wid` | 200 | 400, 404 | Update workspace description and/or notes. Body: `{ description?, notes? }` — at least one field required. 400 if neither field is present or body is not a valid JSON object. Response includes a `Notes` field on the returned `WorkspaceInfo`. |
 | `PUT` | `/api/projects/:id/workspaces/:wid/rename` | 200 | 400, 404 | Rename workspace. Body: `{ newId }`. |
-| `DELETE` | `/api/projects/:id/workspaces/:wid` | 204 | 404 | Delete workspace (STABLE cannot be deleted). |
-| `POST` | `/api/projects/:id/workspaces/:wid/setup` | 200 | 400, 404, 500 | Initialize workspace on disk (clone repos, generate .code-workspace file). |
+| `DELETE` | `/api/projects/:id/workspaces/:wid` | 204 | 400, 404 | Delete workspace. 400 when attempting to delete the STABLE workspace. 404 when the project or workspace is not found. |
+| `POST` | `/api/projects/:id/workspaces/:wid/setup` | 200 | 404, 500 | Initialize workspace on disk (clone repos, generate .code-workspace file). 404 when the project or workspace is not found. 500 on orchestrator failure. |
 | `POST` | `/api/projects/:id/workspaces/:wid/regenerate-workspace-file` | 200 | 400, 404, 500 | Regenerate the `.code-workspace` file from the current repository list without cloning. Workspace folder must already exist on disk (400 if absent). Body: none. Response: `{ success: true }`. |
 | `GET` | `/api/projects/:id/workspaces/:wid/health` | 200 | 404 | Fetch the health report for a workspace. Returns `{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }`. Uninitialized workspaces return `{ healthy: true, issues: [] }`. 404 if project or workspace ID is unknown. See **Health Issue Types** below. |
 
@@ -244,7 +290,7 @@ Four endpoints for reading and managing the runtime error log. The log is backed
 |---|---|---|---|
 | `severity` | `"error" \| "warning" \| "audit" \| "info"` | — | Filter by severity. Any other value is silently treated as no filter. |
 | `source` | `string` | — | Exact-match filter on the `Source` field. No length cap or allowlist — treat as internal-use only. |
-| `limit` | `integer ≥ 0` | `100` | Maximum entries to return. `limit=0` returns an empty `entries` array but `total` is still populated. Negative values are clamped to 0. |
+| `limit` | `integer ≥ 0` | `100` | Maximum entries to return. `limit=0` returns an empty `entries` array but `total` is still populated. Negative values are passed directly to `Array.slice(0, limit)` — a negative `limit` of −N returns all entries except the last N (e.g. `limit=-1` on 50 entries returns 49). Treat negative values as unsupported; use `limit=0` for count-only queries. |
 | `offset` | `integer ≥ 0` | `0` | Zero-based offset into the filtered result set. Negative values are treated as 0. |
 
 > **Note on `limit=0`:** Passing `limit=0` returns `{ entries: [], total: N }`. This is intentional — it is useful for polling the current count without fetching entries. It does **not** mean "return all entries"; omit the parameter entirely to get the default 100.
@@ -401,7 +447,7 @@ Read and update the git polling interval at runtime, without a server restart. C
 { "gitPollingIntervalSeconds": 60 }
 ```
 
-> **Note:** No upper bound is currently enforced. Values up to `Number.MAX_SAFE_INTEGER` pass validation and would effectively disable polling for the process lifetime. A practical maximum of 86 400 seconds (24 hours) is planned as a follow-up improvement.
+> **Upper bound:** `seconds` must also be ≤ 86,400 (24 hours = `MAX_POLLING_INTERVAL_SECONDS`). Values above this limit are rejected with HTTP 400.
 
 ---
 
@@ -540,3 +586,24 @@ Aggregate endpoint that returns the `Notes` field for every workspace across all
     ]
 }
 ```
+
+---
+
+## Version (`/api/version`)
+
+Returns the running application version strings.
+
+| Method | Path | Success | Error Codes | Description |
+|---|---|---|---|---|
+| `GET` | `/api/version` | 200 | — | Return the application and GUI version strings. |
+
+### `GET /api/version` Response Shape
+
+```json
+{
+    "appVersion": "1.0.0",
+    "guiVersion": "1.0.0"
+}
+```
+
+Both fields are read from `package.json` at server startup. `guiVersion` is read from `gui/package.json`.

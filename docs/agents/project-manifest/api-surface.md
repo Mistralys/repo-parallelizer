@@ -201,7 +201,10 @@ interface ErrorLogListOptions {
     severity?: ErrorSeverity;   // Filter by severity; omit to return all
     source?: string;            // Exact-match filter on Source; omit to return all
     limit?: number;             // Max entries to return; omit to return all matching.
-                                // limit=0 or negative → empty entries, total unaffected.
+                                // limit=0 → empty entries, total unaffected.
+                                // Negative limit: passed directly to Array.slice(0, limit) —
+                                //   returns all entries *except* the final |limit| entries
+                                //   (e.g. limit=-1 on 50 entries returns 49, not 0).
     offset?: number;            // Zero-based offset into filtered results (default: 0).
                                 // offset ≥ total → empty entries, total unaffected.
                                 // Negative offset treated as 0 (slice semantics).
@@ -264,7 +267,7 @@ class RepositoryManager {
     getById(id: string): Repository | undefined
     exists(id: string): boolean
     add(params: { url: string; name?: string; id?: string }): Repository
-    update(id: string, params: { name: string }): Repository
+    update(id: string, params: { name: string; url?: string }): Repository
     remove(id: string): void
     updateCredential(id: string, credentialId: string | null): Repository
     touchRefreshTimestamp(id: string): Repository
@@ -272,6 +275,8 @@ class RepositoryManager {
 ```
 
 > **`updateCredential()`:** Associates or removes a named credential on a repository. Pass a `credentialId` string to pin the repository to a specific `GitCredentialEntry`; pass `null` to clear the association and revert to host-based auto-selection at runtime. When `null` is passed, the `CredentialId` key is removed entirely from `repositories.json` (not set to `undefined`) so the JSON remains clean. Throws `NotFoundError` if the repository ID does not exist. See `Repository.CredentialId` for the auto-selection fallback behaviour.
+
+> **`update()`'s optional `url`:** When `url` is provided, it is trimmed and any embedded credentials are stripped (mirroring `add()`'s URL-handling pattern), then checked for duplicates against every other repository's `Url`, self-excluded by `Id`. Returns the repository spread with `credentialsStripped: true` when stripping occurred (transient, not persisted). Throws `NotFoundError` if the ID does not exist, or a plain `Error` if the cleaned URL duplicates another repository's URL. When `url` is omitted, behavior is unchanged (name-only update). **Known gap:** an empty or whitespace-only `url` is silently persisted with no rejection, unlike `add()`'s empty-slug guard — callers passing raw form input should validate non-empty before calling.
 
 ### Project
 
@@ -346,7 +351,7 @@ interface WorkspaceInfo {
 }
 
 // Re-exported from project.types.ts:
-type ProjectWorkspace = import('../project/project.types.js').ProjectWorkspace;
+export type { ProjectWorkspace }  // from '../project/project.types.js'
 ```
 
 #### Manager (`workspace.manager.ts`)
@@ -460,6 +465,7 @@ class BranchOrchestrator {
 function getWorkspaceFilePath(projectsFolder: string, projectSlug: string, workspaceId: string): string
 function generateWorkspaceFile(workspaceId: string, repoPaths: { slug: string; path: string }[], filePath: string): void
 function removeWorkspaceFile(filePath: string): void
+function migrateWorkspaceFiles(projectsFolder: string, projectSlugs: string[]): void  // Startup migration utility — renames legacy workspace files; called by startServer() on boot
 ```
 
 ### Workspace Health (`workspace-health.ts`)
@@ -604,7 +610,7 @@ function runSetup(io?: SetupIO): Promise<void>
 // Injectable helpers (exported for testing — treat as internal)
 function _promptPath(
     label: string,
-    defaultValue: string,
+    defaultValue?: string,          // optional; undefined = no default shown
     _ask?: typeof askQuestion,
     _confirm?: typeof askYesNo,
 ): Promise<string>
@@ -612,8 +618,8 @@ function _promptPath(
 function _promptNumber(
     label: string,
     defaultValue: number,
-    min: number,
-    max: number,
+    min?: number,                   // optional; undefined = -Infinity
+    max?: number,                   // optional; undefined = Infinity
     _ask?: typeof askQuestion,
 ): Promise<number>
 ```
@@ -792,6 +798,7 @@ class PollingManager {
 
     start(intervalSeconds: number): void
     stop(): void
+    restart(intervalSeconds: number): void  // stop() + start() — used by PUT /api/config/polling to apply a changed interval
     getStatus(repoPath: string): GitStatusInfo | null
     refreshWorkspace(projectId: string, workspaceId: string): Promise<void>
 }
@@ -840,6 +847,15 @@ function registerBranchRoutes(router: Router, orchestrator: BranchOrchestrator, 
 // status.ts
 function registerStatusRoutes(router: Router, pollingManager: PollingManager, projectManager: ProjectManager, workspaceManager: WorkspaceManager, config: AppConfig): void
 
+// error-log.ts
+function registerErrorLogRoutes(router: Router, errorLogManager: ErrorLogManager): void
+
+// notes.ts
+function registerNotesRoutes(router: Router, projectManager: ProjectManager, workspaceManager: WorkspaceManager): void
+
+// version.ts
+function registerVersionRoute(router: Router): void
+
 // config.ts — accepts a named-options bag
 interface ConfigRoutesOptions {
     router: Router;
@@ -858,6 +874,44 @@ function registerConfigRoutes(options: ConfigRoutesOptions): void
 Vanilla JS HTTP client for the SPA frontend. All methods return Promises and throw an `Error` (with `message` taken from the `error` field in the JSON body, and an `err.status` property set to the HTTP status code) on non-2xx responses.
 
 **Import:** `import { api } from './api.js';`
+
+### `api.repositories`
+
+Full CRUD plus credential methods for the repositories resource.
+
+```js
+api.repositories.list()                          // GET /api/repositories
+api.repositories.get(id)                         // GET /api/repositories/:id
+api.repositories.create(data)                    // POST /api/repositories
+api.repositories.update(id, data)               // PUT  /api/repositories/:id
+api.repositories.delete(id)                      // DELETE /api/repositories/:id
+api.repositories.touchRefreshTimestamp(id)       // POST /api/repositories/:id/refresh-timestamp
+api.repositories.credentialOptions(id)           // GET /api/repositories/:id/credential-options
+api.repositories.credentialOptionsForUrl(url)    // GET /api/repositories/credential-options?url=
+api.repositories.updateCredential(id, credentialId) // PUT /api/repositories/:id/credential
+```
+
+Credential-matching and association detail:
+
+```js
+// Fetch credentials compatible with an arbitrary (not-yet-registered or
+// in-edit) repository URL's hostname, without requiring an existing
+// repository record. Transforms the server's { credentials, autoSelected }
+// response into a flat array.
+// url: string — the Git remote URL to match credentials against
+// Returns: Promise<Array<{ credentialId: string, label: string, host: string, auto: boolean }>>
+api.repositories.credentialOptionsForUrl(url)
+
+// Associate (or disassociate) a credential with a repository.
+// id: string — repository ID
+// credentialId: string — the credential ID to associate, or '' to clear
+//   (normalized to `null` before being sent — the server expects `null`,
+//   not '', to clear the association)
+// Returns: Promise<Object> — the updated repository
+api.repositories.updateCredential(id, credentialId)
+```
+
+> **`updateCredential` caller contract:** `credentialId` must always be a `string`. Passing `undefined` causes `JSON.stringify` to silently strip the key from the request body, producing an empty `{}` payload instead of `{ credentialId: null }`. Always pass `''` when the intent is to clear the association.
 
 ### `api.config.credentials`
 
@@ -929,6 +983,135 @@ api.config.notesDisplay.set(data)
 | `notesColumns` | `number` | `[1, 6]` | `2` | Number of columns in the notes view grid. |
 
 **Validation:** `set()` rejects with HTTP 400 when a provided field is non-numeric, non-integer, or outside its allowed range. Omitting a field leaves its current value unchanged. An empty body `{}` is valid and returns the current settings unchanged.
+
+### `api.projects`
+
+```js
+api.projects.list()                      // GET /api/projects
+api.projects.get(id)                     // GET /api/projects/:id
+api.projects.create(data)               // POST /api/projects
+api.projects.update(id, data)           // PUT  /api/projects/:id
+api.projects.rename(id, newId)          // PUT  /api/projects/:id/rename
+api.projects.delete(id)                 // DELETE /api/projects/:id
+api.projects.addRepository(pid, rid)    // POST /api/projects/:id/repositories
+api.projects.removeRepository(pid, rid) // DELETE /api/projects/:id/repositories/:repoId
+```
+
+### `api.workspaces`
+
+```js
+api.workspaces.list(pid)                     // GET /api/projects/:id/workspaces
+api.workspaces.get(pid, wid)                 // GET /api/projects/:id/workspaces/:wid
+api.workspaces.create(pid, data)             // POST /api/projects/:id/workspaces
+api.workspaces.update(pid, wid, data)        // PUT  /api/projects/:id/workspaces/:wid
+api.workspaces.rename(pid, wid, newId)       // PUT  /api/projects/:id/workspaces/:wid/rename
+api.workspaces.delete(pid, wid)              // DELETE /api/projects/:id/workspaces/:wid
+api.workspaces.setup(pid, wid)               // POST /api/projects/:id/workspaces/:wid/setup
+api.workspaces.health(pid, wid)              // GET /api/projects/:id/workspaces/:wid/health
+api.workspaces.regenerateFile(pid, wid)      // POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file
+api.workspaces.launch.vscode(pid, wid)       // POST /api/projects/:id/workspaces/:wid/launch/vscode
+api.workspaces.launch.githubDesktop(pid, wid, rid)  // POST /api/projects/:id/workspaces/:wid/launch/github-desktop/:rid
+```
+
+### `api.branches`
+
+```js
+api.branches.list(pid, wid)            // GET /api/projects/:id/workspaces/:wid/branches
+api.branches.switch(pid, wid, assignments) // POST /api/projects/:id/workspaces/:wid/branches/switch
+```
+
+### `api.status`
+
+```js
+api.status.get(pid, wid)      // GET /api/projects/:id/workspaces/:wid/status
+api.status.refresh(pid, wid)  // POST /api/projects/:id/workspaces/:wid/status/refresh
+```
+
+### `api.config.webserverUrl`
+
+```js
+api.config.webserverUrl.get()       // GET /api/config/webserver-url
+api.config.webserverUrl.set(url)    // PUT /api/config/webserver-url
+```
+
+### `api.errorLog`
+
+```js
+api.errorLog.list(params?)  // GET /api/error-log[?...]
+api.errorLog.get(id)        // GET /api/error-log/:id
+api.errorLog.clear()        // DELETE /api/error-log
+api.errorLog.sources()      // GET /api/error-log/sources
+api.errorLog.count()        // GET /api/error-log?limit=0 (returns { entries: [], total: N })
+```
+
+### `api.notes`
+
+```js
+api.notes.list()   // GET /api/notes — returns all workspace notes grouped by project
+```
+
+### `api.version`
+
+```js
+api.version.get()  // GET /api/version — returns { appVersion: string, guiVersion: string }
+```
+
+---
+
+## GUI Components (`gui/public/js/components/`)
+
+### `createModalShell` (`components/modal-shell.js`)
+
+Shared overlay/modal DOM construction, ARIA wiring, Escape/backdrop-cancel handling, Tab/Shift+Tab focus trap, focus restoration, and busy-gating primitive used by every modal dialog (`confirm-dialog.js`; future modal consumers build on it too).
+
+```js
+import { createModalShell } from './components/modal-shell.js';
+
+// options: {
+//   titleText: string,             — text shown in the modal's title heading
+//   ariaLabelledbyId: string,      — id applied to the title heading and referenced by aria-labelledby
+//   ariaDescribedbyId?: string,    — id referenced by aria-describedby, when the caller has a description element
+//   className?: string,           — additional class applied to the .modal element alongside the base 'modal' class
+//   onCancel: () => void,         — invoked on Escape or backdrop click (while not busy)
+// }
+// Returns: {
+//   overlay: HTMLDivElement,             — the .modal-overlay element (not yet attached to the DOM)
+//   modal: HTMLDivElement,               — the .modal element, already appended to overlay; callers append their own body/actions content here
+//   mount: (initialFocusEl?: HTMLElement) => void,  — attaches overlay to document.body, wires listeners, and moves focus
+//   close: () => void,                   — detaches overlay, removes listeners, and restores focus to the pre-open element
+//   setBusy: (busy: boolean) => void,    — toggles whether Escape/backdrop-cancel are currently no-ops
+// }
+const shell = createModalShell({ titleText, ariaLabelledbyId, ariaDescribedbyId, className, onCancel });
+shell.modal.appendChild(bodyEl);
+shell.mount(initialFocusEl);
+// … later, on submit or successful confirm:
+shell.close();
+```
+
+> **Caller responsibility:** the shell has no knowledge of which buttons a caller built — callers remain responsible for disabling their own Confirm/Cancel/Submit buttons in response to `setBusy()`.
+
+### `showRepositoryModal` (`components/repository-modal.js`)
+
+Create/edit modal for a repository. A single implementation serves both flows since they share all four fields (URL, Name, ID, Credential), differing only in pre-fill values and which fields are disabled. Built on `createModalShell` with `className: 'modal--form'`.
+
+```js
+import { showRepositoryModal } from './components/repository-modal.js';
+
+// config: {
+//   mode: 'create'|'edit',
+//   repo?: { id, name, url, credentialId? },  — required (and only used) in 'edit' mode
+// }
+// Returns: Promise<Repository>  — normalised, saved repository;
+//   rejects with Error('User cancelled') on Cancel/Escape/backdrop-click.
+const repo = await showRepositoryModal({ mode: 'create' });
+const repo = await showRepositoryModal({ mode: 'edit', repo: existingRepo });
+```
+
+- URL is required and editable in both modes; Name is optional and editable in both modes.
+- ID is editable in create mode; disabled and excluded from the edit-mode `update()` payload.
+- Credential is a `<select>` repopulated after every `api.repositories.credentialOptionsForUrl()` fetch, selecting: the stored credential ID when still present among the options, else the single option flagged `auto: true` when exactly one exists, else `''` (None).
+- Edit mode fetches credential options once on mount (keyed by `repo.url`); create mode skips the initial fetch. Both modes debounce (~400ms) a re-fetch on URL-field `input` events.
+- Submit: create mode calls `create()` then `updateCredential()` when a credential is selected; edit mode calls `update(repo.id, { name, url })` then `updateCredential()` only when the selection differs from `repo.credentialId ?? ''`. A rejected `updateCredential()` still resolves the Promise with the pre-credential-update repository (with an error toast); a rejected primary call re-enables all controls, shows a toast, and keeps the modal open.
 
 ---
 

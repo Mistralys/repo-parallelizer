@@ -14,7 +14,7 @@ import { extractHost } from '../../git/git-credentials.js';
 
 /**
  * Registers all routes for the `/api/repositories` resource group on the
- * provided `Router` instance. This includes five standard CRUD routes and two
+ * provided `Router` instance. This includes the standard CRUD routes and the
  * credential-management routes that require access to the application
  * configuration.
  *
@@ -26,11 +26,12 @@ import { extractHost } from '../../git/git-credentials.js';
  * | GET    | /api/repositories                           | 200     | —       |
  * | GET    | /api/repositories/:id                       | 200     | 404     |
  * | POST   | /api/repositories                           | 201     | 400     |
- * | PUT    | /api/repositories/:id                       | 200     | 404     |
+ * | PUT    | /api/repositories/:id                       | 200     | 400/404 |
  * | DELETE | /api/repositories/:id                       | 204     | 404     |
  * | POST   | /api/repositories/:id/refresh-timestamp     | 200     | 404     |
  * | PUT    | /api/repositories/:id/credential            | 200     | 400/404 |
  * | GET    | /api/repositories/:id/credential-options    | 200     | 404     |
+ * | GET    | /api/repositories/credential-options        | 200     | 400     |
  */
 export function registerRepositoryRoutes(
     router: Router,
@@ -61,6 +62,42 @@ export function registerRepositoryRoutes(
         return repo;
     }
 
+    /**
+     * Filters `credentials` down to those whose `host` matches `host`, masks
+     * their tokens, and computes `autoSelected` when exactly one credential
+     * matches. Shared by the by-ID and by-URL credential-options handlers so
+     * the filter/mask/`autoSelected` computation cannot drift between them.
+     *
+     * @param host        - The hostname to match against, or `null` when the
+     *                      source URL has no extractable host (e.g. SSH URLs),
+     *                      in which case no credentials match.
+     * @param credentials - The full set of configured Git credential entries.
+     */
+    function buildCredentialOptionsResponse(
+        host: string | null,
+        credentials: GitCredentialEntry[],
+    ): { credentials: GitCredentialEntry[]; autoSelected?: string } {
+        const matching = host !== null
+            ? credentials.filter((c) => c.host === host)
+            : [];
+
+        // Mask tokens before sending — never expose raw tokens over the API.
+        const maskedCredentials: GitCredentialEntry[] = matching.map((c) => ({
+            ...c,
+            token: '***',
+        }));
+
+        const responseBody: { credentials: GitCredentialEntry[]; autoSelected?: string } = {
+            credentials: maskedCredentials,
+        };
+
+        if (matching.length === 1) {
+            responseBody.autoSelected = matching[0].id;
+        }
+
+        return responseBody;
+    }
+
     // ------------------------------------------------------------------
     // GET /api/repositories — list all
     // ------------------------------------------------------------------
@@ -71,6 +108,50 @@ export function registerRepositoryRoutes(
     ): void => {
         const repos = repoManager.list();
         sendJson(res, 200, repos);
+    });
+
+    // ------------------------------------------------------------------
+    // GET /api/repositories/credential-options?url= — list matching credentials
+    //   for an arbitrary URL, without requiring an existing repository record.
+    //
+    //   Registered before GET /api/repositories/:id — both patterns have the
+    //   same path-segment count, so registration order decides which one
+    //   matches first (mirrors the /sources-before-/:id precedent in
+    //   error-log.ts's route registration).
+    //
+    //   Used by the create/edit repository modal to match credentials as the
+    //   user types a URL, before the repository is saved (create mode) or as
+    //   the URL field is edited in-place (edit mode).
+    //
+    //   Query parameter:
+    //     url — required, non-empty string. 400 when missing or empty.
+    //
+    //   Response shape mirrors GET /:id/credential-options:
+    //     {
+    //       credentials: GitCredentialEntry[],  // token masked
+    //       autoSelected?: string               // id of the sole matching credential
+    //     }
+    // ------------------------------------------------------------------
+    router.get('/api/repositories/credential-options', (
+        req: IncomingMessage,
+        res: ServerResponse,
+        _params: Record<string, string>,
+    ): void => {
+        const rawUrl = req.url ?? '';
+        const queryString = rawUrl.includes('?') ? rawUrl.split('?')[1] : '';
+        const qs = new URLSearchParams(queryString);
+        const url = qs.get('url');
+
+        if (url === null || url.trim() === '') {
+            sendError(res, 400, 'Missing required query parameter: url (non-empty string).');
+            return;
+        }
+
+        const credentials: GitCredentialEntry[] = appConfig.gitCredentials ?? [];
+        const host = extractHost(url.trim());
+
+        const responseBody = buildCredentialOptionsResponse(host, credentials);
+        sendJson(res, 200, responseBody);
     });
 
     // ------------------------------------------------------------------
@@ -140,10 +221,11 @@ export function registerRepositoryRoutes(
     ): Promise<void> => {
         const id = params['id'];
 
-        if (!repoManager.exists(id)) {
-            sendError(res, 404, `Repository with ID "${id}" not found.`);
-            return;
-        }
+        // Captured pre-update so a subsequent URL-driven host change can be
+        // compared against the credential association that existed before this
+        // request (see host-incoherence auto-clear below).
+        const preUpdateRepo = resolveRepository(res, id);
+        if (preUpdateRepo === undefined) return;
 
         let body: unknown;
         try {
@@ -158,23 +240,56 @@ export function registerRepositoryRoutes(
             return;
         }
 
-        const { name } = body as { name?: unknown };
+        const { name, url } = body as { name?: unknown; url?: unknown };
 
         if (typeof name !== 'string' || name.trim() === '') {
             sendError(res, 400, 'Missing required field: name (non-empty string).');
             return;
         }
 
+        if (url !== undefined && (typeof url !== 'string' || url.trim() === '')) {
+            sendError(res, 400, 'Field url, when provided, must be a non-empty string.');
+            return;
+        }
+
+        const updateParams: { name: string; url?: string } = { name: name.trim() };
+        if (typeof url === 'string') updateParams.url = url;
+
         try {
-            const updated = repoManager.update(id, { name: name.trim() });
+            let updated = repoManager.update(id, updateParams);
+
+            // Host-incoherence auto-clear: a URL edit that moves the repository
+            // to a different host can strand a pinned CredentialId pointing at
+            // the old host. Mirrors PUT /:id/credential's host-coherence guard,
+            // but clears rather than rejects since this is an incidental side
+            // effect of an otherwise-valid name/URL edit.
+            if (typeof url === 'string' && preUpdateRepo.CredentialId !== undefined) {
+                const credentials: GitCredentialEntry[] = appConfig.gitCredentials ?? [];
+                const credential = credentials.find((c) => c.id === preUpdateRepo.CredentialId);
+                const newHost = extractHost(updated.Url);
+
+                if (credential !== undefined && newHost !== null && credential.host !== newHost) {
+                    updated = repoManager.updateCredential(id, null);
+                    errorLogManager?.append({
+                        Severity: 'audit',
+                        Source: 'credential-audit',
+                        Operation: 'clear-credential',
+                        Context: { RepositoryId: id },
+                        Message: `Credential association cleared for repository "${id}" after a URL edit changed its host.`,
+                    });
+                }
+            }
+
             sendJson(res, 200, updated);
         } catch (err) {
             // update() throws NotFoundError if the ID was removed
-            // between the exists() check and the update() call (race condition).
+            // between the resolveRepository() check and the update() call
+            // (race condition). Any other Error (e.g. duplicate URL) is
+            // surfaced as a 400, mirroring POST /api/repositories.
             if (err instanceof NotFoundError) {
                 sendError(res, 404, err.message);
             } else {
-                sendError(res, 500, 'Internal server error.');
+                sendError(res, 400, err instanceof Error ? err.message : 'Could not update repository.');
             }
         }
     });
@@ -351,26 +466,7 @@ export function registerRepositoryRoutes(
         const credentials: GitCredentialEntry[] = appConfig.gitCredentials ?? [];
         const repoHost = extractHost(repo.Url);
 
-        // Filter to credentials whose host matches the repository's URL host.
-        // For non-HTTPS URLs (e.g. SSH), repoHost is null and no credentials match.
-        const matching = repoHost !== null
-            ? credentials.filter((c) => c.host === repoHost)
-            : [];
-
-        // Mask tokens before sending — never expose raw tokens over the API.
-        const maskedCredentials: GitCredentialEntry[] = matching.map((c) => ({
-            ...c,
-            token: '***',
-        }));
-
-        const responseBody: { credentials: GitCredentialEntry[]; autoSelected?: string } = {
-            credentials: maskedCredentials,
-        };
-
-        if (matching.length === 1) {
-            responseBody.autoSelected = matching[0].id;
-        }
-
+        const responseBody = buildCredentialOptionsResponse(repoHost, credentials);
         sendJson(res, 200, responseBody);
     });
 }
