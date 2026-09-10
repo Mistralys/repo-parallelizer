@@ -466,6 +466,34 @@ test('loadConfig() trims leading/trailing whitespace from all four fields in new
     assert.strictEqual(entry.token, 'ghp_token123');
 });
 
+test('loadConfig() lowercases the host field in new-format entries (hostnames are case-insensitive)', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: [
+            { id: 'github-com', label: 'GitHub', host: 'GitHub.COM', token: 'ghp_token123' },
+        ],
+    });
+    const config = loadConfig(configPath);
+    const entry = config.gitCredentials![0];
+    assert.strictEqual(entry.host, 'github.com');
+    assert.strictEqual(entry.label, 'GitHub', 'label casing must be preserved');
+});
+
+test('loadConfig() lowercases the host field migrated from legacy-format entries', () => {
+    const dir = makeTempDir();
+    const configPath = writeConfig(dir, {
+        projectsFolder: '/tmp/projects',
+        storageFolder: '/tmp/storage',
+        gitCredentials: { 'GitHub.COM': 'ghp_token123' },
+    });
+    const config = loadConfig(configPath);
+    const entry = config.gitCredentials![0];
+    assert.strictEqual(entry.host, 'github.com');
+    assert.strictEqual(entry.label, 'GitHub.COM', 'legacy label keeps the original hostname casing');
+});
+
 test('loadConfig() trims all four fields across multiple new-format entries independently', () => {
     const dir = makeTempDir();
     const configPath = writeConfig(dir, {

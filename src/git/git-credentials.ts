@@ -43,6 +43,21 @@ export function extractHost(url: string): string | null {
 }
 
 /**
+ * Case-insensitive hostname equality. Hostnames are not case-sensitive (RFC 4343),
+ * and `extractHost()` always returns a lowercased hostname (WHATWG URL parser
+ * behaviour) while a stored `GitCredentialEntry.host` is only ever trimmed — so a
+ * plain `===` comparison would silently never match a credential host typed with
+ * different casing (e.g. "GitHub.com").
+ *
+ * @param a - A hostname to compare.
+ * @param b - The other hostname to compare.
+ * @returns Whether `a` and `b` are the same hostname, ignoring case.
+ */
+export function hostsEqual(a: string, b: string): boolean {
+    return a.toLowerCase() === b.toLowerCase();
+}
+
+/**
  * Resolves the credential to use for a given repository URL.
  *
  * Resolution strategy:
@@ -83,7 +98,7 @@ export function resolveCredential(
     const host = extractHost(url);
     if (host === null) return null;
 
-    const matches = credentials.filter((c) => c.host === host);
+    const matches = credentials.filter((c) => hostsEqual(c.host, host));
     return matches.length === 1 ? matches[0] : null;
 }
 

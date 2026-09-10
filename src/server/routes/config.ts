@@ -298,8 +298,10 @@ export function registerConfigRoutes(options: ConfigRoutesOptions): void {
 
         const cleanLabel = label.trim();
         // Use the provided value; on the update path fall back to the existing entry's value.
+        // Lowercased — hostnames are case-insensitive, and matching elsewhere compares
+        // against a URL-derived host that is always lowercase (extractHost()).
         const cleanHost = (typeof host === 'string' && host.trim() !== '')
-            ? host.trim()
+            ? host.trim().toLowerCase()
             : resolvedExistingEntry!.host;
         const cleanToken = (typeof token === 'string' && token.trim() !== '')
             ? token.trim()

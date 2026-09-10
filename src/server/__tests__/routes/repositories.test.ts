@@ -683,6 +683,27 @@ test('PUT /api/repositories/:id/credential: clearing (credentialId: null) skips 
     assert.strictEqual(updated.CredentialId, undefined);
 });
 
+test('PUT /api/repositories/:id/credential: returns 200 when credential host matches the repository host only case-insensitively', async () => {
+    const credential: GitCredentialEntry = {
+        id: 'github-cred',
+        label: 'GitHub',
+        host: 'GitHub.COM',
+        token: 'ghp_secret',
+    };
+    const { router, manager } = buildSut(makeAppConfig([credential]));
+    manager.seed([{ Id: 'my-repo', Name: 'My Repo', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const req = mockRequest('PUT', '/api/repositories/my-repo/credential', { credentialId: 'github-cred' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as Repository;
+    assert.strictEqual(updated.CredentialId, 'github-cred');
+});
+
 // ---------------------------------------------------------------------------
 // GET /api/repositories/:id/credential-options — list matching credentials
 // ---------------------------------------------------------------------------
@@ -811,6 +832,25 @@ test('GET /api/repositories/credential-options: returns only credentials matchin
     assert.strictEqual(body.credentials.length, 1);
     assert.strictEqual(body.credentials[0].id, 'cred-github');
     assert.strictEqual(body.credentials[0].token, '***', 'token must be masked');
+});
+
+test('GET /api/repositories/credential-options: matches the URL host case-insensitively against a stored credential host', () => {
+    const cred: GitCredentialEntry = {
+        id: 'cred-github',
+        label: 'GitHub',
+        host: 'GitHub.COM',
+        token: 'ghp_secret',
+    };
+    const { router } = buildSut(makeAppConfig([cred]));
+
+    const req = mockRequest('GET', '/api/repositories/credential-options?url=' + encodeURIComponent('https://github.com/org/my-repo.git'));
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as { credentials: GitCredentialEntry[]; autoSelected?: string };
+    assert.strictEqual(body.credentials.length, 1);
+    assert.strictEqual(body.autoSelected, 'cred-github');
 });
 
 test('GET /api/repositories/credential-options: includes autoSelected when exactly one credential matches the host', () => {

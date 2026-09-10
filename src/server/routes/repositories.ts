@@ -6,7 +6,7 @@ import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUti
 import type { Repository } from '../../models/repository/repository.types.js';
 import type { AppConfig, GitCredentialEntry } from '../../config/config.types.js';
 import type { ErrorLogManager } from '../../error-log/error-log.manager.js';
-import { extractHost } from '../../git/git-credentials.js';
+import { extractHost, hostsEqual } from '../../git/git-credentials.js';
 
 // ---------------------------------------------------------------------------
 // Route registration
@@ -78,7 +78,7 @@ export function registerRepositoryRoutes(
         credentials: GitCredentialEntry[],
     ): { credentials: GitCredentialEntry[]; autoSelected?: string } {
         const matching = host !== null
-            ? credentials.filter((c) => c.host === host)
+            ? credentials.filter((c) => hostsEqual(c.host, host))
             : [];
 
         // Mask tokens before sending — never expose raw tokens over the API.
@@ -268,7 +268,7 @@ export function registerRepositoryRoutes(
                 const credential = credentials.find((c) => c.id === preUpdateRepo.CredentialId);
                 const newHost = extractHost(updated.Url);
 
-                if (credential !== undefined && newHost !== null && credential.host !== newHost) {
+                if (credential !== undefined && newHost !== null && !hostsEqual(credential.host, newHost)) {
                     updated = repoManager.updateCredential(id, null);
                     errorLogManager?.append({
                         Severity: 'audit',
@@ -402,7 +402,7 @@ export function registerRepositoryRoutes(
             // match the repository URL's hostname. SSH URLs (null repoHost) are
             // exempt — SSH auth is not handled by credential tokens.
             const repoHost = extractHost(repo.Url);
-            if (repoHost !== null && credential.host !== repoHost) {
+            if (repoHost !== null && !hostsEqual(credential.host, repoHost)) {
                 sendError(
                     res,
                     400,

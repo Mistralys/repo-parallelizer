@@ -177,7 +177,9 @@ function parseIntegerField(
  * field values. For new-format array entries, all four fields (`id`, `label`,
  * `host`, `token`) are trimmed. For legacy-format entries, all three of `label`,
  * `host`, and `token` are trimmed — `label` is derived from the hostname key
- * after trimming, consistent with the new-format path.
+ * after trimming, consistent with the new-format path. `host` is additionally
+ * lowercased in both formats (hostnames are case-insensitive; `label` keeps its
+ * original casing for display).
  *
  * @returns `undefined` when the field is absent or null; otherwise a
  *   `GitCredentialEntry[]` (possibly empty).
@@ -242,11 +244,14 @@ function parseGitCredentials(value: unknown): GitCredentialEntry[] | undefined {
         }
 
         // Trim all four fields on every entry before returning so that
-        // downstream consumers always receive normalized values.
+        // downstream consumers always receive normalized values. `host` is
+        // additionally lowercased — hostnames are case-insensitive (RFC 4343),
+        // and matching elsewhere (buildCredentialOptionsResponse, resolveCredential)
+        // compares against a URL-derived host that is always lowercase.
         return (value as Array<Record<string, unknown>>).map(entry => ({
             id: (entry['id'] as string).trim(),
             label: (entry['label'] as string).trim(),
-            host: (entry['host'] as string).trim(),
+            host: (entry['host'] as string).trim().toLowerCase(),
             token: (entry['token'] as string).trim(),
         })) as GitCredentialEntry[];
     }
@@ -289,7 +294,7 @@ function parseGitCredentials(value: unknown): GitCredentialEntry[] | undefined {
             result.push({
                 id: candidateId,
                 label: host.trim(),
-                host: host.trim(),
+                host: host.trim().toLowerCase(),
                 token: token.trim(),
             });
         }

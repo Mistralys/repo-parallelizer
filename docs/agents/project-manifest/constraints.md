@@ -30,6 +30,8 @@ This is a strict requirement of the `Node16` module resolution setting. TypeScri
 
 The `host` field in a `GitCredentialEntry` must not contain `/`, `\`, null bytes (`\0`), or whitespace characters. These characters are invalid in a hostname and are rejected with HTTP 400 by `PUT /api/config/credentials`. The validation regex is `/[/\\\0\s]/`. Valid examples: `github.com`, `gitlab.example.com`.
 
+**Case-insensitivity:** `host` is lowercased at storage time by both `parseGitCredentials()` (config file load/migration) and `PUT /api/config/credentials` (API create/update) — hostnames are case-insensitive per RFC 4343. Every host-comparison call site (`resolveCredential()`, `buildCredentialOptionsResponse()`, the host-incoherence auto-clear, and the `PUT /:id/credential` host-coherence guard) additionally compares via `hostsEqual()` rather than `===`, as defense-in-depth for any already-persisted mixed-case data.
+
 ### Per-Field Length Limits
 
 | Field | Maximum length |

@@ -6,6 +6,7 @@ import {
     resolveCredential,
     hasEmbeddedCredentials,
     stripEmbeddedCredentials,
+    hostsEqual,
 } from '../git/git-credentials.js';
 import type { GitCredentialEntry } from '../config/config.types.js';
 
@@ -177,6 +178,24 @@ test('resolveCredential() returns null when credentials array is empty and crede
 test('resolveCredential() returns null for a non-HTTPS URL (auto-selection path)', () => {
     const result = resolveCredential('git@github.com:org/repo.git', CREDS);
     assert.strictEqual(result, null);
+});
+
+test('resolveCredential() auto-selects a host match regardless of the stored host\'s casing', () => {
+    const mixedCaseCreds: GitCredentialEntry[] = [
+        { id: 'github-personal', label: 'GitHub Personal', host: 'GitHub.COM', token: 'ghp_abc' },
+    ];
+    const result = resolveCredential('https://github.com/org/repo.git', mixedCaseCreds);
+    assert.deepStrictEqual(result, mixedCaseCreds[0]);
+});
+
+// ─── hostsEqual() ──────────────────────────────────────────────────────────────
+
+test('hostsEqual() returns true for hostnames differing only by case', () => {
+    assert.strictEqual(hostsEqual('GitHub.com', 'github.com'), true);
+});
+
+test('hostsEqual() returns false for genuinely different hostnames', () => {
+    assert.strictEqual(hostsEqual('github.com', 'gitlab.com'), false);
 });
 
 // ─── injectCredentialToken() ──────────────────────────────────────────────────

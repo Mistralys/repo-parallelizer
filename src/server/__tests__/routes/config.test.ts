@@ -648,6 +648,26 @@ test('PUT /api/config/credentials: accepts valid hostname without path separator
     assert.strictEqual(body[0]?.host, 'github.com');
 });
 
+test('PUT /api/config/credentials: lowercases the host field on create (hostnames are case-insensitive)', async () => {
+    const configPath = makeConfigFile();
+    const appConfig = makeAppConfig();
+    const router = buildSut(appConfig, configPath);
+
+    const req = mockRequest('PUT', '/api/config/credentials', {
+        label: 'GitHub',
+        host: 'GitHub.COM',
+        token: 'ghp_valid_token',
+    });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+    await new Promise<void>((resolve) => process.nextTick(resolve));
+
+    assert.strictEqual(mock.statusCode, 200);
+    const body = JSON.parse(mock.body) as GitCredentialEntry[];
+    assert.strictEqual(body[0]?.host, 'github.com');
+});
+
 // ---------------------------------------------------------------------------
 // PUT /api/config/credentials — per-field length limits (WP-005)
 // ---------------------------------------------------------------------------

@@ -115,6 +115,7 @@ function runGitOrThrow(args: string[], cwd?: string): Promise<string>
 
 ```typescript
 function extractHost(url: string): string | null
+function hostsEqual(a: string, b: string): boolean
 function resolveCredential(url: string, credentials: GitCredentialEntry[], credentialId?: string): GitCredentialEntry | null
 function injectCredentialToken(url: string, token: string): string
 function hasEmbeddedCredentials(url: string): boolean
@@ -135,6 +136,8 @@ const authenticatedUrl = entry ? injectCredentialToken(repoUrl, entry.token) : r
 2. **Auto-selection** (`credentialId` omitted) — filters by URL hostname; returns the single match, or `null` for zero or multiple matches (ambiguous).
 
 > **SECURITY — `resolveCredential` with explicit `credentialId`:** When a `credentialId` is supplied, no host cross-validation is performed. The caller is responsible for ensuring the URL's host is consistent with the credential's configured `host` before using the resolved token (enforce this in orchestrators, not in the utility itself).
+
+> **Host matching is case-insensitive:** `hostsEqual(a, b)` compares hostnames ignoring case (hostnames are case-insensitive per RFC 4343). `resolveCredential`'s auto-selection path and every host-comparison site in `server/routes/repositories.ts` (`buildCredentialOptionsResponse`, the host-incoherence auto-clear, and the `PUT /:id/credential` host-coherence guard) use `hostsEqual` rather than `===`, since `extractHost()` always returns a lowercased hostname while a stored `GitCredentialEntry.host` is only trimmed. `host` is additionally lowercased at storage time (`parseGitCredentials`, `PUT /api/config/credentials`) so newly-configured credentials are canonical; the case-insensitive comparison remains as defense-in-depth for any already-persisted mixed-case data.
 
 > **`injectCredentialToken`:** Injects a pre-resolved token string as the WHATWG URL username. Token injection uses property assignment (`parsed.username = token`), not string concatenation — special characters are automatically percent-encoded.
 
