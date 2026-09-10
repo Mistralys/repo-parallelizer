@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.3.0 - Multi-Credential Support & Repository Modal
+
+**Repositories can now be configured with multiple named Git credentials, selectable per repository.**
+A new modal form replaces inline editing for creating and editing repositories. Credential host
+matching is also more reliable, and a new in-app guide walks through setting up Git tokens.
+
+- Credentials: Added support for multiple named Git credentials, selectable per repository.
+- GUI: Added credential selection controls and status badges to repository and workspace views.
+- GUI: Added a modal form for creating and editing repositories.
+- Credentials: Fixed credential matching for hosts with different letter casing.
+- GUI: Added a Git token setup guide linked from the settings page.
+- Credentials: Updating a credential's label no longer requires re-entering its host and token.
+- GUI: Clarified credential selection hints and removed confusing auto-preselection.
+- GUI: Fixed a missing page title on the Notes view.
+
 ## v1.2.0 - Notes Display Settings
 - GUI: Added Notes Display section to the settings page with card height and column count controls.
 - GUI: Notes Collected view now applies saved card height and column layout.
