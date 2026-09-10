@@ -788,7 +788,7 @@ test('Credential section — dropdown is populated from credential options (None
     }
 });
 
-test('Credential section — auto-selected credential shows (auto) indicator', async () => {
+test('Credential section — auto-matched credential is labeled but not pre-selected when no CredentialId is stored', async () => {
     mockCredentialOptions = [
         { credentialId: 'cred-1', label: 'My Token', host: 'github.com', auto: true },
     ];
@@ -802,10 +802,10 @@ test('Credential section — auto-selected credential shows (auto) indicator', a
         assert.ok(select, 'Credential <select> should exist');
 
         const options = [...select.querySelectorAll('option')];
-        const autoOpt = options.find((o) => o.textContent.includes('(auto)'));
-        assert.ok(autoOpt, 'Auto-matched credential option should include "(auto)" in its label');
-        // Only one option → should be pre-selected
-        assert.strictEqual(select.value, 'cred-1', 'Auto-matched credential should be pre-selected');
+        const autoOpt = options.find((o) => o.textContent.includes('(recommended match)'));
+        assert.ok(autoOpt, 'Auto-matched credential option should include "(recommended match)" in its label');
+        // No stored CredentialId → "None" must remain selected, matching the repositories list's badge.
+        assert.strictEqual(select.value, '', 'Auto-matched credential must not be pre-selected without a stored CredentialId');
     } finally {
         mockCredentialOptions = [];
         cleanupContainers();

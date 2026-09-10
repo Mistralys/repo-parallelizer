@@ -41,12 +41,17 @@ const URL_CHANGE_DEBOUNCE_MS = 400;
 
 /**
  * Decide which credential option should be selected after a
- * `credentialOptionsForUrl()` fetch, applying the priority:
- *   1. The stored credential ID, when it is still present among `options`.
- *   2. The single option flagged `auto: true`, when exactly one exists.
- *   3. `''` (None), otherwise.
+ * `credentialOptionsForUrl()` fetch: the stored credential ID, when it is
+ * still present among `options`; `''` (None) otherwise.
  *
- * @param {Array<{ credentialId: string, auto: boolean }>} options
+ * Deliberately does *not* fall back to the single `auto: true` match — a
+ * repository with no stored credential must keep showing "None" selected,
+ * consistent with the "No credential configured" state shown in the
+ * repositories list. The auto-detected match is still visually flagged in
+ * its option label (see `rebuildCredentialSelect`) so the user can pick it
+ * deliberately.
+ *
+ * @param {Array<{ credentialId: string }>} options
  * @param {string} storedCredentialId
  * @returns {string}
  */
@@ -54,17 +59,14 @@ function computeSelectedCredentialId(options, storedCredentialId) {
     if (storedCredentialId && options.some((o) => o.credentialId === storedCredentialId)) {
         return storedCredentialId;
     }
-    const autoMatches = options.filter((o) => o.auto);
-    if (autoMatches.length === 1) {
-        return autoMatches[0].credentialId;
-    }
     return '';
 }
 
 /**
  * Clear and repopulate a credential `<select>` element with a "None" option
- * plus one option per entry in `options`, then apply the stored/auto-match/
- * None selection priority.
+ * plus one option per entry in `options`, then apply the stored-ID/None
+ * selection priority. The sole `auto: true` entry (when present) is labeled
+ * as the recommended match, without being auto-selected.
  *
  * @param {HTMLSelectElement} selectEl
  * @param {Array<{ credentialId: string, label: string, auto: boolean }>} options
@@ -81,11 +83,42 @@ function rebuildCredentialSelect(selectEl, options, storedCredentialId) {
     options.forEach((opt) => {
         const optionEl = document.createElement('option');
         optionEl.value = opt.credentialId;
-        optionEl.textContent = opt.label;
+        optionEl.textContent = opt.auto ? `${opt.label} (recommended match)` : opt.label;
         selectEl.appendChild(optionEl);
     });
 
     selectEl.value = computeSelectedCredentialId(options, storedCredentialId);
+}
+
+/**
+ * Whether `url` is an HTTPS URL, mirroring the server's `extractHost()` check
+ * (only `https:` URLs carry a matchable host — SSH and plain HTTP URLs never do).
+ *
+ * @param {string} url
+ * @returns {boolean}
+ */
+function isHttpsUrl(url) {
+    try {
+        return new URL(url).protocol === 'https:';
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Explains why the credential select has no matching option(s) for `url`,
+ * so an empty ("None"-only) select reads as expected behaviour rather than
+ * a bug. Returns `''` when `options` is non-empty (no explanation needed).
+ *
+ * @param {string} url
+ * @param {Array} options
+ * @returns {string}
+ */
+function describeEmptyCredentialOptions(url, options) {
+    if (options.length > 0) return '';
+    return isHttpsUrl(url)
+        ? 'No saved credential is configured for this URL\'s host.'
+        : 'Credentials can only be matched to HTTPS URLs — this URL\'s scheme (e.g. SSH or HTTP) is not supported.';
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +171,13 @@ export function showRepositoryModal({ mode, repo }) {
         });
         const credentialSelect = credentialField.querySelector('select');
 
+        const credentialHint = document.createElement('span');
+        credentialHint.className = 'hint';
+        credentialHint.id = `${credentialSelect.id}-hint`;
+        credentialHint.hidden = true;
+        credentialField.appendChild(credentialHint);
+        credentialSelect.setAttribute('aria-describedby', credentialHint.id);
+
         const form = document.createElement('form');
         form.noValidate = true;
         form.appendChild(urlField);
@@ -179,11 +219,17 @@ export function showRepositoryModal({ mode, repo }) {
         // must not overwrite the select with its now-stale options.
         let credentialRequestId = 0;
 
+        function setCredentialHint(text) {
+            credentialHint.textContent = text;
+            credentialHint.hidden = !text;
+        }
+
         async function refreshCredentialOptions(url) {
             const requestId = ++credentialRequestId;
             const trimmedUrl = url.trim();
             if (!trimmedUrl) {
                 rebuildCredentialSelect(credentialSelect, [], storedCredentialId);
+                setCredentialHint('');
                 return;
             }
             let options;
@@ -198,6 +244,7 @@ export function showRepositoryModal({ mode, repo }) {
                 return;
             }
             rebuildCredentialSelect(credentialSelect, options, storedCredentialId);
+            setCredentialHint(describeEmptyCredentialOptions(trimmedUrl, options));
         }
 
         urlInput.addEventListener('input', () => {

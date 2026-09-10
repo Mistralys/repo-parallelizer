@@ -13,7 +13,8 @@
  *         repo.credentialId ?? ''.
  *   AC4 — Changing the URL field in either mode triggers a debounced re-fetch
  *         of credentialOptionsForUrl() and repopulates the select,
- *         re-applying the stored/auto-match/None priority.
+ *         re-applying the stored-ID/None priority (auto-matched options are
+ *         labeled but never auto-selected).
  *   AC5 — Cancel, Escape, and backdrop-click reject the modal's Promise
  *         without any API call, in both modes.
  *   AC6 — While create()/update()/updateCredential() is in flight, Submit,
@@ -382,6 +383,41 @@ test('AC4: an out-of-order (slower, earlier) credentialOptionsForUrl() response 
         ['', 'cred-b'],
         'the stale response for URL A must not overwrite the select repopulated by URL B',
     );
+
+    dispatchClick(getCancelBtn());
+    await promise.catch(() => {});
+});
+
+test('AC4: a repository with no stored credential is not auto-selected even when a single option is flagged auto: true', async () => {
+    api.repositories.credentialOptionsForUrl = async (url) => {
+        credentialOptionsCalls.push(url);
+        return [{ credentialId: 'cred-auto', label: 'Auto Credential', host: 'github.com', auto: true }];
+    };
+
+    const repoWithNoCredential = { ...EXISTING_REPO, credentialId: undefined };
+    const promise = showRepositoryModal({ mode: 'edit', repo: repoWithNoCredential });
+    await wait(0); // let the initial credentialOptionsForUrl fetch resolve
+
+    assert.equal(getCredentialSelect().value, '', 'None must remain selected, matching the list\'s "no credential" state');
+
+    dispatchClick(getCancelBtn());
+    await promise.catch(() => {});
+});
+
+test('AC4: the auto-matched option is labeled as the recommended match without being auto-selected', async () => {
+    api.repositories.credentialOptionsForUrl = async (url) => {
+        credentialOptionsCalls.push(url);
+        return [{ credentialId: 'cred-auto', label: 'Auto Credential', host: 'github.com', auto: true }];
+    };
+
+    const repoWithNoCredential = { ...EXISTING_REPO, credentialId: undefined };
+    const promise = showRepositoryModal({ mode: 'edit', repo: repoWithNoCredential });
+    await wait(0);
+
+    const select = getCredentialSelect();
+    const autoOption = Array.from(select.options).find((o) => o.value === 'cred-auto');
+    assert.equal(autoOption.textContent, 'Auto Credential (recommended match)');
+    assert.equal(select.value, '', 'the recommended option must be labeled, not selected');
 
     dispatchClick(getCancelBtn());
     await promise.catch(() => {});

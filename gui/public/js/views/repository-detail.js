@@ -70,9 +70,11 @@ export function setRouter(router) {
  *
  * Fetches `GET /api/repositories/:id/credential-options`, renders a `<select>`
  * dropdown with a "None" option plus each matching credential shown as
- * `label (host)`. When exactly one credential auto-matches the repository URL
- * it is pre-selected with an "(auto)" suffix. When a stored `CredentialId`
- * exists it is pre-selected from the list. Changing the selection calls
+ * `label (host)`. The sole `auto=true` match (when present) is labeled with a
+ * "(recommended match)" suffix, but is never pre-selected on its own — only a
+ * stored `CredentialId` pre-selects an option, so a repository with no stored
+ * credential keeps showing "None", consistent with the repositories list's
+ * "No credential configured" badge. Changing the selection calls
  * `PUT /api/repositories/:id/credential`.
  *
  * @param {string}      repoId       - Repository ID.
@@ -112,33 +114,21 @@ function buildCredentialSection(repoId, storedCredentialId) {
             noneOpt.textContent = 'None';
             select.appendChild(noneOpt);
 
-            // Determine auto-select: exactly one matching option returned with auto=true.
-            // Auto-select only fires when exactly one option is returned with auto=true.
-            // Multiple options with auto=true intentionally leave the selection on None
-            // so the user must choose explicitly — the backend signals ambiguity by
-            // returning more than one match.
-            const autoOption = Array.isArray(options) && options.length === 1 && options[0].auto
-                ? options[0]
-                : null;
-
-            // Add credential options.
+            // Add credential options — the sole auto-match (if any) is labeled,
+            // not pre-selected; see the doc comment above for the rationale.
             if (Array.isArray(options)) {
                 options.forEach((opt) => {
                     const el = document.createElement('option');
                     el.value = opt.credentialId || '';
                     const baseLabel = opt.label ? `${opt.label} (${opt.host})` : opt.host || opt.credentialId;
-                    el.textContent = opt.auto ? `${baseLabel} (auto)` : baseLabel;
+                    el.textContent = opt.auto ? `${baseLabel} (recommended match)` : baseLabel;
                     select.appendChild(el);
                 });
             }
 
-            // Set pre-selected value:
-            // 1. Stored credentialId takes priority.
-            // 2. Single auto-match is selected when no stored value exists.
+            // Only a stored credentialId pre-selects an option; otherwise "None" stands.
             if (storedCredentialId) {
                 select.value = storedCredentialId;
-            } else if (autoOption) {
-                select.value = autoOption.credentialId || '';
             }
 
             controlRow.appendChild(select);
