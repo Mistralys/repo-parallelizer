@@ -9,6 +9,7 @@ _SOURCE: Page-level view functions_
             └── views/
                 └── branch-switch.js
                 └── dashboard.js
+                └── docs-git-tokens.js
                 └── error-log.js
                 └── notes-collected.js
                 └── project-detail.js
@@ -1673,6 +1674,341 @@ export async function renderDashboard(container, _params) {
 }
 
 ```
+###  Path: `/gui/public/js/views/docs-git-tokens.js`
+
+```js
+/**
+ * Documentation View: Setting Up Git Tokens — Repo Parallelizer GUI.
+ *
+ * A static documentation page that explains how to create and configure
+ * Personal Access Tokens (PATs) in Paralizer, including the specific steps
+ * required for private repositories hosted in GitHub organizations that
+ * enforce SAML Single Sign-On (SSO).
+ *
+ * All content is hard-coded static markup — no API calls are made and no
+ * user data is rendered, so innerHTML is safe to use for the page skeleton.
+ *
+ * @param {HTMLElement} container - The `#app` root element supplied by the router.
+ * @param {Object}      _params   - Route params (none for this route).
+ */
+
+import { APP_NAME_SHORT } from '../utils/constants.js';
+
+// ---------------------------------------------------------------------------
+// Section builders
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the page header with an `<h1>` and a back-link to Settings.
+ *
+ * @returns {HTMLElement}
+ */
+function buildPageHeader() {
+    const header = document.createElement('div');
+    header.className = 'docs-page-header';
+
+    const backLink = document.createElement('a');
+    backLink.href = '#/settings';
+    backLink.className = 'docs-back-link';
+    backLink.textContent = '← Back to Settings';
+    header.appendChild(backLink);
+
+    const h1 = document.createElement('h1');
+    h1.textContent = 'Setting Up Git Tokens';
+    header.appendChild(h1);
+
+    const intro = document.createElement('p');
+    intro.className = 'docs-intro';
+    intro.textContent =
+        'Paralizer uses Personal Access Tokens (PATs) to authenticate with private ' +
+        'Git repositories over HTTPS. This page explains how to create the right kind ' +
+        'of token, configure it in Paralizer, and troubleshoot the common errors that ' +
+        'occur with organization-owned repositories.';
+    header.appendChild(intro);
+
+    return header;
+}
+
+/**
+ * Build a `<section>` with an `<h2>` heading.
+ *
+ * @param {string} headingText
+ * @returns {HTMLElement}
+ */
+function buildSection(headingText) {
+    const section = document.createElement('section');
+    section.className = 'docs-section';
+
+    const h2 = document.createElement('h2');
+    h2.textContent = headingText;
+    section.appendChild(h2);
+
+    return section;
+}
+
+/**
+ * Append a paragraph to an element.
+ *
+ * @param {HTMLElement} parent
+ * @param {string}      text
+ * @returns {HTMLParagraphElement}
+ */
+function appendP(parent, text) {
+    const p = document.createElement('p');
+    p.textContent = text;
+    parent.appendChild(p);
+    return p;
+}
+
+/**
+ * Build an ordered list from an array of strings.
+ *
+ * @param {string[]} items
+ * @returns {HTMLOListElement}
+ */
+function buildOl(items) {
+    const ol = document.createElement('ol');
+    for (const item of items) {
+        const li = document.createElement('li');
+        li.textContent = item;
+        ol.appendChild(li);
+    }
+    return ol;
+}
+
+/**
+ * Build a notice box (info or warning).
+ *
+ * @param {'info'|'warning'} type
+ * @param {string}           text
+ * @returns {HTMLElement}
+ */
+function buildNotice(type, text) {
+    const div = document.createElement('div');
+    div.className = `docs-notice docs-notice--${type}`;
+
+    const p = document.createElement('p');
+    p.textContent = text;
+    div.appendChild(p);
+
+    return div;
+}
+
+// ---------------------------------------------------------------------------
+// Section: Adding a credential in Paralizer
+// ---------------------------------------------------------------------------
+
+function buildAddingSection() {
+    const section = buildSection('Adding a Credential in Paralizer');
+
+    appendP(section,
+        'Credentials are managed in Settings → Git Credentials. Each entry holds a ' +
+        'Label (a human-readable name for your reference), the Host the token applies ' +
+        'to (e.g. github.com), and the Token itself.'
+    );
+
+    appendP(section, 'To add a new credential:');
+    section.appendChild(buildOl([
+        'Open Settings from the top navigation bar.',
+        'In the Git Credentials section, click "Add / Update Credential".',
+        'Fill in a Label, the Host (e.g. github.com), and paste your token.',
+        'Click "Add Credential". The token is stored masked — only the last 4 characters remain visible.',
+    ]));
+
+    appendP(section,
+        'Once a credential is saved, it is available for assignment to any repository ' +
+        'whose remote URL hostname matches the credential\'s host. You can assign a ' +
+        'credential to a repository from the Repositories list or the Repository Detail page.'
+    );
+
+    return section;
+}
+
+// ---------------------------------------------------------------------------
+// Section: Classic vs Fine-Grained PATs
+// ---------------------------------------------------------------------------
+
+function buildTokenTypesSection() {
+    const section = buildSection('Token Types: Classic vs Fine-Grained');
+
+    appendP(section,
+        'GitHub offers two kinds of Personal Access Tokens. Both work with Paralizer, ' +
+        'but they behave differently — especially for organization-owned repositories.'
+    );
+
+    // Classic PAT
+    const h3Classic = document.createElement('h3');
+    h3Classic.textContent = 'Classic PAT';
+    section.appendChild(h3Classic);
+
+    appendP(section,
+        'Classic tokens apply broadly to all repositories your account can access. They ' +
+        'require the repo scope to clone and push to private repositories. For ' +
+        'organization repositories that enforce SAML SSO, Classic PATs require an ' +
+        'additional one-time SSO authorization step after the token is created — see the ' +
+        '"Organization Repositories & SSO" section below.'
+    );
+
+    // Fine-Grained PAT
+    const h3Fine = document.createElement('h3');
+    h3Fine.textContent = 'Fine-Grained PAT';
+    section.appendChild(h3Fine);
+
+    appendP(section,
+        'Fine-grained tokens are scoped to a single resource owner — either your personal ' +
+        'account or an organization. They do not require a separate SSO authorization step; ' +
+        'org access is granted during the token creation wizard. They also require you to ' +
+        'explicitly select which repositories the token may access.'
+    );
+
+    section.appendChild(buildNotice('warning',
+        'A fine-grained token created under your personal account cannot access ' +
+        'organization repositories, even if you are a member of the organization. The ' +
+        'resource owner must be set to the organization during creation.'
+    ));
+
+    return section;
+}
+
+// ---------------------------------------------------------------------------
+// Section: Organization repos & SSO
+// ---------------------------------------------------------------------------
+
+function buildOrgSection() {
+    const section = buildSection('Organization Repositories & SSO');
+
+    appendP(section,
+        'If you see a 403 error ("Write access to repository not granted") when Paralizer ' +
+        'tries to clone or fetch a private repository owned by a GitHub organization, one ' +
+        'of the following is the cause.'
+    );
+
+    // Fine-grained misconfiguration
+    const h3Fine = document.createElement('h3');
+    h3Fine.textContent = 'Fine-Grained PAT: Wrong resource owner or no repositories selected';
+    section.appendChild(h3Fine);
+
+    appendP(section,
+        'If you open the token in GitHub Settings and see "This token does not have ' +
+        'access to any repositories", the token is unusable for any clone operation. ' +
+        'There are two things to check:'
+    );
+
+    section.appendChild(buildOl([
+        'Resource owner must be the organization (e.g. IONOS-CPH), not your personal account. ' +
+            'This cannot be changed after creation — you must create a new token.',
+        'Repository access must be explicitly selected. Choose "Only select repositories" ' +
+            'and pick the repositories Paralizer needs, or choose "All repositories" for ' +
+            'broader access.',
+    ]));
+
+    appendP(section, 'To create a correctly configured fine-grained token:');
+    section.appendChild(buildOl([
+        'Go to github.com/settings/tokens (Fine-grained tokens tab) → Generate new token.',
+        'Under Resource owner, select your organization (not your personal account).',
+        'Under Repository access, select the repositories to grant access to.',
+        'Under Repository permissions → Contents, set Read and Write access.',
+        'Generate the token, copy it, and paste it into the Paralizer credential form.',
+    ]));
+
+    section.appendChild(buildNotice('info',
+        'Blocker: if your organization does not appear in the Resource owner dropdown, ' +
+        'or the token enters a "pending approval" state, the organization has not enabled ' +
+        'fine-grained PAT access. Ask an org admin to enable it under ' +
+        'Organization Settings → Personal access tokens, or use a Classic PAT instead.'
+    ));
+
+    // Classic PAT SSO
+    const h3Classic = document.createElement('h3');
+    h3Classic.textContent = 'Classic PAT: SSO authorization required';
+    section.appendChild(h3Classic);
+
+    appendP(section,
+        'Classic PATs require an additional SSO authorization step for each organization ' +
+        'that enforces SAML SSO. The token must be authorized after it is created; ' +
+        'creating it and granting the repo scope is not enough.'
+    );
+
+    appendP(section, 'To authorize a Classic PAT for SSO:');
+    section.appendChild(buildOl([
+        'Go to github.com/settings/tokens → Tokens (classic).',
+        'Next to the token, click Configure SSO.',
+        'Click Authorize next to the organization name.',
+        'Complete the SSO browser redirect using your company identity provider login.',
+    ]));
+
+    section.appendChild(buildNotice('warning',
+        'Important: if you regenerate or rotate the Classic PAT, you must repeat the SSO ' +
+        'authorization step for the new token. The authorization is tied to the token ' +
+        'value, not your account.'
+    ));
+
+    return section;
+}
+
+// ---------------------------------------------------------------------------
+// Section: SSH as an alternative
+// ---------------------------------------------------------------------------
+
+function buildSshSection() {
+    const section = buildSection('SSH as an Alternative to HTTPS Tokens');
+
+    appendP(section,
+        'Paralizer also supports SSH remote URLs (git@github.com:org/repo.git). SSH ' +
+        'authentication is handled entirely by your system\'s SSH agent — no credential ' +
+        'entry is needed in Paralizer and no token expiry to manage.'
+    );
+
+    appendP(section, 'To use SSH:');
+    section.appendChild(buildOl([
+        'Verify you have an SSH key pair: run ls ~/.ssh/id_*.pub in a terminal. ' +
+            'If none exists, generate one with: ssh-keygen -t ed25519 -C "your@email.com"',
+        'Add the public key to your GitHub account: github.com/settings/keys.',
+        'If the repository belongs to an SSO-enforced organization, also authorize the SSH key: ' +
+            'GitHub Settings → SSH keys → Configure SSO → Authorize next to the organization.',
+        'In Paralizer, add or edit the repository and set the remote URL to the SSH form: ' +
+            'git@github.com:ORG/REPO.git (not the https:// form).',
+        'Leave the Credential field for that repository unset — Paralizer will pass the ' +
+            'SSH URL through to git without injecting a token.',
+    ]));
+
+    appendP(section,
+        'SSH key authorization for an SSO organization is a one-time step and persists ' +
+        'until the key is revoked. This makes SSH lower-maintenance than rotating HTTPS ' +
+        'tokens for organization repositories.'
+    );
+
+    return section;
+}
+
+// ---------------------------------------------------------------------------
+// Main render function
+// ---------------------------------------------------------------------------
+
+/**
+ * Render the "Setting Up Git Tokens" documentation page.
+ *
+ * @param {HTMLElement} container - The `#app` root element supplied by the router.
+ * @param {Object}      _params   - Route params (none for this route).
+ */
+export function renderDocsGitTokens(container, _params) {
+    document.title = 'Git Token Setup - ' + APP_NAME_SHORT;
+
+    container.textContent = '';
+
+    const page = document.createElement('div');
+    page.className = 'docs-page';
+
+    page.appendChild(buildPageHeader());
+    page.appendChild(buildAddingSection());
+    page.appendChild(buildTokenTypesSection());
+    page.appendChild(buildOrgSection());
+    page.appendChild(buildSshSection());
+
+    container.appendChild(page);
+}
+
+```
 ###  Path: `/gui/public/js/views/error-log.js`
 
 ```js
@@ -1686,8 +2022,8 @@ export async function renderDashboard(container, _params) {
  *   - "Clear All" button prompts a confirmation dialog and clears all entries.
  *   - Timestamps display relative time (e.g. "3 min ago") with the full ISO
  *     timestamp in the `title` tooltip.
- *   - Severity is rendered as a coloured badge using `.severity-error` or
- *     `.severity-warning` CSS classes.
+ *   - Severity is rendered as a coloured badge using `.severity-error`,
+ *     `.severity-warning`, `.severity-audit`, or `.severity-info` CSS classes.
  *   - All dynamic text is set via `textContent` (never `innerHTML`) for XSS
  *     safety.
  *
@@ -1711,6 +2047,8 @@ const SEVERITY_OPTIONS = [
     { value: 'all',     label: 'All Severities' },
     { value: 'error',   label: 'Error'          },
     { value: 'warning', label: 'Warning'        },
+    { value: 'audit',   label: 'Audit'          },
+    { value: 'info',    label: 'Info'           },
 ];
 
 // ---------------------------------------------------------------------------
@@ -1836,7 +2174,7 @@ function buildTableHead() {
 /**
  * Build a severity badge `<span>` for the given severity string.
  *
- * @param {string} severity - 'error', 'warning', or any other string.
+ * @param {string} severity - 'error', 'warning', 'audit', 'info', or any other string.
  * @returns {HTMLSpanElement}
  */
 function buildSeverityBadge(severity) {
@@ -2144,6 +2482,7 @@ export async function renderErrorLog(container, _params) {
 import { api }                    from '../api.js';
 import { showToast }              from '../components/toast.js';
 import { normaliseNotesResponse } from '../utils/normalise.js';
+import { APP_NAME_SHORT }         from '../utils/constants.js';
 
 // ---------------------------------------------------------------------------
 // Internal DOM helpers
@@ -2236,6 +2575,7 @@ function buildSidebar(projects, onItemClick) {
     for (const project of projects) {
         const details = document.createElement('details');
         details.className = 'notes-sidebar-group';
+        details.open = true;
 
         const summary = document.createElement('summary');
         summary.className = 'notes-sidebar-group-title';
@@ -2365,6 +2705,8 @@ function buildNoteCard(projectId, projectName, workspaceId, initialNotes, onSave
  * @param {Object}      _params   - Route params (none for this route).
  */
 export async function renderNotesCollected(container, _params) {
+    document.title = 'Notes - ' + APP_NAME_SHORT;
+
     // Show loading state immediately.
     const loadingEl = document.createElement('p');
     loadingEl.className = 'notes-loading';
@@ -2553,6 +2895,7 @@ import { showConfirm } from '../components/confirm-dialog.js';
 import { createFormField, validateRequired, WORKSPACE_ID_PATTERN } from '../components/form-helpers.js';
 import { normaliseProject, normaliseRepo, normaliseWorkspace } from '../utils/normalise.js';
 import { STABLE_WS_ID, APP_NAME_SHORT } from '../utils/constants.js';
+import { buildCredentialBadge } from '../utils/dom.js';
 
 // ---------------------------------------------------------------------------
 // Router reference — injected from app.js via setRouter()
@@ -2746,7 +3089,7 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
 
         const thead = document.createElement('thead');
         const htr   = document.createElement('tr');
-        ['Name', 'ID', 'Actions'].forEach((label) => {
+        ['Name', 'ID', 'Credential', 'Actions'].forEach((label) => {
             const th = document.createElement('th');
             th.textContent = label;
             htr.appendChild(th);
@@ -2770,6 +3113,12 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
             idCell.className = 'text-muted font-mono';
             idCell.textContent = repoId;
             tr.appendChild(idCell);
+
+            // Credential status cell
+            const credCell = document.createElement('td');
+            credCell.className = 'repo-credential-cell';
+            credCell.appendChild(buildCredentialBadge(repo && repo.credentialId));
+            tr.appendChild(credCell);
 
             // Actions cell
             const actCell = document.createElement('td');
@@ -3521,8 +3870,8 @@ export async function renderProjectDetail(container, params) {
  *
  * Renders a full CRUD management page for all registered repositories:
  *   - Table listing all repositories (ID, Name, URL).
- *   - "Add Repository" inline form (URL required, Name optional, ID optional).
- *   - Inline edit for repository Name per row.
+ *   - "+ Add Repository" button opening the create/edit modal in create mode.
+ *   - Edit button per row opening the same modal in edit mode.
  *   - Delete per row with a confirmation dialog.
  *
  * @param {HTMLElement} container - The `#app` root element supplied by the router.
@@ -3532,9 +3881,9 @@ export async function renderProjectDetail(container, params) {
 import { api } from '../api.js';
 import { showToast } from '../components/toast.js';
 import { showConfirm } from '../components/confirm-dialog.js';
-import { createFormField, validateRequired } from '../components/form-helpers.js';
+import { showRepositoryModal } from '../components/repository-modal.js';
 import { normaliseRepo } from '../utils/normalise.js';
-import { clearElement } from '../utils/dom.js';
+import { clearElement, buildCredentialBadge } from '../utils/dom.js';
 import { APP_NAME_SHORT } from '../utils/constants.js';
 
 // ---------------------------------------------------------------------------
@@ -3550,7 +3899,7 @@ function buildTableHead() {
     const thead = document.createElement('thead');
     const tr    = document.createElement('tr');
 
-    ['ID', 'Name', 'URL', 'Actions'].forEach((label) => {
+    ['ID', 'Name', 'URL', 'Credential', 'Actions'].forEach((label) => {
         const th = document.createElement('th');
         th.textContent = label;
         tr.appendChild(th);
@@ -3564,15 +3913,15 @@ function buildTableHead() {
  * Build a single `<tr>` for one repository.
  *
  * The row starts in read mode.  The Name cell renders as a clickable `<a>`
- * link navigating to `#/repositories/:id`.  Clicking Edit switches the Name
- * cell to an inline `<input>` and replaces the action buttons with Save / Cancel.
+ * link navigating to `#/repositories/:id`.  Clicking Edit opens the
+ * create/edit modal in edit mode, pre-filled with the row's current data.
  * Clicking Delete shows a confirmation dialog and calls the API on confirm.
  *
  * @param {{ id: string, name: string, url: string }} repo
- * @param {function(): void} onDeleted - Callback to refresh the table after deletion.
+ * @param {function(): void} onChanged - Callback to refresh the table after a change (edit save or delete).
  * @returns {HTMLTableRowElement}
  */
-function buildRepoRow(repo, onDeleted) {
+function buildRepoRow(repo, onChanged) {
     const tr = document.createElement('tr');
     tr.dataset.repoId = repo.id;
 
@@ -3582,7 +3931,7 @@ function buildRepoRow(repo, onDeleted) {
     idCell.textContent = repo.id;
     tr.appendChild(idCell);
 
-    // ---- Name cell (editable) ----
+    // ---- Name cell ----
     const nameCell = document.createElement('td');
     nameCell.className = 'repo-name-cell';
 
@@ -3591,15 +3940,6 @@ function buildRepoRow(repo, onDeleted) {
     nameLink.href      = `#/repositories/${encodeURIComponent(repo.id)}`;
     nameLink.textContent = repo.name || '—';
     nameCell.appendChild(nameLink);
-
-    // Inline edit input (hidden initially)
-    const nameInput = document.createElement('input');
-    nameInput.type       = 'text';
-    nameInput.className  = 'form-input repo-name-input';
-    nameInput.value      = repo.name;
-    nameInput.hidden     = true;
-    nameInput.setAttribute('aria-label', `Name for repository ${repo.id}`);
-    nameCell.appendChild(nameInput);
 
     tr.appendChild(nameCell);
 
@@ -3615,11 +3955,16 @@ function buildRepoRow(repo, onDeleted) {
     urlCell.appendChild(urlLink);
     tr.appendChild(urlCell);
 
+    // ---- Credential status cell ----
+    const credentialCell = document.createElement('td');
+    credentialCell.className = 'repo-credential-cell';
+    credentialCell.appendChild(buildCredentialBadge(repo.credentialId));
+    tr.appendChild(credentialCell);
+
     // ---- Actions cell ----
     const actionsCell = document.createElement('td');
     actionsCell.className = 'repo-actions-cell';
 
-    // Read-mode buttons
     const editBtn = document.createElement('button');
     editBtn.type      = 'button';
     editBtn.className = 'btn btn-secondary btn-sm';
@@ -3630,89 +3975,23 @@ function buildRepoRow(repo, onDeleted) {
     deleteBtn.className = 'btn btn-danger btn-sm';
     deleteBtn.textContent = 'Delete';
 
-    // Edit-mode buttons (hidden initially)
-    const saveBtn = document.createElement('button');
-    saveBtn.type      = 'button';
-    saveBtn.className = 'btn btn-primary btn-sm';
-    saveBtn.textContent = 'Save';
-    saveBtn.hidden    = true;
-
-    const cancelEditBtn = document.createElement('button');
-    cancelEditBtn.type      = 'button';
-    cancelEditBtn.className = 'btn btn-secondary btn-sm';
-    cancelEditBtn.textContent = 'Cancel';
-    cancelEditBtn.hidden    = true;
-
     actionsCell.appendChild(editBtn);
     actionsCell.appendChild(deleteBtn);
-    actionsCell.appendChild(saveBtn);
-    actionsCell.appendChild(cancelEditBtn);
     tr.appendChild(actionsCell);
 
     // -------------------------------------------------------------------------
     // Behaviour
     // -------------------------------------------------------------------------
 
-    // Enter edit mode
-    editBtn.addEventListener('click', () => {
-        nameLink.hidden  = true;
-        nameInput.hidden = false;
-        nameInput.value  = repo.name;
-        nameInput.focus();
-        nameInput.select();
-
-        editBtn.hidden   = true;
-        deleteBtn.hidden = true;
-        saveBtn.hidden   = false;
-        cancelEditBtn.hidden = false;
-    });
-
-    // Cancel edit mode
-    cancelEditBtn.addEventListener('click', () => {
-        nameInput.hidden = true;
-        nameLink.hidden  = false;
-
-        editBtn.hidden   = false;
-        deleteBtn.hidden = false;
-        saveBtn.hidden   = true;
-        cancelEditBtn.hidden = true;
-    });
-
-    // Save name change
-    saveBtn.addEventListener('click', async () => {
-        const newName = nameInput.value.trim();
-        saveBtn.disabled = true;
-        saveBtn.textContent = 'Saving…';
-
+    // Edit via modal
+    editBtn.addEventListener('click', async () => {
         try {
-            await api.repositories.update(repo.id, { name: newName });
-            repo.name = newName;
-            nameLink.textContent = newName || '—';
-            showToast(`Repository "${repo.id}" updated.`, 'success');
-
-            // Return to read mode
-            nameInput.hidden = true;
-            nameLink.hidden  = false;
-            editBtn.hidden   = false;
-            deleteBtn.hidden = false;
-            saveBtn.hidden   = true;
-            cancelEditBtn.hidden = true;
-        } catch (err) {
-            showToast(err.message || 'Failed to update repository.', 'error');
-        } finally {
-            saveBtn.disabled = false;
-            saveBtn.textContent = 'Save';
+            await showRepositoryModal({ mode: 'edit', repo });
+        } catch {
+            // User cancelled — do nothing.
+            return;
         }
-    });
-
-    // Allow pressing Enter in the name input to save
-    nameInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            saveBtn.click();
-        } else if (e.key === 'Escape') {
-            cancelEditBtn.click();
-        }
+        onChanged();
     });
 
     // Delete with confirmation
@@ -3733,7 +4012,7 @@ function buildRepoRow(repo, onDeleted) {
         try {
             await api.repositories.delete(repo.id);
             showToast(`Repository "${repo.name || repo.id}" deleted.`, 'success');
-            onDeleted();
+            onChanged();
         } catch (err) {
             showToast(err.message || 'Failed to delete repository.', 'error');
             deleteBtn.disabled = false;
@@ -3809,128 +4088,34 @@ async function renderRepoTable(tableContainer) {
 }
 
 // ---------------------------------------------------------------------------
-// Add Repository form
+// Add Repository button
 // ---------------------------------------------------------------------------
 
 /**
- * Build and return the "Add Repository" inline form section.
- * On success, `onSuccess` is called so the caller can re-render the table.
+ * Build the "+ Add Repository" button, opening the create/edit modal in
+ * create mode. On success, `onSuccess` is called so the caller can
+ * re-render the table.
  *
  * @param {function(): void} onSuccess
  * @returns {HTMLElement}
  */
-function buildAddRepoSection(onSuccess) {
-    const section = document.createElement('section');
-    section.className = 'add-repo-section';
+function buildAddRepoButton(onSuccess) {
+    const addBtn = document.createElement('button');
+    addBtn.type      = 'button';
+    addBtn.className = 'btn btn-primary';
+    addBtn.textContent = '+ Add Repository';
 
-    // Toggle button
-    const toggleBtn = document.createElement('button');
-    toggleBtn.type = 'button';
-    toggleBtn.className = 'btn btn-primary';
-    toggleBtn.textContent = '+ Add Repository';
-    section.appendChild(toggleBtn);
-
-    // Collapsible form wrapper (hidden by default)
-    const formWrapper = document.createElement('div');
-    formWrapper.className = 'add-repo-form-wrapper';
-    formWrapper.hidden = true;
-    section.appendChild(formWrapper);
-
-    // Form
-    const form = document.createElement('form');
-    form.className = 'add-repo-form card';
-    form.noValidate = true;
-
-    const formTitle = document.createElement('h3');
-    formTitle.className = 'form-section-title';
-    formTitle.textContent = 'New Repository';
-    form.appendChild(formTitle);
-
-    const urlField = createFormField('URL', 'url', 'url', {
-        required: true,
-        placeholder: 'https://github.com/org/repo.git',
-    });
-    form.appendChild(urlField);
-
-    const nameField = createFormField('Name', 'text', 'name', {
-        placeholder: 'Optional — human-readable name.',
-    });
-    form.appendChild(nameField);
-
-    const idField = createFormField('ID', 'text', 'id', {
-        placeholder: 'Optional — auto-inferred from URL when left blank.',
-        hint: 'Leave blank to auto-infer from the repository URL.',
-    });
-    form.appendChild(idField);
-
-    // Action row
-    const actions = document.createElement('div');
-    actions.className = 'form-actions';
-
-    const submitBtn = document.createElement('button');
-    submitBtn.type      = 'submit';
-    submitBtn.className = 'btn btn-primary';
-    submitBtn.textContent = 'Add';
-
-    const cancelBtn = document.createElement('button');
-    cancelBtn.type      = 'button';
-    cancelBtn.className = 'btn btn-secondary';
-    cancelBtn.textContent = 'Cancel';
-
-    actions.appendChild(submitBtn);
-    actions.appendChild(cancelBtn);
-    form.appendChild(actions);
-
-    formWrapper.appendChild(form);
-
-    // -------------------------------------------------------------------------
-    // Behaviour
-    // -------------------------------------------------------------------------
-
-    toggleBtn.addEventListener('click', () => {
-        formWrapper.hidden = !formWrapper.hidden;
-        if (!formWrapper.hidden) {
-            const urlInput = form.querySelector('[name="url"]');
-            if (urlInput) urlInput.focus();
-        }
-    });
-
-    cancelBtn.addEventListener('click', () => {
-        form.reset();
-        formWrapper.hidden = true;
-    });
-
-    form.addEventListener('submit', async (e) => {
-        e.preventDefault();
-
-        if (!validateRequired(form, ['url'])) return;
-
-        const url  = form.querySelector('[name="url"]').value.trim();
-        const name = form.querySelector('[name="name"]').value.trim();
-        const id   = form.querySelector('[name="id"]').value.trim();
-
-        submitBtn.disabled = true;
-        submitBtn.textContent = 'Adding…';
-
+    addBtn.addEventListener('click', async () => {
         try {
-            await api.repositories.create({
-                url,
-                name: name || undefined,
-                id:   id   || undefined,
-            });
-            showToast('Repository added successfully.', 'success');
-            form.reset();
-            formWrapper.hidden = true;
-            onSuccess();
-        } catch (err) {
-            showToast(err.message || 'Failed to add repository.', 'error');
-        } finally {
-            submitBtn.disabled = false;
-            submitBtn.textContent = 'Add';
+            await showRepositoryModal({ mode: 'create' });
+        } catch {
+            // User cancelled — do nothing.
+            return;
         }
+        onSuccess();
     });
 
-    return section;
+    return addBtn;
 }
 
 // ---------------------------------------------------------------------------
@@ -3966,12 +4151,12 @@ export async function renderRepositories(container, _params) {
     container.appendChild(tableContainer);
 
     // -----------------------------------------------------------------------
-    // Add Repository section
+    // Add Repository button
     // -----------------------------------------------------------------------
-    const addSection = buildAddRepoSection(() => {
+    const addBtn = buildAddRepoButton(() => {
         renderRepoTable(tableContainer);
     });
-    container.appendChild(addSection);
+    container.appendChild(addBtn);
 
     // -----------------------------------------------------------------------
     // Initial load
@@ -4045,6 +4230,113 @@ export function setRouter(router) {
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Credential section builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the "Credential" section for the repository detail view.
+ *
+ * Fetches `GET /api/repositories/:id/credential-options`, renders a `<select>`
+ * dropdown with a "None" option plus each matching credential shown as
+ * `label (host)`. The sole `auto=true` match (when present) is labeled with a
+ * "(recommended match)" suffix, but is never pre-selected on its own — only a
+ * stored `CredentialId` pre-selects an option, so a repository with no stored
+ * credential keeps showing "None", consistent with the repositories list's
+ * "No credential configured" badge. Changing the selection calls
+ * `PUT /api/repositories/:id/credential`.
+ *
+ * @param {string}      repoId       - Repository ID.
+ * @param {string|undefined} storedCredentialId - Currently stored credential ID (from normaliseRepo).
+ * @returns {HTMLElement} The section element (async content rendered after the promise resolves).
+ */
+function buildCredentialSection(repoId, storedCredentialId) {
+    const section = document.createElement('section');
+    section.className = 'repository-credential-section';
+
+    const heading = document.createElement('h2');
+    heading.className   = 'section-title';
+    heading.textContent = 'Credential';
+    section.appendChild(heading);
+
+    // Show a brief loading indicator while options are fetched.
+    const loadingEl = document.createElement('span');
+    loadingEl.className   = 'text-muted';
+    loadingEl.textContent = 'Loading credentials…';
+    section.appendChild(loadingEl);
+
+    // Asynchronously populate the section once options are available.
+    api.repositories.credentialOptions(repoId)
+        .then((options) => {
+            section.removeChild(loadingEl);
+
+            const controlRow = document.createElement('div');
+            controlRow.className = 'credential-control-row';
+
+            const select = document.createElement('select');
+            select.className = 'form-select credential-select';
+            select.setAttribute('aria-label', 'Credential for this repository');
+
+            // "None" option — always first.
+            const noneOpt = document.createElement('option');
+            noneOpt.value       = '';
+            noneOpt.textContent = 'None';
+            select.appendChild(noneOpt);
+
+            // Add credential options — the sole auto-match (if any) is labeled,
+            // not pre-selected; see the doc comment above for the rationale.
+            if (Array.isArray(options)) {
+                options.forEach((opt) => {
+                    const el = document.createElement('option');
+                    el.value = opt.credentialId || '';
+                    const baseLabel = opt.label ? `${opt.label} (${opt.host})` : opt.host || opt.credentialId;
+                    el.textContent = opt.auto ? `${baseLabel} (recommended match)` : baseLabel;
+                    select.appendChild(el);
+                });
+            }
+
+            // Only a stored credentialId pre-selects an option; otherwise "None" stands.
+            if (storedCredentialId) {
+                select.value = storedCredentialId;
+            }
+
+            controlRow.appendChild(select);
+
+            const statusEl = document.createElement('span');
+            statusEl.className = 'credential-save-status text-muted';
+            controlRow.appendChild(statusEl);
+
+            section.appendChild(controlRow);
+
+            // Persist selection on change.
+            select.addEventListener('change', async () => {
+                const selectedCredentialId = select.value;
+                statusEl.textContent = 'Saving…';
+                statusEl.className   = 'credential-save-status text-muted';
+                try {
+                    await api.repositories.updateCredential(repoId, selectedCredentialId);
+                    statusEl.textContent = 'Saved.';
+                    statusEl.className   = 'credential-save-status text-success';
+                    // Clear "Saved." after 2 seconds.
+                    setTimeout(() => { statusEl.textContent = ''; }, 2000);
+                } catch (err) {
+                    statusEl.textContent = `Error: ${err.message || 'Failed to save.'}`;
+                    statusEl.className   = 'credential-save-status text-error';
+                    showToast(err.message || 'Failed to update credential.', 'error');
+                }
+            });
+        })
+        .catch(() => {
+            section.removeChild(loadingEl);
+            const errEl = document.createElement('span');
+            errEl.className   = 'text-error';
+            errEl.textContent = 'Failed to load credential options.';
+            section.appendChild(errEl);
+        });
+
+    return section;
+}
 
 // ---------------------------------------------------------------------------
 // Loading helper
@@ -4667,7 +4959,10 @@ export function renderRepositoryDetail(container, params) {
             ? `Last refreshed: ${formatRelativeTime(new Date(repo.LastRefreshedAt))}`
             : 'Last refreshed: Never';
 
+        const credentialSection = buildCredentialSection(repoId, repo.credentialId);
+
         container.appendChild(header);
+        container.appendChild(credentialSection);
         container.appendChild(statusSection);
 
         // Show a warning toast if some fetches failed (partial data).
@@ -4717,7 +5012,7 @@ export function renderRepositoryDetail(container, params) {
  * Settings View — Repo Parallelizer GUI.
  *
  * Renders four settings sections:
- *   1. **Git Credentials** — table of per-host PATs with add/delete controls.
+ *   1. **Git Credentials** — table of labeled per-host PATs (Label, Host, Token, Actions) with add/inline-edit/delete controls.
  *   2. **Repositories Refresh Delay** — number input for `gitPollingIntervalSeconds`
  *      with client-side validation (min 10) and save/feedback.
  *   3. **Webserver URL** — text input for the base URL of the local webserver
@@ -4752,7 +5047,7 @@ function buildTableHead() {
     const thead = document.createElement('thead');
     const tr = document.createElement('tr');
 
-    ['Host', 'Token', 'Actions'].forEach((label) => {
+    ['Label', 'Host', 'Token', 'Actions'].forEach((label) => {
         const th = document.createElement('th');
         th.textContent = label;
         tr.appendChild(th);
@@ -4765,47 +5060,206 @@ function buildTableHead() {
 /**
  * Build a single `<tr>` for one credential entry.
  *
- * @param {string}            host       - The hostname key.
- * @param {string}            maskedToken - The masked token string (e.g. `****abc1`).
- * @param {function(): void}  onDeleted  - Callback to refresh the table after deletion.
+ * The row starts in read mode. Clicking "Edit" switches the Label cell to an
+ * `<input>` and reveals a Token `<input type="password">`. Host is always
+ * read-only. Clicking "Save" calls PUT /api/config/credentials with the
+ * credential id and updated fields.
+ *
+ * @param {{ id: string, label: string, host: string, maskedToken: string }} cred
+ * @param {function(): void} onDeleted  - Callback invoked after a successful
+ *   credential deletion. Triggers a full re-render of the credentials table by
+ *   calling `renderCredentialsTable()` internally. Not called on error or when
+ *   the user cancels the confirmation dialog.
  * @returns {HTMLTableRowElement}
  */
-function buildCredentialRow(host, maskedToken, onDeleted) {
+function buildCredentialRow(cred, onDeleted) {
     const tr = document.createElement('tr');
-    tr.dataset.credHost = host;
+    tr.dataset.credId = cred.id;
 
-    // ---- Host cell (read-only) ----
+    // ---- Label cell (editable) ----
+    const labelCell = document.createElement('td');
+    labelCell.className = 'cred-label-cell';
+
+    const labelDisplay = document.createElement('span');
+    labelDisplay.className = 'cred-label-display';
+    labelDisplay.textContent = cred.label;
+    labelCell.appendChild(labelDisplay);
+
+    const labelInput = document.createElement('input');
+    labelInput.type = 'text';
+    labelInput.className = 'form-input cred-label-input';
+    labelInput.value = cred.label;
+    labelInput.hidden = true;
+    labelInput.setAttribute('aria-label', `Label for credential ${cred.id}`);
+    labelCell.appendChild(labelInput);
+
+    tr.appendChild(labelCell);
+
+    // ---- Host cell (always read-only) ----
     const hostCell = document.createElement('td');
     hostCell.className = 'cred-host-cell';
-    hostCell.textContent = host;
+    hostCell.textContent = cred.host;
     tr.appendChild(hostCell);
 
-    // ---- Masked token cell (read-only) ----
+    // ---- Token cell ----
     const tokenCell = document.createElement('td');
     tokenCell.className = 'cred-token-cell text-muted';
-    tokenCell.textContent = maskedToken;
+
+    const maskedTokenDisplay = document.createElement('span');
+    maskedTokenDisplay.className = 'cred-token-display';
+    maskedTokenDisplay.textContent = cred.maskedToken;
+    tokenCell.appendChild(maskedTokenDisplay);
+
+    const tokenInput = document.createElement('input');
+    tokenInput.type = 'password';
+    tokenInput.className = 'form-input cred-token-input';
+    tokenInput.placeholder = 'New token (leave blank to keep current)';
+    tokenInput.hidden = true;
+    tokenInput.setAttribute('aria-label', `Token for credential ${cred.id}`);
+    tokenCell.appendChild(tokenInput);
+
     tr.appendChild(tokenCell);
 
     // ---- Actions cell ----
     const actionsCell = document.createElement('td');
     actionsCell.className = 'cred-actions-cell';
 
+    // Read-mode buttons
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'btn btn-secondary btn-sm';
+    editBtn.textContent = 'Edit';
+
     const deleteBtn = document.createElement('button');
     deleteBtn.type = 'button';
     deleteBtn.className = 'btn btn-danger btn-sm';
     deleteBtn.textContent = 'Delete';
 
+    // Edit-mode buttons (hidden initially)
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'btn btn-primary btn-sm';
+    saveBtn.textContent = 'Save';
+    saveBtn.hidden = true;
+
+    const cancelEditBtn = document.createElement('button');
+    cancelEditBtn.type = 'button';
+    cancelEditBtn.className = 'btn btn-secondary btn-sm';
+    cancelEditBtn.textContent = 'Cancel';
+    cancelEditBtn.hidden = true;
+
+    actionsCell.appendChild(editBtn);
     actionsCell.appendChild(deleteBtn);
+    actionsCell.appendChild(saveBtn);
+    actionsCell.appendChild(cancelEditBtn);
     tr.appendChild(actionsCell);
 
-    // ---- Behaviour ----
+    // ---- Inline edit behaviour ----
+
+    // Enter edit mode
+    editBtn.addEventListener('click', () => {
+        labelDisplay.hidden = true;
+        labelInput.hidden = false;
+        labelInput.value = cred.label;
+        labelInput.focus();
+        labelInput.select();
+
+        maskedTokenDisplay.hidden = true;
+        tokenInput.hidden = false;
+        tokenInput.value = '';
+
+        editBtn.hidden = true;
+        deleteBtn.hidden = true;
+        saveBtn.hidden = false;
+        cancelEditBtn.hidden = false;
+    });
+
+    // Cancel edit mode
+    cancelEditBtn.addEventListener('click', () => {
+        labelInput.hidden = true;
+        labelDisplay.hidden = false;
+
+        tokenInput.hidden = true;
+        maskedTokenDisplay.hidden = false;
+
+        editBtn.hidden = false;
+        deleteBtn.hidden = false;
+        saveBtn.hidden = true;
+        cancelEditBtn.hidden = true;
+    });
+
+    // Save inline edit
+    saveBtn.addEventListener('click', async () => {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving…';
+
+        const updatedLabel = labelInput.value.trim();
+        const updatedToken = tokenInput.value.trim();
+
+        const updateData = { label: updatedLabel };
+        if (updatedToken) {
+            updateData.token = updatedToken;
+        }
+
+        try {
+            await api.config.credentials.update(cred.id, updateData);
+            cred.label = updatedLabel;
+            labelDisplay.textContent = updatedLabel;
+            showToast(`Credential "${updatedLabel}" updated.`, 'success');
+
+            // Return to read mode
+            labelInput.hidden = true;
+            labelDisplay.hidden = false;
+            tokenInput.hidden = true;
+            maskedTokenDisplay.hidden = false;
+            editBtn.hidden = false;
+            deleteBtn.hidden = false;
+            saveBtn.hidden = true;
+            cancelEditBtn.hidden = true;
+        } catch (err) {
+            showToast(err.message || 'Failed to update credential.', 'error');
+        } finally {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+        }
+    });
+
+    // Allow Enter/Escape in label input
+    labelInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            saveBtn.click();
+        } else if (e.key === 'Escape') {
+            cancelEditBtn.click();
+        }
+    });
+
+    // ---- Delete behaviour ----
 
     deleteBtn.addEventListener('click', async () => {
+        // Fetch repositories to check for references to this credential.
+        let repos = [];
         try {
-            await showConfirm(
-                'Delete Credential',
-                `Remove the credential for "${host}"? This action cannot be undone.`,
-            );
+            repos = await api.repositories.list();
+        } catch {
+            // Non-fatal — proceed without count; show generic warning.
+        }
+
+        const referencingRepos = Array.isArray(repos)
+            ? repos.filter((r) => (r.credentialId || r.CredentialId) === cred.id)
+            : [];
+
+        let confirmMessage;
+        if (referencingRepos.length > 0) {
+            const n = referencingRepos.length;
+            const noun = n === 1 ? 'repository' : 'repositories';
+            confirmMessage = `Remove credential '${cred.label}'? ${n} ${noun} currently use this credential and will lose their credential association.`;
+        } else {
+            confirmMessage = `Remove credential '${cred.label}' for host '${cred.host}'? This action cannot be undone.`;
+        }
+
+        try {
+            await showConfirm('Remove Credential', confirmMessage);
         } catch {
             // User cancelled — do nothing.
             return;
@@ -4815,8 +5269,8 @@ function buildCredentialRow(host, maskedToken, onDeleted) {
         deleteBtn.textContent = 'Deleting…';
 
         try {
-            await api.config.credentials.delete(host);
-            showToast(`Credential for "${host}" deleted.`, 'success');
+            await api.config.credentials.remove(cred.id);
+            showToast(`Credential "${cred.label}" deleted.`, 'success');
             onDeleted();
         } catch (err) {
             showToast(err.message || 'Failed to delete credential.', 'error');
@@ -4867,9 +5321,9 @@ async function renderCredentialsTable(tableContainer) {
         return;
     }
 
-    const entries = Object.entries(credentials || {});
+    const credList = Array.isArray(credentials) ? credentials : [];
 
-    if (entries.length === 0) {
+    if (credList.length === 0) {
         tableContainer.innerHTML = `
             <p class="empty-state">No credentials configured. Use the form below to add one.</p>
         `;
@@ -4885,8 +5339,8 @@ async function renderCredentialsTable(tableContainer) {
 
     const tbody = document.createElement('tbody');
 
-    for (const [host, maskedToken] of entries) {
-        tbody.appendChild(buildCredentialRow(host, maskedToken, () => {
+    for (const cred of credList) {
+        tbody.appendChild(buildCredentialRow(cred, () => {
             renderCredentialsTable(tableContainer);
         }));
     }
@@ -4897,11 +5351,11 @@ async function renderCredentialsTable(tableContainer) {
 }
 
 // ---------------------------------------------------------------------------
-// Add / Update credential form
+// Add credential form
 // ---------------------------------------------------------------------------
 
 /**
- * Build the "Add / Update Credential" section with a toggle button and inline form.
+ * Build the "Add Credential" section with a toggle button and inline form.
  *
  * @param {HTMLElement} tableContainer - Used to trigger a refresh after a successful save.
  * @returns {HTMLElement} The wrapper element containing the toggle button and form.
@@ -4922,6 +5376,11 @@ function buildAddCredentialForm(tableContainer) {
     const form = document.createElement('form');
     form.noValidate = true;
 
+    form.appendChild(createFormField('Label', 'text', 'label', {
+        placeholder: 'e.g. My GitHub Token',
+        required: true,
+    }));
+
     form.appendChild(createFormField('Host', 'text', 'host', {
         placeholder: 'e.g. github.com',
         required: true,
@@ -4938,7 +5397,7 @@ function buildAddCredentialForm(tableContainer) {
     const submitBtn = document.createElement('button');
     submitBtn.type = 'submit';
     submitBtn.className = 'btn btn-primary';
-    submitBtn.textContent = 'Save';
+    submitBtn.textContent = 'Add Credential';
 
     const cancelBtn = document.createElement('button');
     cancelBtn.type = 'button';
@@ -4958,8 +5417,8 @@ function buildAddCredentialForm(tableContainer) {
     toggleBtn.addEventListener('click', () => {
         formWrapper.hidden = !formWrapper.hidden;
         if (!formWrapper.hidden) {
-            const hostInput = form.querySelector('[name="host"]');
-            if (hostInput) hostInput.focus();
+            const labelInput = form.querySelector('[name="label"]');
+            if (labelInput) labelInput.focus();
         }
     });
 
@@ -4971,8 +5430,9 @@ function buildAddCredentialForm(tableContainer) {
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
 
-        if (!validateRequired(form, ['host', 'token'])) return;
+        if (!validateRequired(form, ['label', 'host', 'token'])) return;
 
+        const label = form.querySelector('[name="label"]').value.trim();
         const host  = form.querySelector('[name="host"]').value.trim();
         const token = form.querySelector('[name="token"]').value.trim();
 
@@ -4980,16 +5440,16 @@ function buildAddCredentialForm(tableContainer) {
         submitBtn.textContent = 'Saving…';
 
         try {
-            await api.config.credentials.set({ host, token });
-            showToast(`Credential for "${host}" saved.`, 'success');
+            await api.config.credentials.add({ label, host, token });
+            showToast(`Credential "${label}" added.`, 'success');
             form.reset();
             formWrapper.hidden = true;
             renderCredentialsTable(tableContainer);
         } catch (err) {
-            showToast(err.message || 'Failed to save credential.', 'error');
+            showToast(err.message || 'Failed to add credential.', 'error');
         } finally {
             submitBtn.disabled = false;
-            submitBtn.textContent = 'Save';
+            submitBtn.textContent = 'Add Credential';
         }
     });
 
@@ -5003,8 +5463,9 @@ function buildAddCredentialForm(tableContainer) {
 /**
  * Build the "Git Credentials" settings section.
  *
- * Renders the section heading, description, credentials table, and the
- * "Add / Update Credential" form, then kicks off the initial table load.
+ * Renders the section heading, description, credentials table (columns:
+ * Label, Host, Token, Actions), the "Add / Update Credential" form, and
+ * per-row inline edit / delete controls. Kicks off the initial table load.
  *
  * Unlike other `build*Section()` factories, this one does **not** expose a
  * `save()` function. Credentials are saved immediately when the inline form is
@@ -5016,15 +5477,30 @@ function buildAddCredentialForm(tableContainer) {
  * inside this factory to initiate the initial async table load. Callers do
  * not need to trigger the first render separately.
  *
- * @returns {{ element: HTMLElement }}
+ * @returns {{ element: HTMLElement }} The section element, ready to be mounted
+ *   in the DOM. **Side-effect:** `renderCredentialsTable()` is called
+ *   synchronously as part of this factory to initiate the initial async table
+ *   load — callers do not need to trigger the first render separately.
  */
 function buildCredentialsSection() {
     const credSection = document.createElement('section');
     credSection.className = 'settings-section';
 
+    const credHeadingRow = document.createElement('div');
+    credHeadingRow.className = 'settings-section-heading-row';
+
     const credHeading = document.createElement('h2');
     credHeading.textContent = 'Git Credentials';
-    credSection.appendChild(credHeading);
+    credHeadingRow.appendChild(credHeading);
+
+    const helpLink = document.createElement('a');
+    helpLink.href = '#/docs/git-tokens';
+    helpLink.className = 'settings-help-link';
+    helpLink.textContent = 'How to set up tokens →';
+    helpLink.setAttribute('aria-label', 'How to set up Git tokens — documentation');
+    credHeadingRow.appendChild(helpLink);
+
+    credSection.appendChild(credHeadingRow);
 
     const credDescription = document.createElement('p');
     credDescription.textContent =
@@ -5503,6 +5979,46 @@ export function renderSettings(container, _params) {
  *     "Rename Workspace" (disabled for STABLE), "Delete Workspace" (disabled
  *     for STABLE).
  *
+ * ## Credential-error display
+ *
+ * When a repository's clone fails because no credential is configured for its
+ * host, the setup orchestrators emit an error message containing the sentinel
+ * text defined by `CREDENTIAL_MISSING_SENTINEL` ("requires a credential for
+ * host"). The view detects this via `applySetupResultCredentialErrors()` and
+ * replaces the generic "No data" badge in the status table with an amber
+ * "Missing Credential" badge (`.status-badge-credential`) that links directly
+ * to `#/repositories/:id` so the user can assign a credential without leaving
+ * the workflow.
+ *
+ * Key helpers in this subsystem:
+ *   - `CREDENTIAL_MISSING_SENTINEL` — the exact string matched against error
+ *     messages. Defined in `gui/public/js/utils/constants.js`; imported here.
+ *     Must stay in sync with the orchestrator error templates.
+ *   - `buildMissingCredentialBadge(repoId)` — renders the amber `<a>` badge
+ *     (`.status-badge-credential`) and wires SPA navigation via `_router`
+ *     (with `href` as a fallback). **Distinct from `buildCredentialBadge()`
+ *     in `utils/dom.js`:** this badge is an `<a>` element that signals a
+ *     *clone failure* in the workspace status table and links to the
+ *     repository settings page; `buildCredentialBadge()` is a `<span>` that
+ *     shows the *assignment status* of a credential in the repository list
+ *     (`.credential-badge--set` / `.credential-badge--none`). The two badges
+ *     serve different views and must not be conflated.
+ *   - `applySetupResultCredentialErrors(setupResult)` — called after every
+ *     setup invocation (Setup button, Retry Setup, health alert) to add or
+ *     remove repos from the in-memory `credentialErrorRepoIds` Set and update
+ *     their badge cell in the DOM immediately.
+ *   - `applyStatusMapUpdate()` — clears the credential-error flag when a repo
+ *     transitions from no-data to having live status data (i.e. after a
+ *     successful re-clone following credential assignment).
+ *
+ * **Known limitation:** `credentialErrorRepoIds` is an in-memory Set populated
+ * only by explicit `setup()` calls during the current page session. If the page
+ * is reloaded after a prior credential-missing failure, the badge will not
+ * appear until the next Setup run because the error state is not persisted in
+ * the workspace health report or the status map. Surfacing this on page load
+ * would require a new API endpoint or server-side persistence — out of scope
+ * for the current implementation.
+ *
  * ## Router integration
  *
  * The view uses the same router-injection pattern as `project-detail.js`:
@@ -5525,7 +6041,7 @@ import { showConfirm }       from '../components/confirm-dialog.js';
 import { buildRepoStatusCells, makeBranchTrigger, updateRepoStatusCells } from '../components/repo-status-cells.js';
 import { createFormField, validateRequired, WORKSPACE_ID_PATTERN } from '../components/form-helpers.js';
 import { normaliseProject, normaliseWorkspace } from '../utils/normalise.js';
-import { STABLE_WS_ID, APP_NAME_SHORT } from '../utils/constants.js';
+import { STABLE_WS_ID, APP_NAME_SHORT, CREDENTIAL_MISSING_SENTINEL } from '../utils/constants.js';
 import { clearElement } from '../utils/dom.js';
 
 // ---------------------------------------------------------------------------
@@ -5551,8 +6067,6 @@ export function setRouter(router) {
 
 /** Default polling interval in milliseconds (fallback when config fetch fails). */
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
-
-
 
 // ---------------------------------------------------------------------------
 // Normalisation helpers — imported from utils/normalise.js
@@ -5613,11 +6127,60 @@ function showLoading(el, label = 'Loading…') {
 }
 
 // ---------------------------------------------------------------------------
+// Credential-missing badge helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a "Missing Credential" badge element for a repository row.
+ *
+ * Rendered in the Status (badge) cell when a clone failed because no credential
+ * was associated with the repository.  The badge links to the repository detail
+ * view (`#/repositories/:id`) where the user can assign a credential.
+ *
+ * @param {string} repoId - Repository ID used to build the link target.
+ * @returns {HTMLElement} A wrapper `<div>` containing the badge `<a>` element.
+ */
+function buildMissingCredentialBadge(repoId) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'status-badge-wrapper';
+
+    const badge = document.createElement('a');
+    badge.className = 'status-badge status-badge-credential';
+    badge.href      = `#/repositories/${encodeURIComponent(repoId)}`;
+    badge.title     = 'This repository has no credential assigned. Click to open repository settings.';
+    badge.setAttribute('aria-label', `Missing credential for ${repoId} — click to configure`);
+
+    // Wire SPA navigation when a router is available so the hash-change is
+    // handled by the router rather than a full page reload.
+    if (_router) {
+        badge.addEventListener('click', (e) => {
+            e.preventDefault();
+            _router.navigate(`#/repositories/${encodeURIComponent(repoId)}`);
+        });
+    }
+
+    const dot = document.createElement('span');
+    dot.className = 'status-badge-dot';
+    dot.setAttribute('aria-hidden', 'true');
+
+    badge.appendChild(dot);
+    badge.appendChild(document.createTextNode('Missing Credential'));
+
+    wrapper.appendChild(badge);
+    return wrapper;
+}
+
+// ---------------------------------------------------------------------------
 // Setup helper
 // ---------------------------------------------------------------------------
 
 /**
  * Run workspace setup and show appropriate toast notification.
+ *
+ * When one or more clone failures are caused by missing credentials (detected
+ * via {@link CREDENTIAL_MISSING_SENTINEL}), the toast message specifically
+ * mentions the credential issue so the user knows where to go to fix it.
+ * Non-credential failures continue to show the generic "Failed to clone" message.
  *
  * @param {string} projectId
  * @param {string} workspaceId
@@ -5629,8 +6192,37 @@ async function runSetup(projectId, workspaceId, successMessage) {
     const result = await api.workspaces.setup(projectId, workspaceId);
     const failures = (result && result.results || []).filter((r) => !r.success);
     if (failures.length > 0) {
-        const names = failures.map((f) => f.repositoryId).join(', ');
-        showToast(`Setup complete with errors. Failed to clone: ${names}`, 'warning', 8000);
+        const credentialFailures = failures.filter(
+            (f) => typeof f.error === 'string' && f.error.includes(CREDENTIAL_MISSING_SENTINEL),
+        );
+        const otherFailures = failures.filter(
+            (f) => !(typeof f.error === 'string' && f.error.includes(CREDENTIAL_MISSING_SENTINEL)),
+        );
+
+        if (credentialFailures.length > 0 && otherFailures.length === 0) {
+            // All failures are credential-related.
+            const names = credentialFailures.map((f) => f.repositoryId).join(', ');
+            showToast(
+                `Setup complete with credential errors. Missing credentials for: ${names}. ` +
+                'Select a credential in each repository\'s settings.',
+                'warning',
+                10000,
+            );
+        } else if (credentialFailures.length > 0) {
+            // Mixed: some credential failures, some generic failures.
+            const credNames  = credentialFailures.map((f) => f.repositoryId).join(', ');
+            const otherNames = otherFailures.map((f) => f.repositoryId).join(', ');
+            showToast(
+                `Setup complete with errors. Missing credentials for: ${credNames}. ` +
+                `Failed to clone: ${otherNames}.`,
+                'warning',
+                10000,
+            );
+        } else {
+            // No credential failures — generic message.
+            const names = otherFailures.map((f) => f.repositoryId).join(', ');
+            showToast(`Setup complete with errors. Failed to clone: ${names}`, 'warning', 8000);
+        }
     } else {
         showToast(successMessage, 'success');
     }
@@ -5650,6 +6242,10 @@ async function runSetup(projectId, workspaceId, successMessage) {
  * {@link updateRepoStatusCells} can locate and replace badge contents in-place
  * without touching the rest of the row.
  *
+ * When `statusInfo` is `null` and `credentialErrorRepoIds` contains `repoId`,
+ * the generic "No data" badge is replaced with a "Missing Credential" badge
+ * that links to the repository detail view.
+ *
  * @param {Object} opts
  * @param {string} opts.repoId      - Unique repository identifier (e.g. `"my-repo"`).
  * @param {string} opts.repoName    - Human-readable display name; falls back to
@@ -5667,9 +6263,15 @@ async function runSetup(projectId, workspaceId, successMessage) {
  * @param {string|null} [opts.webserverUrl] - Base URL of the local webserver. When
  *                                    truthy, a "Browse" button is prepended before
  *                                    the "Git GUI" button.
+ * @param {Set<string>} [opts.credentialErrorRepoIds] - Set of repository IDs whose
+ *                                    last clone attempt failed due to a missing
+ *                                    credential.  When `statusInfo` is `null` and the
+ *                                    repo is in this set, a "Missing Credential" badge
+ *                                    with a link to the repository detail view is
+ *                                    shown instead of the generic "No data" badge.
  * @returns {HTMLTableRowElement}
  */
-function buildRepoStatusRow({ repoId, repoName, statusInfo, projectId, wid, isStable, onBranchCellClick, webserverUrl }) {
+function buildRepoStatusRow({ repoId, repoName, statusInfo, projectId, wid, isStable, onBranchCellClick, webserverUrl, credentialErrorRepoIds }) {
     const tr = document.createElement('tr');
     tr.dataset.repoId   = repoId;
     tr.dataset.repoName = repoName;
@@ -5702,6 +6304,18 @@ function buildRepoStatusRow({ repoId, repoName, statusInfo, projectId, wid, isSt
         onError: (msg) => showToast(msg, 'error'),
     });
     tr.appendChild(branchCell);
+
+    // Replace the generic "No data" badge with a "Missing Credential" badge
+    // when the repo has no status data because its clone failed due to a
+    // missing credential.
+    if (!statusInfo && credentialErrorRepoIds && credentialErrorRepoIds.has(repoId)) {
+        const badgeWrapper = badgeCell.querySelector(`div[data-repo-id]`);
+        if (badgeWrapper) {
+            clearElement(badgeWrapper);
+            badgeWrapper.appendChild(buildMissingCredentialBadge(repoId));
+        }
+    }
+
     tr.appendChild(badgeCell);
     tr.appendChild(actionsCell);
 
@@ -5867,9 +6481,10 @@ function buildOpenVscodeButton(projectId, workspaceId) {
  * @param {string} projectId
  * @param {{ id: string, description: string, initialized: boolean, folderPath: string }} workspace
  * @param {boolean} isStable
- * @param {function(): void} [onSetupSuccess] - Called after a successful workspace setup, *after* the
- *   DOM mutation is complete (setupBtn removed from mgmtRow, vscodeBtn inserted before renameBtn,
- *   and `workspace.initialized` set to `true`). Intended to trigger a status refresh in the caller.
+ * @param {function(Object): void} [onSetupSuccess] - Called after a successful workspace setup, *after*
+ *   the DOM mutation is complete (setupBtn removed from mgmtRow, vscodeBtn inserted before renameBtn,
+ *   and `workspace.initialized` set to `true`). Receives the raw setup result from the API.
+ *   Intended to trigger a status refresh and apply credential error tracking in the caller.
  * @returns {HTMLElement}
  */
 function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
@@ -5961,7 +6576,7 @@ function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
             setupBtn.textContent = 'Setting up…';
 
             try {
-                await runSetup(projectId, workspace.id,
+                const result = await runSetup(projectId, workspace.id,
                     `Workspace "${workspace.id}" set up successfully.`);
 
                 // Update DOM in-place — remove setup button, insert "Open in VS Code",
@@ -5970,7 +6585,7 @@ function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
                 workspace.initialized = true;
                 const vscodeBtn = buildOpenVscodeButton(projectId, workspace.id);
                 mgmtRow.insertBefore(vscodeBtn, renameBtn);
-                if (onSetupSuccess) onSetupSuccess();
+                if (onSetupSuccess) onSetupSuccess(result);
             } catch (err) {
                 showToast(err.message || 'Failed to set up workspace.', 'error');
                 setupBtn.disabled = false;
@@ -6049,9 +6664,11 @@ function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
  *   Callback forwarded to each `buildRepoStatusRow()` call.
  * @param {string|null} [webserverUrl] - Base URL for the Browse button. When
  *   truthy, each row gains a "Browse" button before the "Git GUI" button.
+ * @param {Set<string>} [credentialErrorRepoIds] - Set of repository IDs whose
+ *   clone failed due to a missing credential. Forwarded to each row builder.
  * @returns {{ section: HTMLElement, tbody: HTMLTableSectionElement }}
  */
-function buildStatusTableSection(repos, statusMap, projectId, wid, isStable, onBranchCellClick, webserverUrl) {
+function buildStatusTableSection(repos, statusMap, projectId, wid, isStable, onBranchCellClick, webserverUrl, credentialErrorRepoIds) {
     const section = document.createElement('section');
     section.className = 'workspace-status-section';
 
@@ -6080,7 +6697,7 @@ function buildStatusTableSection(repos, statusMap, projectId, wid, isStable, onB
 
     repos.forEach(({ repoId, repoName }) => {
         const statusInfo = statusMap[repoId] ?? null;
-        tbody.appendChild(buildRepoStatusRow({ repoId, repoName, statusInfo, projectId, wid, isStable, onBranchCellClick, webserverUrl }));
+        tbody.appendChild(buildRepoStatusRow({ repoId, repoName, statusInfo, projectId, wid, isStable, onBranchCellClick, webserverUrl, credentialErrorRepoIds }));
     });
 
     table.appendChild(tbody);
@@ -6149,8 +6766,20 @@ function buildRefreshToolbar() {
  * caller can inject async handlers that match the surrounding view's
  * closure state (project/workspace IDs, toast helper, etc.).
  *
+ * **When to use a callback vs. direct navigation:**
+ * Use a callback (i.e., add a property to `callbacks`) when the fix action
+ * must coordinate with the parent view's async state — for example, it needs
+ * access to IDs held in the view's closure, triggers a loading indicator, or
+ * awaits a network request. Use direct navigation (e.g., `window.location.hash`)
+ * when the action is self-contained and requires no view-level coordination.
+ * The `configure-credential` branch is an example of the latter: it navigates
+ * directly to `#/repositories` without involving `callbacks` at all.
+ *
  * @param {{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }|null} healthReport
  * @param {{ onRegenerate: function(): Promise<void>, onSetup: function(): Promise<void> }} callbacks
+ *   Async handlers for fix actions that require parent-view coordination.
+ *   Self-contained fix actions (e.g. `configure-credential`) bypass this
+ *   object and handle navigation directly.
  * @returns {HTMLElement|null}
  */
 function buildHealthAlertSection(healthReport, callbacks) {
@@ -6217,6 +6846,19 @@ function buildHealthAlertSection(healthReport, callbacks) {
                     btn.disabled = false;
                     btn.textContent = 'Fix Setup';
                 }
+            });
+            actionWrap.appendChild(btn);
+            row.appendChild(actionWrap);
+        } else if (issue.fixAction === 'configure-credential') {
+            const actionWrap = document.createElement('span');
+            actionWrap.className = 'health-alert-issue__action';
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-secondary btn-sm';
+            btn.textContent = 'Configure';
+            btn.addEventListener('click', () => {
+                window.location.hash = '#/repositories';
             });
             actionWrap.appendChild(btn);
             row.appendChild(actionWrap);
@@ -6366,8 +7008,25 @@ export function renderWorkspaceDetail(container, params) {
             ? webserverUrlConfig.webserverUrl
             : null;
 
+        // Set of repository IDs whose last clone attempt failed due to a missing
+        // credential.  Populated from the health report on initial load (persists
+        // across page reloads) and updated on every setup invocation.  Cleared
+        // per-repo when that repo starts reporting live status data (indicating a
+        // successful re-clone after credential assignment).
+        const credentialErrorRepoIds = new Set();
+
+        // Populate from the initial health report so the badge persists across
+        // page reloads without requiring a new Setup run.
+        if (healthReport && Array.isArray(healthReport.issues)) {
+            for (const issue of healthReport.issues) {
+                if (issue.type === 'credential-missing' && issue.repositoryId) {
+                    credentialErrorRepoIds.add(issue.repositoryId);
+                }
+            }
+        }
+
         // Build status table first to obtain tbody reference for helpers.
-        const { section: statusSection, tbody } = buildStatusTableSection(repos, statusMap || {}, projectId, wid, isStable, onBranchCellClick, webserverUrl);
+        const { section: statusSection, tbody } = buildStatusTableSection(repos, statusMap || {}, projectId, wid, isStable, onBranchCellClick, webserverUrl, credentialErrorRepoIds);
 
         // -------------------------------------------------------------------
         // Refresh helpers (referenced by toolbar, polling, and setup)
@@ -6446,7 +7105,8 @@ export function renderWorkspaceDetail(container, params) {
                 },
                 onSetup: async () => {
                     try {
-                        await runSetup(projectId, wid, 'Workspace setup complete.');
+                        const result = await runSetup(projectId, wid, 'Workspace setup complete.');
+                        applySetupResultCredentialErrors(result);
                         doRefresh();
                         await fetchAndRenderHealth();
                     } catch (err) {
@@ -6475,6 +7135,37 @@ export function renderWorkspaceDetail(container, params) {
         }
 
         /**
+         * Apply a fresh status map to the status table rows.
+         *
+         * For each repo in `freshStatusMap`:
+         *  - Updates branch and badge cells via `updateRepoStatusCells`.
+         *  - When a repo that previously had a credential error now has status
+         *    data (i.e. it was successfully re-cloned), removes it from
+         *    `credentialErrorRepoIds` so the generic status badge is used from
+         *    that point on.
+         *
+         * For repos in `credentialErrorRepoIds` that are still absent from
+         * `freshStatusMap` the credential badge is left in place (it was already
+         * rendered correctly by `buildRepoStatusRow`).
+         *
+         * @param {Record<string, Object|null>} freshStatusMap
+         */
+        function applyStatusMapUpdate(freshStatusMap) {
+            for (const [repoId, statusInfo] of Object.entries(freshStatusMap)) {
+                const row = tbody ? tbody.querySelector(`tr[data-repo-id="${CSS.escape(repoId)}"]`) : null;
+                if (!row) continue;
+
+                // If this repo had a credential error but now has status data,
+                // clear the error flag so the next badge update uses the regular badge.
+                if (statusInfo && credentialErrorRepoIds.has(repoId)) {
+                    credentialErrorRepoIds.delete(repoId);
+                }
+
+                updateRepoStatusCells(row, repoId, statusInfo, isStable, onBranchCellClick);
+            }
+        }
+
+        /**
          * Automatic poll — uses cached status endpoint.
          */
         async function doPoll() {
@@ -6488,11 +7179,7 @@ export function renderWorkspaceDetail(container, params) {
                 if (container.isConnected) {
                     renderHealthSection(freshHealth);
                     if (fresh) {
-                        for (const [repoId, statusInfo] of Object.entries(fresh)) {
-                            const row = tbody.querySelector(`tr[data-repo-id="${CSS.escape(repoId)}"]`);
-                            if (!row) continue;
-                            updateRepoStatusCells(row, repoId, statusInfo, isStable, onBranchCellClick);
-                        }
+                        applyStatusMapUpdate(fresh);
                         updateMissingReposRow(fresh);
                     }
                 }
@@ -6522,11 +7209,7 @@ export function renderWorkspaceDetail(container, params) {
                 if (container.isConnected) {
                     renderHealthSection(freshHealth);
                     if (fresh) {
-                        for (const [repoId, statusInfo] of Object.entries(fresh)) {
-                            const row = tbody.querySelector(`tr[data-repo-id="${CSS.escape(repoId)}"]`);
-                            if (!row) continue;
-                            updateRepoStatusCells(row, repoId, statusInfo, isStable, onBranchCellClick);
-                        }
+                        applyStatusMapUpdate(fresh);
                         updateMissingReposRow(fresh);
                     }
                 }
@@ -6586,8 +7269,54 @@ export function renderWorkspaceDetail(container, params) {
                 .catch(() => { showToast('Failed to load branch switcher.', 'error'); });
         }
 
+        /**
+         * Populate `credentialErrorRepoIds` from a setup API result.
+         *
+         * Any repository result that was unsuccessful and whose error message
+         * contains the credential-missing sentinel text is added to the set.
+         * Repos that succeeded (or failed for other reasons) are removed from
+         * the set so their badges revert to the standard state on the next poll.
+         *
+         * @param {Object|null} setupResult - The value returned by `runSetup()`.
+         */
+        function applySetupResultCredentialErrors(setupResult) {
+            const results = setupResult && Array.isArray(setupResult.results)
+                ? setupResult.results
+                : [];
+
+            for (const r of results) {
+                if (
+                    !r.success &&
+                    typeof r.error === 'string' &&
+                    r.error.includes(CREDENTIAL_MISSING_SENTINEL)
+                ) {
+                    credentialErrorRepoIds.add(r.repositoryId);
+
+                    // Update the badge cell in-place for this repo so the
+                    // "Missing Credential" badge appears immediately (without
+                    // waiting for the next poll cycle).
+                    if (tbody) {
+                        const row = tbody.querySelector(`tr[data-repo-id="${CSS.escape(r.repositoryId)}"]`);
+                        if (row) {
+                            const badgeWrapper = row.querySelector(`div[data-repo-id="${CSS.escape(r.repositoryId)}"]`);
+                            if (badgeWrapper) {
+                                clearElement(badgeWrapper);
+                                badgeWrapper.appendChild(buildMissingCredentialBadge(r.repositoryId));
+                            }
+                        }
+                    }
+                } else {
+                    // Success or non-credential failure — clear any prior
+                    // credential-error flag for this repo.
+                    credentialErrorRepoIds.delete(r.repositoryId);
+                }
+            }
+        }
+
         // Setup success callback — hides setup button, triggers refresh.
-        const onSetupSuccess = () => {
+        // Receives the raw setup result so credential errors can be tracked.
+        const onSetupSuccess = (result) => {
+            applySetupResultCredentialErrors(result);
             doRefresh();
             if (!countdownInterval && tbody && repos.length > 0) {
                 startCountdown();
@@ -6646,10 +7375,12 @@ export function renderWorkspaceDetail(container, params) {
                 retryBtn.textContent = 'Setting up\u2026';
 
                 try {
-                    await runSetup(projectId, workspace.id,
+                    const result = await runSetup(projectId, workspace.id,
                         'All repositories cloned successfully.');
 
-                    // Trigger immediate refresh to update the status table.
+                    // Track credential errors from this setup run, then trigger
+                    // an immediate refresh to update the status table.
+                    applySetupResultCredentialErrors(result);
                     doRefresh();
                 } catch (err) {
                     showToast(err.message || 'Failed to set up workspace.', 'error');

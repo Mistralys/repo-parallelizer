@@ -91,6 +91,38 @@ export const MIN_SERVER_PORT = 1;
  */
 export const MAX_SERVER_PORT = 65_535;
 
+// ---------------------------------------------------------------------------
+// GitCredentialEntry — per-field maximum lengths
+// ---------------------------------------------------------------------------
+
+/**
+ * Maximum character length for a credential `id` field.
+ * IDs are kebab-case strings; 100 characters provides a generous upper bound
+ * while guarding against unbounded input.
+ */
+export const MAX_CREDENTIAL_ID_LENGTH = 100;
+
+/**
+ * Maximum character length for a credential `label` field.
+ * Labels are human-readable display names; 200 characters is sufficient for
+ * any reasonable label.
+ */
+export const MAX_CREDENTIAL_LABEL_LENGTH = 200;
+
+/**
+ * Maximum character length for a credential `host` field.
+ * 253 characters is the maximum length of a fully-qualified DNS hostname
+ * per RFC 1035.
+ */
+export const MAX_CREDENTIAL_HOST_LENGTH = 253;
+
+/**
+ * Maximum character length for a credential `token` field.
+ * 500 characters covers GitHub fine-grained PATs (~93 chars) and similar
+ * tokens with a wide safety margin.
+ */
+export const MAX_CREDENTIAL_TOKEN_LENGTH = 500;
+
 ```
 ###  Path: `/src/config/config.ts`
 
@@ -98,7 +130,8 @@ export const MAX_SERVER_PORT = 65_535;
 import { chmodSync } from 'node:fs';
 import { getConfigPath } from '../utils/paths.js';
 import { readJsonFile, writeJsonFile, FileNotFoundError } from '../storage/json-storage.js';
-import type { AppConfig } from './config.types.js';
+import type { AppConfig, GitCredentialEntry } from './config.types.js';
+import { toKebabCase } from '../utils/slug.js';
 import {
     DEFAULT_NOTES_CARD_HEIGHT,
     DEFAULT_NOTES_COLUMNS,
@@ -112,6 +145,10 @@ import {
     MAX_CLONE_DEPTH,
     MIN_SERVER_PORT,
     MAX_SERVER_PORT,
+    MAX_CREDENTIAL_ID_LENGTH,
+    MAX_CREDENTIAL_LABEL_LENGTH,
+    MAX_CREDENTIAL_HOST_LENGTH,
+    MAX_CREDENTIAL_TOKEN_LENGTH,
 } from './config.constants.js';
 
 const REQUIRED_FIELDS: ReadonlyArray<keyof AppConfig> = ['projectsFolder', 'storageFolder'];
@@ -247,39 +284,156 @@ function parseIntegerField(
 }
 
 /**
- * Validates and returns the `gitCredentials` value from the raw config.
+ * Validates and returns the `gitCredentials` value from the raw config,
+ * auto-migrating the legacy `Record<string, string>` format to the new
+ * `GitCredentialEntry[]` format when necessary.
  *
- * @returns undefined when the field is absent or null.
- * @throws {Error} If the value is present but is not a plain object, or if any
- *   key maps to a non-string or empty-string token.
+ * **Accepted inputs:**
+ * - `undefined` / `null` → returns `undefined`
+ * - `GitCredentialEntry[]` (new format) → validated and returned as-is
+ * - `Record<string, string>` (old format, hostname→token map) → migrated to
+ *   `GitCredentialEntry[]` with `id` derived from the hostname in kebab-case
+ *   and `label` set to the hostname. Colliding IDs get a numeric suffix (`-2`,
+ *   `-3`, …).
+ * - An empty array `[]` → returns `[]`
+ *
+ * **Validation (new-format arrays):**
+ * - Every entry must have non-empty `id`, `label`, `host`, and `token` fields.
+ * - Duplicate `id` values within the array are rejected.
+ *
+ * **Whitespace normalization:**
+ * All returned entries have leading and trailing whitespace trimmed from their
+ * field values. For new-format array entries, all four fields (`id`, `label`,
+ * `host`, `token`) are trimmed. For legacy-format entries, all three of `label`,
+ * `host`, and `token` are trimmed — `label` is derived from the hostname key
+ * after trimming, consistent with the new-format path. `host` is additionally
+ * lowercased in both formats (hostnames are case-insensitive; `label` keeps its
+ * original casing for display).
+ *
+ * @returns `undefined` when the field is absent or null; otherwise a
+ *   `GitCredentialEntry[]` (possibly empty).
+ * @throws {Error} If the value is present but structurally invalid, or if any
+ *   entry fails validation.
  */
-function parseGitCredentials(value: unknown): Record<string, string> | undefined {
+function parseGitCredentials(value: unknown): GitCredentialEntry[] | undefined {
     if (value === undefined || value === null) {
         return undefined;
     }
 
-    if (typeof value !== 'object' || Array.isArray(value)) {
-        throw new Error(
-            'Configuration error: "gitCredentials" must be a plain object mapping hostnames to credential strings.'
-        );
+    // --- New format: array of GitCredentialEntry objects ---
+    if (Array.isArray(value)) {
+        // Empty array is valid — treat as "no credentials".
+        if (value.length === 0) {
+            return [];
+        }
+
+        const seenIds = new Set<string>();
+
+        for (let i = 0; i < value.length; i++) {
+            const entry = value[i] as Record<string, unknown>;
+
+            if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+                throw new Error(
+                    `Configuration error: gitCredentials[${i}] must be a credential object, got ${typeof entry}.`
+                );
+            }
+
+            for (const field of ['id', 'label', 'host', 'token'] as const) {
+                const fieldValue = entry[field];
+                if (typeof fieldValue !== 'string' || fieldValue.trim() === '') {
+                    throw new Error(
+                        `Configuration error: gitCredentials[${i}].${field} must be a non-empty string.`
+                    );
+                }
+            }
+
+            // Per-field length limits — enforce the same limits as the credential API.
+            const fieldLimits: Array<['id' | 'label' | 'host' | 'token', number]> = [
+                ['id', MAX_CREDENTIAL_ID_LENGTH],
+                ['label', MAX_CREDENTIAL_LABEL_LENGTH],
+                ['host', MAX_CREDENTIAL_HOST_LENGTH],
+                ['token', MAX_CREDENTIAL_TOKEN_LENGTH],
+            ];
+            for (const [field, maxLen] of fieldLimits) {
+                const fieldValue = entry[field] as string;
+                if (fieldValue.length > maxLen) {
+                    throw new Error(
+                        `Configuration error: gitCredentials[${i}].${field} must not exceed ${maxLen} characters (got ${fieldValue.length}).`
+                    );
+                }
+            }
+
+            const id = (entry['id'] as string).trim();
+            if (seenIds.has(id)) {
+                throw new Error(
+                    `Configuration error: gitCredentials contains duplicate id "${id}".`
+                );
+            }
+            seenIds.add(id);
+        }
+
+        // Trim all four fields on every entry before returning so that
+        // downstream consumers always receive normalized values. `host` is
+        // additionally lowercased — hostnames are case-insensitive (RFC 4343),
+        // and matching elsewhere (buildCredentialOptionsResponse, resolveCredential)
+        // compares against a URL-derived host that is always lowercase.
+        return (value as Array<Record<string, unknown>>).map(entry => ({
+            id: (entry['id'] as string).trim(),
+            label: (entry['label'] as string).trim(),
+            host: (entry['host'] as string).trim().toLowerCase(),
+            token: (entry['token'] as string).trim(),
+        })) as GitCredentialEntry[];
     }
 
-    const credentials = value as Record<string, unknown>;
+    // --- Old format: plain object mapping hostname → token ---
+    if (typeof value === 'object') {
+        const legacyMap = value as Record<string, unknown>;
+        const entries = Object.entries(legacyMap);
 
-    for (const [key, token] of Object.entries(credentials)) {
-        if (typeof token !== 'string') {
-            throw new Error(
-                `Configuration error: gitCredentials["${key}"] must be a string, got ${typeof token}.`
-            );
+        // Empty legacy object → return undefined (no credentials configured).
+        if (entries.length === 0) {
+            return undefined;
         }
-        if (token === '') {
-            throw new Error(
-                `Configuration error: gitCredentials["${key}"] must not be an empty string.`
-            );
+
+        const result: GitCredentialEntry[] = [];
+        const usedIds = new Set<string>();
+
+        for (const [index, [host, token]] of entries.entries()) {
+            if (typeof token !== 'string') {
+                throw new Error(
+                    `Configuration error: gitCredentials entry #${index + 1} (legacy format) must have a string value, got ${typeof token}.`
+                );
+            }
+            if (token === '') {
+                throw new Error(
+                    `Configuration error: gitCredentials entry #${index + 1} (legacy format) must not have an empty string value.`
+                );
+            }
+
+            // Derive a kebab-case ID from the hostname.
+            const baseId = toKebabCase(host);
+            let candidateId = baseId;
+            let suffix = 2;
+            while (usedIds.has(candidateId)) {
+                candidateId = `${baseId}-${suffix}`;
+                suffix++;
+            }
+            usedIds.add(candidateId);
+
+            result.push({
+                id: candidateId,
+                label: host.trim(),
+                host: host.trim().toLowerCase(),
+                token: token.trim(),
+            });
         }
+
+        return result;
     }
 
-    return credentials as Record<string, string>;
+    throw new Error(
+        'Configuration error: "gitCredentials" must be an array of credential entries or omitted.'
+    );
 }
 
 /**
@@ -321,6 +475,30 @@ export function saveConfigField(
 
 ```ts
 /**
+ * A single named Git credential entry used to authenticate against a remote host.
+ *
+ * Credentials are stored as an array so that multiple tokens can exist for the
+ * same host (e.g. different accounts on github.com). Each repository references
+ * the credential it needs via its `CredentialId` field.
+ */
+export interface GitCredentialEntry {
+    /** Unique identifier for this credential, used to reference it from repositories. */
+    id: string;
+
+    /** Human-readable display name shown in the UI (e.g. "GitHub personal account"). */
+    label: string;
+
+    /**
+     * Hostname this credential applies to (e.g. `"github.com"`).
+     * Used for auto-selection when a repository's host has exactly one matching credential.
+     */
+    host: string;
+
+    /** Personal Access Token, password, or other credential string. */
+    token: string;
+}
+
+/**
  * The application configuration loaded from config.json.
  *
  * Copy config.dist.json to config.json and fill in the required fields before
@@ -359,15 +537,18 @@ export interface AppConfig {
     gitPollingIntervalSeconds: number;
 
     /**
-     * Map of hostname (or URL prefix) to Personal Access Token / password used
-     * when cloning or fetching from private repositories.
+     * Named credential entries used when cloning or fetching from private
+     * repositories.
      *
-     * Keys are matched against the remote URL (e.g. `"github.com"`).
-     * Values must be non-empty credential strings (PATs, passwords, etc.).
+     * Each entry carries an `id`, `label`, `host`, and `token`. Repositories
+     * reference a specific credential via their `CredentialId` field. When a
+     * repository has no explicit `CredentialId`, the tool auto-selects the
+     * sole credential whose `host` matches the repository's remote URL (if
+     * exactly one such credential exists).
      *
-     * Omit the field or leave the object empty for public repositories.
+     * Omit the field or leave the array empty for public repositories.
      */
-    gitCredentials?: Record<string, string>;
+    gitCredentials?: GitCredentialEntry[];
 
     /**
      * Maximum number of entries retained in the error log. Oldest entries are
@@ -410,6 +591,6 @@ export interface AppConfig {
 ```
 ---
 **File Statistics**
-- **Size**: 12.29 KB
-- **Lines**: 375
+- **Size**: 13.49 KB
+- **Lines**: 416
 File: `modules/config/architecture-core.md`

@@ -16,6 +16,7 @@
     │   │   ├── README.md
     │   │   ├── api-surface.md
     │   │   ├── constraints.md
+    │   │   ├── curation-log.md
     │   │   ├── data-flows.md
     │   │   ├── gui-frontend.md
     │   │   ├── rest-api.md
@@ -47,10 +48,15 @@
     │       └── components/
     │           ├── branch-quick-switch.js
     │           ├── confirm-dialog.js
+    │           ├── confirm-dialog.test.mjs
     │           ├── form-helpers.js
+    │           ├── modal-shell.js
+    │           ├── modal-shell.test.mjs
     │           ├── nav-badge.js
     │           ├── repo-status-cells.js
     │           ├── repo-status-cells.test.mjs
+    │           ├── repository-modal.js
+    │           ├── repository-modal.test.mjs
     │           ├── status-badge.js
     │           ├── theme-toggle.js
     │           ├── toast.js
@@ -65,7 +71,9 @@
     │           └── branch-switch.js
     │           └── dashboard.js
     │           └── dashboard.test.mjs
+    │           └── docs-git-tokens.js
     │           └── error-log.js
+    │           └── error-log.test.mjs
     │           └── notes-collected.js
     │           └── notes-collected.test.mjs
     │           └── project-detail.js
@@ -75,6 +83,7 @@
     │           └── repository-detail.test.mjs
     │           └── settings.js
     │           └── settings.test.mjs
+    │           └── workspace-detail.credential-error.test.mjs
     │           └── workspace-detail.js
     │           └── workspace-detail.notes.test.mjs
     │           └── workspace-detail.open-button.test.mjs
@@ -139,6 +148,7 @@
     │   │   ├── app-launcher.test.ts
     │   │   ├── config.notes-display.test.ts
     │   │   ├── helpers/
+    │   │   │   ├── mock-error-log-manager.ts
     │   │   │   ├── mock-http.ts
     │   │   ├── index.test.ts
     │   │   ├── pollingManager.errorLog.test.ts

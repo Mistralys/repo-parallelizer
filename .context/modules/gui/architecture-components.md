@@ -10,8 +10,10 @@ _SOURCE: Reusable UI components and utilities_
                 ├── branch-quick-switch.js
                 ├── confirm-dialog.js
                 ├── form-helpers.js
+                ├── modal-shell.js
                 ├── nav-badge.js
                 ├── repo-status-cells.js
+                ├── repository-modal.js
                 ├── status-badge.js
                 ├── theme-toggle.js
                 ├── toast.js
@@ -354,6 +356,11 @@ export function showBranchQuickSwitch({ anchorEl, projectId, wid, repoId, curren
  * The overlay uses CSS classes defined in styles.css (`.modal-overlay`,
  * `.modal`, `.modal-title`, `.modal-body`, `.modal-actions`).
  *
+ * Built on the shared `modal-shell.js` primitive, which supplies the
+ * overlay/modal/ARIA DOM, focus trap, focus restoration, and
+ * Escape/backdrop-cancel wiring — see `repository-modal.js` for the other
+ * consumer of the same shell.
+ *
  * Usage:
  *   import { showConfirm } from './components/confirm-dialog.js';
  *
@@ -364,6 +371,8 @@ export function showBranchQuickSwitch({ anchorEl, projectId, wid, repoId, curren
  *     // User clicked Cancel or pressed Escape → abort
  *   }
  */
+
+import { createModalShell } from './modal-shell.js';
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -383,23 +392,8 @@ export function showBranchQuickSwitch({ anchorEl, projectId, wid, repoId, curren
 export function showConfirm(title, message) {
     return new Promise((resolve, reject) => {
         // ------------------------------------------------------------------
-        // Build DOM
+        // Build body/actions content (the shell builds overlay/modal/title)
         // ------------------------------------------------------------------
-        const overlay = document.createElement('div');
-        overlay.className = 'modal-overlay';
-        overlay.setAttribute('role', 'dialog');
-        overlay.setAttribute('aria-modal', 'true');
-        overlay.setAttribute('aria-labelledby', 'confirm-dialog-title');
-        overlay.setAttribute('aria-describedby', 'confirm-dialog-body');
-
-        const modal = document.createElement('div');
-        modal.className = 'modal';
-
-        const titleEl = document.createElement('h2');
-        titleEl.className = 'modal-title';
-        titleEl.id = 'confirm-dialog-title';
-        titleEl.textContent = title;
-
         const bodyEl = document.createElement('p');
         bodyEl.className = 'modal-body';
         bodyEl.id = 'confirm-dialog-body';
@@ -421,38 +415,27 @@ export function showConfirm(title, message) {
         actionsEl.appendChild(cancelBtn);
         actionsEl.appendChild(confirmBtn);
 
-        modal.appendChild(titleEl);
-        modal.appendChild(bodyEl);
-        modal.appendChild(actionsEl);
-        overlay.appendChild(modal);
-
         // ------------------------------------------------------------------
-        // Helpers
+        // Shell — Escape/backdrop-cancel, focus trap, focus restoration
         // ------------------------------------------------------------------
-
-        /** Remove the overlay from the DOM and detach keyboard listener. */
-        function cleanup() {
-            document.removeEventListener('keydown', onKeydown);
-            if (overlay.parentNode) {
-                overlay.parentNode.removeChild(overlay);
-            }
-        }
-
-        function onConfirm() {
-            cleanup();
-            resolve();
-        }
-
         function onCancel() {
-            cleanup();
+            shell.close();
             reject(new Error('User cancelled'));
         }
 
-        /** Close on Escape key. */
-        function onKeydown(event) {
-            if (event.key === 'Escape') {
-                onCancel();
-            }
+        const shell = createModalShell({
+            titleText: title,
+            ariaLabelledbyId: 'confirm-dialog-title',
+            ariaDescribedbyId: 'confirm-dialog-body',
+            onCancel,
+        });
+
+        shell.modal.appendChild(bodyEl);
+        shell.modal.appendChild(actionsEl);
+
+        function onConfirm() {
+            shell.close();
+            resolve();
         }
 
         // ------------------------------------------------------------------
@@ -461,24 +444,15 @@ export function showConfirm(title, message) {
         confirmBtn.addEventListener('click', onConfirm);
         cancelBtn.addEventListener('click', onCancel);
 
-        // Click on the backdrop (overlay itself, not the modal) cancels.
-        overlay.addEventListener('click', (event) => {
-            if (event.target === overlay) {
-                onCancel();
-            }
-        });
-
-        document.addEventListener('keydown', onKeydown);
-
         // ------------------------------------------------------------------
         // Mount & focus
         // ------------------------------------------------------------------
-        document.body.appendChild(overlay);
-
-        // Move focus into the dialog for accessibility.
-        confirmBtn.focus();
+        // Confirm button (not Cancel or the dialog itself) receives initial
+        // focus, matching pre-refactor behavior.
+        shell.mount(confirmBtn);
     });
 }
+
 
 ```
 ###  Path: `/gui/public/js/components/form-helpers.js`
@@ -760,6 +734,197 @@ export function validateRequired(form, fields) {
     }
 
     return valid;
+}
+
+```
+###  Path: `/gui/public/js/components/modal-shell.js`
+
+```js
+/**
+ * Modal Shell Primitive.
+ *
+ * Extracts the overlay/modal/ARIA DOM construction, Escape/backdrop-cancel
+ * wiring, focus trap, focus restoration, and busy-gating logic shared by
+ * every modal dialog in the application (`confirm-dialog.js`,
+ * `repository-modal.js`). Centralizing this here means both dialogs get
+ * identical accessibility behavior by construction and cannot silently
+ * drift apart.
+ *
+ * Usage:
+ *   import { createModalShell } from './components/modal-shell.js';
+ *
+ *   const shell = createModalShell({
+ *     titleText: 'Add Repository',
+ *     ariaLabelledbyId: 'repository-modal-title',
+ *     className: 'modal--form',
+ *     onCancel: () => { shell.close(); reject(new Error('User cancelled')); },
+ *   });
+ *   shell.modal.appendChild(bodyEl);
+ *   shell.mount(initialFocusEl);
+ *   // … later, on submit:
+ *   shell.close();
+ */
+
+// ---------------------------------------------------------------------------
+// Focusable-element query
+// ---------------------------------------------------------------------------
+
+/**
+ * Selector matching elements considered part of the focus trap's tab order.
+ * Excludes disabled controls, which are not focusable.
+ */
+const FOCUSABLE_SELECTOR =
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Returns all focusable elements inside `container`, in DOM order, excluding
+ * `:disabled` controls.
+ *
+ * @param {HTMLElement} container
+ * @returns {HTMLElement[]}
+ */
+function queryFocusable(container) {
+    return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
+        (el) => !el.disabled,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// createModalShell
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {Object} ModalShellOptions
+ * @property {string}   titleText          - Text shown in the modal's title heading.
+ * @property {string}   ariaLabelledbyId   - ID applied to the title heading and referenced by `aria-labelledby`.
+ * @property {string}   [ariaDescribedbyId] - ID referenced by `aria-describedby`, when the caller has a description element.
+ * @property {string}   [className]        - Additional class applied to the `.modal` element alongside the base `modal` class.
+ * @property {() => void} onCancel         - Invoked when the user presses Escape or clicks the backdrop (while not busy).
+ */
+
+/**
+ * @typedef {Object} ModalShell
+ * @property {HTMLDivElement} overlay - The `.modal-overlay` element (not yet attached to the DOM).
+ * @property {HTMLDivElement} modal   - The `.modal` element, already appended to `overlay`. Callers append their own body/actions content to this.
+ * @property {(initialFocusEl?: HTMLElement) => void} mount - Attaches the overlay to `document.body` and wires all event listeners.
+ * @property {() => void} close - Detaches the overlay, removes listeners, and restores focus.
+ * @property {(busy: boolean) => void} setBusy - Toggles whether Escape/backdrop-cancel are currently no-ops.
+ */
+
+/**
+ * Builds a modal overlay/dialog shell with focus trap, focus restoration,
+ * Escape/backdrop-cancel wiring, and a busy gate — but does not itself
+ * populate the modal body. Callers append their own content to `modal`.
+ *
+ * @param {ModalShellOptions} options
+ * @returns {ModalShell}
+ */
+export function createModalShell({
+    titleText,
+    ariaLabelledbyId,
+    ariaDescribedbyId,
+    className,
+    onCancel,
+}) {
+    // ------------------------------------------------------------------
+    // Build DOM
+    // ------------------------------------------------------------------
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', ariaLabelledbyId);
+    if (ariaDescribedbyId) {
+        overlay.setAttribute('aria-describedby', ariaDescribedbyId);
+    }
+
+    const modal = document.createElement('div');
+    modal.className = className ? `modal ${className}` : 'modal';
+
+    const titleEl = document.createElement('h2');
+    titleEl.className = 'modal-title';
+    titleEl.id = ariaLabelledbyId;
+    titleEl.textContent = titleText;
+
+    modal.appendChild(titleEl);
+    overlay.appendChild(modal);
+
+    // ------------------------------------------------------------------
+    // State
+    // ------------------------------------------------------------------
+    let previouslyFocusedEl = null;
+    let busy = false;
+
+    // ------------------------------------------------------------------
+    // Focus trap / Escape / backdrop-cancel
+    // ------------------------------------------------------------------
+
+    function onKeydown(event) {
+        if (event.key === 'Escape') {
+            if (busy) return;
+            onCancel();
+            return;
+        }
+
+        if (event.key === 'Tab') {
+            const focusable = queryFocusable(modal);
+            if (focusable.length === 0) return;
+
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+
+            if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+            }
+        }
+    }
+
+    function onOverlayClick(event) {
+        if (event.target === overlay && !busy) {
+            onCancel();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Public API
+    // ------------------------------------------------------------------
+
+    function mount(initialFocusEl) {
+        previouslyFocusedEl = document.activeElement;
+
+        document.body.appendChild(overlay);
+
+        document.addEventListener('keydown', onKeydown);
+        overlay.addEventListener('click', onOverlayClick);
+
+        const focusTarget = initialFocusEl ?? queryFocusable(modal)[0];
+        if (focusTarget) {
+            focusTarget.focus();
+        }
+    }
+
+    function close() {
+        document.removeEventListener('keydown', onKeydown);
+        overlay.removeEventListener('click', onOverlayClick);
+
+        if (overlay.parentNode) {
+            overlay.parentNode.removeChild(overlay);
+        }
+
+        if (previouslyFocusedEl && document.contains(previouslyFocusedEl)) {
+            previouslyFocusedEl.focus();
+        }
+    }
+
+    function setBusy(nextBusy) {
+        busy = nextBusy;
+    }
+
+    return { overlay, modal, mount, close, setBusy };
 }
 
 ```
@@ -1051,6 +1216,361 @@ export function updateRepoStatusCells(row, repoId, statusInfo, isStable, onBranc
         clearElement(badgeWrapper);
         badgeWrapper.appendChild(createStatusBadge(statusInfo || null));
     }
+}
+
+```
+###  Path: `/gui/public/js/components/repository-modal.js`
+
+```js
+/**
+ * Repository Create/Edit Modal Component.
+ *
+ * Renders a modal form for either registering a new repository or editing an
+ * existing one, sharing a single implementation between both modes since
+ * they share every field — differing only in which fields are pre-filled and
+ * which are disabled.
+ *
+ * Built on the shared `modal-shell.js` primitive, which supplies the
+ * overlay/modal/ARIA DOM, focus trap, focus restoration, and
+ * Escape/backdrop-cancel wiring — see `confirm-dialog.js` for the other
+ * consumer of the same shell.
+ *
+ * Usage:
+ *   import { showRepositoryModal } from './components/repository-modal.js';
+ *
+ *   // Create mode
+ *   const repo = await showRepositoryModal({ mode: 'create' });
+ *
+ *   // Edit mode
+ *   const repo = await showRepositoryModal({ mode: 'edit', repo: existingRepo });
+ */
+
+import { createModalShell } from './modal-shell.js';
+import { createFormField, validateRequired } from './form-helpers.js';
+import { api } from '../api.js';
+import { showToast } from './toast.js';
+import { normaliseRepo } from '../utils/normalise.js';
+import { clearElement } from '../utils/dom.js';
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/** Debounce delay (ms) applied to the URL field's credential re-fetch. */
+const URL_CHANGE_DEBOUNCE_MS = 400;
+
+// ---------------------------------------------------------------------------
+// Credential select helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Decide which credential option should be selected after a
+ * `credentialOptionsForUrl()` fetch: the stored credential ID, when it is
+ * still present among `options`; `''` (None) otherwise.
+ *
+ * Deliberately does *not* fall back to the single `auto: true` match — a
+ * repository with no stored credential must keep showing "None" selected,
+ * consistent with the "No credential configured" state shown in the
+ * repositories list. The auto-detected match is still visually flagged in
+ * its option label (see `rebuildCredentialSelect`) so the user can pick it
+ * deliberately.
+ *
+ * @param {Array<{ credentialId: string }>} options
+ * @param {string} storedCredentialId
+ * @returns {string}
+ */
+function computeSelectedCredentialId(options, storedCredentialId) {
+    if (storedCredentialId && options.some((o) => o.credentialId === storedCredentialId)) {
+        return storedCredentialId;
+    }
+    return '';
+}
+
+/**
+ * Clear and repopulate a credential `<select>` element with a "None" option
+ * plus one option per entry in `options`, then apply the stored-ID/None
+ * selection priority. The sole `auto: true` entry (when present) is labeled
+ * as the recommended match, without being auto-selected.
+ *
+ * @param {HTMLSelectElement} selectEl
+ * @param {Array<{ credentialId: string, label: string, auto: boolean }>} options
+ * @param {string} storedCredentialId
+ */
+function rebuildCredentialSelect(selectEl, options, storedCredentialId) {
+    clearElement(selectEl);
+
+    const noneOpt = document.createElement('option');
+    noneOpt.value = '';
+    noneOpt.textContent = 'None';
+    selectEl.appendChild(noneOpt);
+
+    options.forEach((opt) => {
+        const optionEl = document.createElement('option');
+        optionEl.value = opt.credentialId;
+        optionEl.textContent = opt.auto ? `${opt.label} (recommended match)` : opt.label;
+        selectEl.appendChild(optionEl);
+    });
+
+    selectEl.value = computeSelectedCredentialId(options, storedCredentialId);
+}
+
+/**
+ * Whether `url` is an HTTPS URL, mirroring the server's `extractHost()` check
+ * (only `https:` URLs carry a matchable host — SSH and plain HTTP URLs never do).
+ *
+ * @param {string} url
+ * @returns {boolean}
+ */
+function isHttpsUrl(url) {
+    try {
+        return new URL(url).protocol === 'https:';
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Explains why the credential select has no matching option(s) for `url`,
+ * so an empty ("None"-only) select reads as expected behaviour rather than
+ * a bug. Returns `''` when `options` is non-empty (no explanation needed).
+ *
+ * @param {string} url
+ * @param {Array} options
+ * @returns {string}
+ */
+function describeEmptyCredentialOptions(url, options) {
+    if (options.length > 0) return '';
+    return isHttpsUrl(url)
+        ? 'No saved credential is configured for this URL\'s host.'
+        : 'Credentials can only be matched to HTTPS URLs — this URL\'s scheme (e.g. SSH or HTTP) is not supported.';
+}
+
+// ---------------------------------------------------------------------------
+// showRepositoryModal
+// ---------------------------------------------------------------------------
+
+/**
+ * Show the repository create/edit modal.
+ *
+ * @param {Object} config
+ * @param {'create'|'edit'} config.mode - Which mode to render.
+ * @param {{ id: string, name: string, url: string, credentialId?: string }} [config.repo]
+ *   The repository being edited. Required (and only used) when `mode === 'edit'`.
+ * @returns {Promise<Object>} Resolves with the normalised, saved repository;
+ *   rejects with `Error('User cancelled')` on Cancel/Escape/backdrop-click.
+ */
+export function showRepositoryModal({ mode, repo }) {
+    return new Promise((resolve, reject) => {
+        const isEdit = mode === 'edit';
+        const storedCredentialId = isEdit ? (repo.credentialId ?? '') : '';
+
+        // ------------------------------------------------------------------
+        // Fields
+        // ------------------------------------------------------------------
+        const urlField = createFormField('URL', 'url', 'url', {
+            required: true,
+            placeholder: 'https://github.com/org/repo.git',
+            value: isEdit ? repo.url : '',
+        });
+        const urlInput = urlField.querySelector('input');
+
+        const nameField = createFormField('Name', 'text', 'name', {
+            placeholder: 'Optional — human-readable name.',
+            value: isEdit ? repo.name : '',
+        });
+
+        const idField = createFormField('ID', 'text', 'id', {
+            placeholder: 'Optional — auto-inferred from URL when left blank.',
+            hint: isEdit
+                ? 'Repository ID cannot be changed after creation.'
+                : 'Leave blank to auto-infer from the repository URL.',
+            value: isEdit ? repo.id : '',
+        });
+        if (isEdit) {
+            idField.querySelector('input').disabled = true;
+        }
+
+        const credentialField = createFormField('Credential', 'select', 'credentialId', {
+            choices: [{ value: '', label: 'None' }],
+        });
+        const credentialSelect = credentialField.querySelector('select');
+
+        const credentialHint = document.createElement('span');
+        credentialHint.className = 'hint';
+        credentialHint.id = `${credentialSelect.id}-hint`;
+        credentialHint.hidden = true;
+        credentialField.appendChild(credentialHint);
+        credentialSelect.setAttribute('aria-describedby', credentialHint.id);
+
+        const form = document.createElement('form');
+        form.noValidate = true;
+        form.appendChild(urlField);
+        form.appendChild(nameField);
+        form.appendChild(idField);
+        form.appendChild(credentialField);
+
+        const actions = document.createElement('div');
+        actions.className = 'modal-actions';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'btn btn-secondary';
+        cancelBtn.textContent = 'Cancel';
+
+        const submitBtn = document.createElement('button');
+        submitBtn.type = 'submit';
+        submitBtn.className = 'btn btn-primary';
+        submitBtn.textContent = isEdit ? 'Save' : 'Add';
+
+        actions.appendChild(cancelBtn);
+        actions.appendChild(submitBtn);
+        form.appendChild(actions);
+
+        // ------------------------------------------------------------------
+        // Debounced credential re-fetch on URL edits (both modes)
+        // ------------------------------------------------------------------
+        let debounceTimer = null;
+
+        function clearScheduledRefresh() {
+            if (debounceTimer) {
+                clearTimeout(debounceTimer);
+                debounceTimer = null;
+            }
+        }
+
+        // Monotonically-incrementing token guarding against out-of-order
+        // responses: a URL edit that resolves after a *later* edit's fetch
+        // must not overwrite the select with its now-stale options.
+        let credentialRequestId = 0;
+
+        function setCredentialHint(text) {
+            credentialHint.textContent = text;
+            credentialHint.hidden = !text;
+        }
+
+        async function refreshCredentialOptions(url) {
+            const requestId = ++credentialRequestId;
+            const trimmedUrl = url.trim();
+            if (!trimmedUrl) {
+                rebuildCredentialSelect(credentialSelect, [], storedCredentialId);
+                setCredentialHint('');
+                return;
+            }
+            let options;
+            try {
+                options = await api.repositories.credentialOptionsForUrl(trimmedUrl);
+            } catch {
+                // Background refresh — a failure here should not disrupt the form.
+                return;
+            }
+            if (requestId !== credentialRequestId) {
+                // A newer request has since started; discard this stale response.
+                return;
+            }
+            rebuildCredentialSelect(credentialSelect, options, storedCredentialId);
+            setCredentialHint(describeEmptyCredentialOptions(trimmedUrl, options));
+        }
+
+        urlInput.addEventListener('input', () => {
+            clearScheduledRefresh();
+            debounceTimer = setTimeout(() => {
+                debounceTimer = null;
+                refreshCredentialOptions(urlInput.value);
+            }, URL_CHANGE_DEBOUNCE_MS);
+        });
+
+        // ------------------------------------------------------------------
+        // Shell — Escape/backdrop-cancel, focus trap, focus restoration
+        // ------------------------------------------------------------------
+        function cancel() {
+            clearScheduledRefresh();
+            shell.close();
+            reject(new Error('User cancelled'));
+        }
+
+        const shell = createModalShell({
+            titleText: isEdit ? 'Edit Repository' : 'Add Repository',
+            ariaLabelledbyId: 'repository-modal-title',
+            className: 'modal--form',
+            onCancel: cancel,
+        });
+
+        shell.modal.appendChild(form);
+
+        cancelBtn.addEventListener('click', cancel);
+
+        function setBusy(busy) {
+            shell.setBusy(busy);
+            submitBtn.disabled = busy;
+            cancelBtn.disabled = busy;
+        }
+
+        // ------------------------------------------------------------------
+        // Submit
+        // ------------------------------------------------------------------
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+
+            if (!validateRequired(form, ['url'])) return;
+
+            const urlValue  = urlInput.value.trim();
+            const nameValue = form.querySelector('[name="name"]').value.trim();
+            const selectedCredentialId = credentialSelect.value;
+
+            setBusy(true);
+
+            try {
+                let resolvedRepo;
+
+                if (isEdit) {
+                    const updated = await api.repositories.update(repo.id, { name: nameValue, url: urlValue });
+                    resolvedRepo = normaliseRepo(updated);
+
+                    if (selectedCredentialId !== storedCredentialId) {
+                        try {
+                            const withCredential = await api.repositories.updateCredential(repo.id, selectedCredentialId);
+                            resolvedRepo = normaliseRepo(withCredential);
+                        } catch (credErr) {
+                            showToast(credErr.message || 'Failed to update credential.', 'error');
+                        }
+                    }
+                } else {
+                    const idValue = form.querySelector('[name="id"]').value.trim();
+                    const created = await api.repositories.create({
+                        url: urlValue,
+                        ...(nameValue ? { name: nameValue } : {}),
+                        ...(idValue ? { id: idValue } : {}),
+                    });
+                    resolvedRepo = normaliseRepo(created);
+
+                    if (selectedCredentialId) {
+                        try {
+                            const withCredential = await api.repositories.updateCredential(resolvedRepo.id, selectedCredentialId);
+                            resolvedRepo = normaliseRepo(withCredential);
+                        } catch (credErr) {
+                            showToast(credErr.message || 'Failed to set credential.', 'error');
+                        }
+                    }
+                }
+
+                clearScheduledRefresh();
+                shell.close();
+                resolve(resolvedRepo);
+            } catch (err) {
+                showToast(err.message || 'Failed to save repository.', 'error');
+                setBusy(false);
+            }
+        });
+
+        // ------------------------------------------------------------------
+        // Mount & focus
+        // ------------------------------------------------------------------
+        shell.mount(urlInput);
+
+        if (isEdit) {
+            refreshCredentialOptions(repo.url);
+        }
+    });
 }
 
 ```
@@ -1454,6 +1974,22 @@ export const STABLE_WS_ID = 'STABLE';
  */
 export const APP_NAME_SHORT = 'Paralizer';
 
+/**
+ * Sentinel substring present in credential-missing error messages emitted by
+ * the workspace and repository orchestrators.
+ *
+ * When a clone failure's error string contains this text the workspace detail
+ * view surfaces a "Missing Credential" badge instead of the generic "No data"
+ * error badge.
+ *
+ * Must remain in sync with the error message template in:
+ *   src/orchestration/workspace-orchestrator.ts
+ *   src/orchestration/repository-orchestrator.ts
+ *
+ * @type {string}
+ */
+export const CREDENTIAL_MISSING_SENTINEL = 'requires a credential for host';
+
 ```
 ###  Path: `/gui/public/js/utils/dom.js`
 
@@ -1475,6 +2011,47 @@ export const APP_NAME_SHORT = 'Paralizer';
  */
 export function clearElement(el) {
     while (el.firstChild) el.removeChild(el.firstChild);
+}
+
+/**
+ * Build a CSS-styled credential badge `<span>` for a repository.
+ *
+ * Replaces the previous emoji-based approach (`🔑` / `—`) with a CSS-styled
+ * element that renders consistently across platforms and is accessible via
+ * `aria-label`.
+ *
+ * The returned element always carries the base `.credential-badge` class plus
+ * one of:
+ *   - `.credential-badge--set`  — a credential is configured.
+ *   - `.credential-badge--none` — no credential is configured.
+ *
+ * @param {string|null|undefined} credentialId - The credential ID, or null/undefined when absent.
+ * @returns {HTMLSpanElement}
+ *
+ * @example
+ * // Credential set
+ * const badge = buildCredentialBadge('my-cred-id');
+ * // badge.classList → ['credential-badge', 'credential-badge--set']
+ *
+ * @example
+ * // No credential
+ * const badge = buildCredentialBadge(null);
+ * // badge.classList → ['credential-badge', 'credential-badge--none']
+ */
+export function buildCredentialBadge(credentialId) {
+    const span = document.createElement('span');
+    if (credentialId) {
+        span.className   = 'credential-badge credential-badge--set';
+        span.title       = `Credential: ${credentialId}`;
+        span.textContent = '✓';
+        span.setAttribute('aria-label', 'Credential configured');
+    } else {
+        span.className   = 'credential-badge credential-badge--none';
+        span.title       = 'No credential configured';
+        span.textContent = '—';
+        span.setAttribute('aria-label', 'No credential configured');
+    }
+    return span;
 }
 
 ```
@@ -1532,13 +2109,21 @@ export function initNavHighlight() {
  * Normalise a repository object from the backend.
  *
  * @param {Object} repo
- * @returns {{ id: string, name: string, url: string, LastRefreshedAt: string|undefined }}
+ * @returns {{ id: string, name: string, url: string, credentialId: string|undefined, LastRefreshedAt: string|undefined }}
+ *
+ * @remarks
+ * Unlike other normalised fields, `LastRefreshedAt` intentionally retains its
+ * Go-capitalised casing in the returned object. This preserves compatibility
+ * with existing consumers (e.g. `buildRepoStatusCells`) that already reference
+ * it by that name. All other fields (`id`, `name`, `url`, `credentialId`) use
+ * camelCase as the normalised form.
  */
 export function normaliseRepo(repo) {
     return {
         id:              repo.Id   || repo.id   || '',
         name:            repo.Name || repo.name || '',
         url:             repo.Url  || repo.url  || repo.URL || '',
+        credentialId:    repo.CredentialId || repo.credentialId || undefined,
         LastRefreshedAt: repo.LastRefreshedAt || repo.lastRefreshedAt || undefined,
     };
 }

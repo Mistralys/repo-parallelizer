@@ -189,7 +189,7 @@ import type { BaseStore } from '../storage/storage.types.js';
 /**
  * Severity level of an error log entry.
  */
-export type ErrorSeverity = 'error' | 'warning';
+export type ErrorSeverity = 'error' | 'warning' | 'audit' | 'info';
 
 /**
  * Optional context identifiers attached to an error log entry.

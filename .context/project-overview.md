@@ -52,7 +52,7 @@ Set up a project once, then spin up as many parallel workspaces as you need — 
 - **VS Code integration** — auto-generated `.code-workspace` files let you open an entire workspace in VS Code instantly.
 - **Web GUI** — a built-in browser UI for managing repositories, projects, workspaces, and branches — no terminal required after setup. The project dashboard supports real-time filtering by name/ID/description, repository filtering, and sort by alphabetical or last-activity order.
 - **Live git status** — automatic polling shows current branches, uncommitted changes, and unfetched commits at a glance.
-- **Workspace health checks** — detect and fix configuration drift (missing repos, stale workspace files).
+- **Workspace health checks** — detect and fix configuration drift (missing repos, stale workspace files, credential errors).
 - **Interactive CLI** — a keyboard-driven terminal menu for quick access to setup, server launch, and documentation generation.
 - **Private repo support** — per-host credential management for cloning private repositories.
 
@@ -186,8 +186,7 @@ do not reflect the current state of the application.
 | Constraints & Conventions | [constraints.md](constraints.md) | Established rules, conventions, and non-obvious gotchas. |
 | REST API | [rest-api.md](rest-api.md) | HTTP endpoints served by the built-in server. |
 | GUI Frontend | [gui-frontend.md](gui-frontend.md) | SPA architecture, views, components, and routing. |
-
-**Last generated:** 2026-04-11
+| Curation Log | [curation-log.md](curation-log.md) | Standing decisions and verification history. |
 
 ```
 ###  Path: `/gui/README.md`
@@ -233,10 +232,31 @@ Loads and validates the application configuration from a `config.json` file on d
 ## Key Concepts
 
 - **AppConfig**: The central configuration interface that all other modules depend on. Contains paths for project storage, clone depth, server port, polling interval, and optional git credentials.
-- **Config file**: A `config.json` file at the tool root, created from `config.dist.json`. Not committed to version control. Restrict permissions with `chmod 600 config.json` — see the README security advisory.
+- **Config file**: A `config.json` file at the tool root, created from `config.dist.json`. Not committed to version control. On POSIX systems, `saveConfigField()` automatically applies `chmod 600` to `config.json` after every write to restrict read/write access to the file owner. On Windows no equivalent permission restriction is applied — ensure the file is stored in a location not accessible to other users.
 - **Defaults**: Missing optional fields are filled with sensible defaults (clone depth: 50, server port: 4200, polling interval: 30s).
-- **gitCredentials**: Optional `Record<string, string>` mapping hostname → Personal Access Token or password. Absent or empty means public-repo-only mode. Validated on load: non-object types, non-string values, and empty-string tokens all throw a descriptive error.
+- **gitCredentials**: Optional `GitCredentialEntry[]` array. Each entry carries `id` (unique kebab-case identifier), `label` (display name), `host` (hostname), and `token` (PAT or password). Absent, `null`, or the legacy empty object `{}` → treated as no credentials (public-repo-only mode). An explicit empty array `[]` → credentials explicitly set to empty (same runtime effect, but the field is considered *present*). Validated on load — see [Parsing and migration](#parsing-and-migration).
 - **saveConfigField caller guard**: `saveConfigField(field, value)` does not validate the `field` parameter. Any HTTP route handler or external caller that passes user-supplied input for `field` **must** guard it against an explicit allowlist before calling the function.
+- **_defaultsCoverageGuard**: A compile-time completeness guard defined immediately after the `DEFAULTS` constant (lines 37–42). It constructs a full `AppConfig` value from `DEFAULTS` plus the two required fields. The `satisfies AppConfig` clause causes TypeScript to emit a type error at that exact line if a new required-or-defaulted `AppConfig` field is added without a corresponding entry in `DEFAULTS`. This catches silent runtime omissions at compile time — do not remove it.
+
+## Parsing and migration
+
+`parseGitCredentials()` is the internal parser for the `gitCredentials` config field. It handles three distinct cases:
+
+| Input | Result |
+|---|---|
+| `undefined` / `null` / absent | `undefined` — no credentials configured |
+| Legacy object `{}` (empty) | `undefined` — treated identically to absent |
+| Legacy object `{ "github.com": "token" }` | Auto-migrated to `GitCredentialEntry[]` — hostname becomes `label` and `host`; `id` is derived from the hostname in kebab-case |
+| Array `[]` (empty) | `[]` — credentials explicitly set to an empty list |
+| Array `[{ id, label, host, token }]` | Validated and returned as-is |
+
+**The `{}` vs `[]` distinction:** An absent field and the legacy empty object both produce `undefined`. An explicit empty array `[]` produces `[]`. Consumers that check `config.gitCredentials !== undefined` will see different results: the empty-array case passes the check while the absent/`{}`  case does not. This asymmetry is intentional — `{}` represents the old "no credentials" state from before the array format was introduced, while `[]` explicitly declares that credentials are managed but currently empty.
+
+**Collision handling:** When two legacy hostnames produce the same kebab-case ID (e.g. `github.com` and `github-com` both → `github-com`), a numeric suffix is appended to disambiguate: `github-com`, `github-com-2`, `github-com-3`, …
+
+**Migration is idempotent:** Re-parsing an already-migrated `GitCredentialEntry[]` returns the same array unchanged.
+
+**Validation errors in legacy format entries** report a 1-based positional index rather than the hostname — for example: `Configuration error: gitCredentials entry #1 (legacy format) must have a string value, got number.` This avoids exposing infrastructure hostnames in error messages or logs.
 
 ## Integration Points
 
@@ -335,10 +355,21 @@ Stateless functions wrapping Git CLI subprocess calls. All operations spawn `git
 |---|---|
 | `git.types.ts` | Type definitions: GitResult, GitStatusInfo, BranchInfo, CloneOptions |
 | `git-cli.ts` | Low-level `runGit()` and `runGitOrThrow()` subprocess execution |
-| `git-credentials.ts` | URL credential utilities: `extractHost()`, `injectCredentials()`, `hasEmbeddedCredentials()`, `stripEmbeddedCredentials()` |
+| `git-credentials.ts` | URL credential utilities: `resolveCredential()`, `injectCredentialToken()`, `extractHost()`, `hasEmbeddedCredentials()`, `stripEmbeddedCredentials()`. |
 | `git-clone.ts` | `cloneRepository()` with depth and timeout options |
 | `git-branch.ts` | Branch listing, creation, switching, existence checks |
 | `git-status.ts` | Repository status: current branch, uncommitted changes, conflicts |
+
+## Credential Pipeline
+
+`git-credentials.ts` implements a two-step pipeline for injecting HTTPS credentials into clone URLs:
+
+1. **`resolveCredential(url, credentials, credentialId?)`** — selects the correct `GitCredentialEntry` from the configured credential array. When `credentialId` is supplied it performs an exact ID lookup; otherwise it auto-selects the single credential whose `host` matches the URL's hostname (returns `null` if zero or multiple matches are found).
+2. **`injectCredentialToken(url, token)`** — embeds the resolved token into the URL as the WHATWG URL username (`https://<token>@<host>/...`). Token characters are automatically percent-encoded; no string concatenation is used.
+
+SSH URLs (`git@…`, `ssh://…`) return `null` from `extractHost()` and are bypassed by both steps — authentication is delegated to the SSH agent.
+
+**Security note:** When `credentialId` is explicit, `resolveCredential()` does not cross-validate the credential's `host` against the URL's hostname. Callers (i.e. the orchestrators) are responsible for ensuring coherence — see the `@remarks` block in `resolveCredential()`.
 
 ## Integration Points
 
@@ -398,10 +429,21 @@ High-level composite operations that coordinate models and Git commands to imple
 | `workspace-orchestrator.ts` | Create, delete, rename workspaces (clones repos into new workspace) |
 | `branch-orchestrator.ts` | Multi-repo branch switching with conflict detection |
 | `vscode-workspace.ts` | Generate `.code-workspace` files for VS Code |
+| `workspace-health.ts` | Side-effect-free health checks for workspaces (missing files, uncloned repos, credential errors) |
+
+## Credential Success Logging
+
+After a successful credential-based clone, both `WorkspaceOrchestrator.createWorkspace()` and `RepositoryOrchestrator.addRepositoryToProject()` write a `Source: 'credentials'`, `Severity: 'info'` entry to the error log. This entry is used by `checkWorkspaceHealth()` to suppress stale credential-missing health badges without deleting history.
+
+- **`workspace-setup` operation** — written by `WorkspaceOrchestrator.createWorkspace()`.
+- **`add-repository` operation** — written by `RepositoryOrchestrator.addRepositoryToProject()`.
+- **SSH clones** (`credential === null`) do not produce a credentials log entry.
+
+`checkWorkspaceHealth()` inspects the most recent `Source: 'credentials'` entry per repository: a `Severity: 'info'` entry suppresses the badge; a `Severity: 'error'` entry surfaces it. See `workspace-health.ts` `@remarks` for the full stale-badge resolution description.
 
 ## Integration Points
 
-- **Dependencies**: `config`, `models` (ProjectManager, RepositoryManager, WorkspaceManager), `git` (clone, branch, status).
+- **Dependencies**: `config`, `models` (ProjectManager, RepositoryManager, WorkspaceManager), `git` (clone, branch, status), `error-log` (ErrorLogManager — optional, for credential health checks).
 - **Consumed by**: Server route handlers, CLI.
 
 ```
@@ -418,7 +460,7 @@ Built-in HTTP server providing a REST API and static file serving for the GUI. U
 - **Static file server**: Serves the `gui/public/` directory for the frontend SPA.
 - **Polling Manager**: Periodically fetches git status for active workspaces, caching results for the GUI.
 - **REST API**: Full CRUD for repositories, projects, workspaces, plus branch operations, status polling, and error log access.
-- **Error Log**: `startServer()` creates a single `ErrorLogManager` instance and shares it across all subsystems (WorkspaceOrchestrator, BranchOrchestrator, PollingManager, and Router). No external reference is returned; the instance is internal to the server lifecycle.
+- **Error Log**: `startServer()` creates a single `ErrorLogManager` instance and shares it across all subsystems (WorkspaceOrchestrator, BranchOrchestrator, PollingManager, Router, and credential route handlers). The credential route handlers (`config.ts`, `repositories.ts`) emit `Severity: 'audit'` entries with `Source: 'credential-audit'` on every successful credential mutation. No external reference to the manager is returned; the instance is internal to the server lifecycle.
 
 ## Folder Structure
 

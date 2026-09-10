@@ -163,7 +163,7 @@ const repositories = {
     /**
      * Update a repository's metadata.
      * @param {string} id
-     * @param {{ name: string }} data
+     * @param {{ name?: string, url?: string }} data - `url` is optional; when omitted, the repository's URL is left unchanged.
      * @returns {Promise<Object>}
      */
     update(id, data) {
@@ -187,6 +187,79 @@ const repositories = {
      */
     touchRefreshTimestamp(id) {
         return request('POST', `/api/repositories/${encodeURIComponent(id)}/refresh-timestamp`);
+    },
+
+    /**
+     * Fetch the list of credentials that can be associated with a repository.
+     *
+     * The server returns `{ credentials: GitCredentialEntry[], autoSelected?: string }`.
+     * This method transforms that into the array shape `{ credentialId, label, host, auto }`
+     * expected by the GUI's credential-selector components.
+     *
+     * `auto` is `true` only on the entry whose `id` matches `autoSelected` (i.e. exactly
+     * one credential matches the repository's host). When multiple credentials match, no
+     * entry has `auto: true`.
+     *
+     * @param {string} id - Repository ID.
+     * @returns {Promise<Array<{ credentialId: string, label: string, host: string, auto: boolean }>>}
+     */
+    credentialOptions(id) {
+        return request('GET', `/api/repositories/${encodeURIComponent(id)}/credential-options`)
+            .then((response) => {
+                const creds       = Array.isArray(response?.credentials) ? response.credentials : [];
+                const autoSelected = response?.autoSelected;
+                return creds.map((c) => ({
+                    credentialId: c.id,
+                    label:        c.label,
+                    host:         c.host,
+                    auto:         c.id === autoSelected,
+                }));
+            });
+    },
+
+    /**
+     * Fetch the list of credentials that can be associated with an arbitrary
+     * (not-yet-registered or in-edit) repository URL.
+     *
+     * Returns all credentials whose host matches the URL's hostname, plus an
+     * `autoSelected` credential ID when exactly one matches. Used by the
+     * create/edit repository modal to populate the credential selector before
+     * a repository exists, or live as the URL field is edited.
+     *
+     * @param {string} url - The Git remote URL to match credentials against.
+     * @returns {Promise<Array<{ credentialId: string, label: string, host: string, auto: boolean }>>}
+     */
+    credentialOptionsForUrl(url) {
+        return request('GET', `/api/repositories/credential-options?url=${encodeURIComponent(url)}`)
+            .then(({ credentials, autoSelected }) => credentials.map((c) => ({
+                credentialId: c.id,
+                label: c.label,
+                host: c.host,
+                auto: c.id === autoSelected,
+            })));
+    },
+
+    /**
+     * Associate (or disassociate) a credential with a repository.
+     *
+     * Pass an empty string for `credentialId` to clear the association; it is
+     * normalized to `null` before being sent, which is what the server expects
+     * to clear the association (an empty string is rejected as invalid).
+     *
+     * **Important:** `credentialId` must be a string. Passing `undefined` will
+     * cause `JSON.stringify` to silently omit the key from the request body,
+     * producing an empty `{}` payload instead of `{ credentialId: null }`. Always
+     * pass `''` (empty string) when the intent is to clear the association.
+     *
+     * @param {string} id             - Repository ID.
+     * @param {string} credentialId   - The credential ID to associate, or '' to clear.
+     *                                  Must be a string — `undefined` is not supported.
+     * @returns {Promise<Object>} The updated repository.
+     */
+    updateCredential(id, credentialId) {
+        return request('PUT', `/api/repositories/${encodeURIComponent(id)}/credential`, {
+            credentialId: credentialId === '' ? null : credentialId,
+        });
     },
 };
 
@@ -619,30 +692,43 @@ const config = {
         /**
          * List all configured git credentials with masked tokens.
          *
-         * @returns {Promise<Record<string, string>>} Map of host → masked token.
+         * @returns {Promise<Array<{ id: string, label: string, host: string, maskedToken: string }>>}
          */
         list() {
             return request('GET', '/api/config/credentials');
         },
 
         /**
-         * Add or update a host credential.
+         * Add a new credential (no `id` in the request body).
          *
-         * @param {{ host: string, token: string }} data
-         * @returns {Promise<Record<string, string>>} Updated masked credentials map.
+         * @param {{ label: string, host: string, token: string }} data
+         * @returns {Promise<Array<{ id: string, label: string, host: string, maskedToken: string }>>} Updated credentials list.
          */
-        set(data) {
+        add(data) {
             return request('PUT', '/api/config/credentials', data);
         },
 
         /**
-         * Remove a host credential.
+         * Update an existing credential by ID.
          *
-         * @param {string} host
-         * @returns {Promise<Record<string, string>>} Updated masked credentials map after deletion.
+         * @param {string} id   - The credential ID to update.
+         * @param {{ label: string, host?: string, token?: string }} data - Fields to update.
+         *   Omit `host` to keep the existing host unchanged.
+         *   Omit `token` (or leave it as an empty string) to keep the existing token unchanged.
+         * @returns {Promise<Array<{ id: string, label: string, host: string, maskedToken: string }>>} Updated credentials list.
          */
-        delete(host) {
-            return request('DELETE', `/api/config/credentials/${encodeURIComponent(host)}`);
+        update(id, data) {
+            return request('PUT', '/api/config/credentials', { id, ...data });
+        },
+
+        /**
+         * Remove a credential by ID.
+         *
+         * @param {string} id - The credential ID to remove.
+         * @returns {Promise<void>}
+         */
+        remove(id) {
+            return request('DELETE', `/api/config/credentials/${encodeURIComponent(id)}`);
         },
     },
 
@@ -853,10 +939,12 @@ export const api = {
  *   #/settings                                   → Settings            (WP-009)
  *   #/error-log                                  → Error Log           (WP-011)
  *   #/notes                                      → Notes Collected     (WP-008)
+ *   #/docs/git-tokens                              → Git Token Setup Docs
  */
 
 import { Router }                                        from './router.js';
 import { renderDashboard, setRouter }                    from './views/dashboard.js';
+import { renderDocsGitTokens }                           from './views/docs-git-tokens.js';
 import { renderRepositories }                            from './views/repositories.js';
 import { renderRepositoryDetail, setRouter as setRepositoryDetailRouter } from './views/repository-detail.js';
 import { renderProjectDetail, setRouter as setProjectDetailRouter } from './views/project-detail.js';
@@ -909,6 +997,9 @@ router.register('#/error-log', renderErrorLog);
 
 // Notes Collected (WP-008)
 router.register('#/notes', renderNotesCollected);
+
+// Documentation: Git Token Setup
+router.register('#/docs/git-tokens', renderDocsGitTokens);
 
 // ---------------------------------------------------------------------------
 // Theme toggle — apply saved theme before first render to avoid flash

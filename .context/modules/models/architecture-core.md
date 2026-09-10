@@ -747,11 +747,17 @@ export class RepositoryManager {
     }
 
     /**
-     * Updates the `Name` of an existing repository.
+     * Updates the `Name` of an existing repository, and optionally its `Url`.
      *
-     * @throws {Error} If no repository with the given ID exists.
+     * When `url` is provided, it is trimmed and any embedded credentials are
+     * stripped before storage (mirroring `add()`'s URL-handling pattern), and
+     * the cleaned URL is checked for duplicates against every other repository
+     * (self-excluded by `Id`).
+     *
+     * @throws {NotFoundError} If no repository with the given ID exists.
+     * @throws {Error} If the cleaned `url` duplicates another repository's URL.
      */
-    update(id: string, params: { name: string }): Repository {
+    update(id: string, params: { name: string; url?: string }): Repository {
         const store = this.load();
         const index = store.Repositories.findIndex((r) => r.Id === id);
 
@@ -759,9 +765,33 @@ export class RepositoryManager {
             throw new NotFoundError(`Cannot update: repository with ID "${id}" does not exist.`);
         }
 
-        store.Repositories[index] = { ...store.Repositories[index], Name: params.name };
+        let updated: Repository = { ...store.Repositories[index], Name: params.name };
+        let credentialsWereStripped = false;
+
+        if (params.url !== undefined) {
+            let cleanUrl = params.url.trim();
+            if (hasEmbeddedCredentials(cleanUrl)) {
+                cleanUrl = stripEmbeddedCredentials(cleanUrl);
+                credentialsWereStripped = true;
+            }
+
+            const duplicateUrl = store.Repositories.find((r) => r.Id !== id && r.Url === cleanUrl);
+            if (duplicateUrl) {
+                throw new Error(
+                    `A repository with URL "${redactUrl(cleanUrl)}" already exists (ID: "${duplicateUrl.Id}").`
+                );
+            }
+
+            updated = { ...updated, Url: cleanUrl };
+        }
+
+        store.Repositories[index] = updated;
         this.save(store);
-        return store.Repositories[index];
+
+        if (credentialsWereStripped) {
+            return { ...updated, credentialsStripped: true };
+        }
+        return updated;
     }
 
     /**
@@ -779,6 +809,46 @@ export class RepositoryManager {
 
         store.Repositories.splice(index, 1);
         this.save(store);
+    }
+
+    /**
+     * Sets or clears the `CredentialId` on the specified repository and persists
+     * the change to `repositories.json`.
+     *
+     * - Pass a non-null `credentialId` to associate a specific credential entry
+     *   with this repository. The tool will use that credential exclusively when
+     *   authenticating.
+     * - Pass `null` to remove the association, reverting to host-based auto-
+     *   selection at runtime.
+     *
+     * @param id           The repository ID.
+     * @param credentialId The credential entry ID to associate, or `null` to clear.
+     *
+     * @returns The updated `Repository` object.
+     *
+     * @throws {NotFoundError} If no repository with the given ID exists.
+     *
+     * @see {@link Repository.CredentialId} for the auto-selection fallback behaviour when no credential is pinned.
+     */
+    updateCredential(id: string, credentialId: string | null): Repository {
+        const store = this.load();
+        const index = store.Repositories.findIndex((r) => r.Id === id);
+
+        if (index === -1) {
+            throw new NotFoundError(`Cannot update credential: repository with ID "${id}" does not exist.`);
+        }
+
+        const existing = store.Repositories[index];
+        if (credentialId === null) {
+            // Remove the CredentialId field entirely so the JSON stays clean.
+            const { CredentialId: _removed, ...rest } = existing;
+            store.Repositories[index] = rest as Repository;
+        } else {
+            store.Repositories[index] = { ...existing, CredentialId: credentialId };
+        }
+
+        this.save(store);
+        return store.Repositories[index];
     }
 
     /**
@@ -840,6 +910,13 @@ export interface Repository {
      * Undefined when the repository has never been manually refreshed.
      */
     LastRefreshedAt?: string;
+
+    /**
+     * References the `id` of a {@link GitCredentialEntry} in `AppConfig.gitCredentials`.
+     * When set, the tool uses that credential exclusively for this repository.
+     * When absent, the tool falls back to auto-selecting a credential by host match.
+     */
+    CredentialId?: string;
 }
 
 /**
