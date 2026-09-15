@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.4.0 - Terminal Launch Button
+
+- GUI: Added an "Open in Terminal" button to launch a terminal window at a workspace's folder.
+- Server: Added cross-platform terminal launching, matching the existing VS Code/GitHub Desktop launchers.
+
 ## v1.3.0 - Multi-Credential Support & Repository Modal
 
 **Repositories can now be configured with multiple named Git credentials, selectable per repository.**
