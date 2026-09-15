@@ -60,11 +60,12 @@
                 └── workspace-detail.js
                 └── workspace-detail.notes.test.mjs
                 └── workspace-detail.open-button.test.mjs
+                └── workspace-detail.terminal-button.test.mjs
                 └── workspace-detail.vscode-button.test.mjs
 
 ```
 ---
 **File Statistics**
-- **Size**: 2.19 KB
-- **Lines**: 63
+- **Size**: 2.64 KB
+- **Lines**: 72
 File: `modules/gui/file-structure.md`

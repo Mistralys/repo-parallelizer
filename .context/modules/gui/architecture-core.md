@@ -530,6 +530,24 @@ const workspaces = {
                 `/api/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wid)}/launch/github-desktop/${encodeURIComponent(repoId)}`,
             );
         },
+
+        /**
+         * Launch a native terminal window for the given workspace.
+         *
+         * Sends a POST to the backend launch endpoint which opens a terminal
+         * window at the workspace's root folder. No request body is sent.
+         *
+         * @memberof api.workspaces.launch
+         * @param {string} projectId
+         * @param {string} wid - Workspace ID.
+         * @returns {Promise<{ success: boolean }>}
+         */
+        terminal(projectId, wid) {
+            return request(
+                'POST',
+                `/api/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wid)}/launch/terminal`,
+            );
+        },
     },
 };
 
@@ -1250,6 +1268,6 @@ export class Router {
 ```
 ---
 **File Statistics**
-- **Size**: 37.2 KB
-- **Lines**: 1165
+- **Size**: 42.32 KB
+- **Lines**: 1274
 File: `modules/gui/architecture-core.md`

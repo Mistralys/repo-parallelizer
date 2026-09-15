@@ -2112,7 +2112,7 @@ import { NotFoundError } from '../../errors.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
 import { generateWorkspaceFile, getWorkspaceFilePath } from '../../orchestration/vscode-workspace.js';
 import { checkWorkspaceHealth } from '../../orchestration/workspace-health.js';
-import { launchApplication } from '../app-launcher.js';
+import { launchApplication, launchTerminal } from '../app-launcher.js';
 
 // ---------------------------------------------------------------------------
 // Route registration
@@ -2139,6 +2139,7 @@ import { launchApplication } from '../app-launcher.js';
  * | POST   | /api/projects/:id/workspaces/:wid/regenerate-workspace-file      | 200     | 400/404/500 |
  * | POST   | /api/projects/:id/workspaces/:wid/launch/vscode                  | 200     | 400/404/500 |
  * | POST   | /api/projects/:id/workspaces/:wid/launch/github-desktop/:rid     | 200     | 400/404/500 |
+ * | POST   | /api/projects/:id/workspaces/:wid/launch/terminal                | 200     | 400/404/500 |
  */
 export function registerWorkspaceRoutes(
     router: Router,
@@ -2159,6 +2160,17 @@ export function registerWorkspaceRoutes(
      *                or rejects with an `Error` if the OS-level spawn fails.
      */
     launchFn: (command: string, args: string[]) => Promise<void> = launchApplication,
+    /**
+     * Overrides the default `launchTerminal` function.
+     *
+     * **For testing only.** Production callers must not pass this argument.
+     * When omitted, the real `launchTerminal` (from `app-launcher.ts`) is used.
+     *
+     * @param directoryPath - The workspace folder to open a terminal window at.
+     * @returns             A Promise that resolves when the terminal launches successfully,
+     *                      or rejects with an `Error` if the OS-level spawn fails.
+     */
+    launchTerminalFn: (directoryPath: string) => Promise<void> = launchTerminal,
 ): void {
 
     // Helper: compute absolute workspace folder path.
@@ -2586,11 +2598,49 @@ export function registerWorkspaceRoutes(
             sendError(res, 500, message);
         }
     });
+
+    // ------------------------------------------------------------------
+    // POST /api/projects/:id/workspaces/:wid/launch/terminal
+    // Opens the workspace's root folder in a native terminal window.
+    // ------------------------------------------------------------------
+    router.post('/api/projects/:id/workspaces/:wid/launch/terminal', async (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const projectId   = params['id'];
+        const workspaceId = params['wid'];
+
+        // Verify workspace data entry exists.
+        if (resolveWorkspace(res, projectId, workspaceId) === undefined) return;
+
+        // Verify the workspace root folder exists on disk.
+        const wsDir = workspaceFolder(projectId, workspaceId);
+        if (!fs.existsSync(wsDir)) {
+            sendError(res, 400, 'Workspace directory does not exist. Run setup first.');
+            return;
+        }
+
+        try {
+            await launchTerminalFn(wsDir);
+            sendJson(res, 200, { success: true });
+        } catch (err) {
+            const message = err instanceof Error ? err.message : 'Failed to launch terminal.';
+            errorLogManager.append({
+                Severity: 'error',
+                Source: 'app-launcher',
+                Operation: 'launch-terminal',
+                Context: { ProjectId: projectId, WorkspaceId: workspaceId },
+                Message: message,
+            });
+            sendError(res, 500, message);
+        }
+    });
 }
 
 ```
 ---
 **File Statistics**
-- **Size**: 83.97 KB
-- **Lines**: 2178
+- **Size**: 106.29 KB
+- **Lines**: 2647
 File: `modules/server/architecture-routes.md`

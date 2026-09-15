@@ -87,6 +87,7 @@
     │           └── workspace-detail.js
     │           └── workspace-detail.notes.test.mjs
     │           └── workspace-detail.open-button.test.mjs
+    │           └── workspace-detail.terminal-button.test.mjs
     │           └── workspace-detail.vscode-button.test.mjs
 └── menu.cmd
 └── menu.sh
@@ -224,6 +225,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 7.83 KB
-- **Lines**: 220
+- **Size**: 8.4 KB
+- **Lines**: 231
 File: `project-folder-structure.md`

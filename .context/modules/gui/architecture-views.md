@@ -6475,6 +6475,42 @@ function buildOpenVscodeButton(projectId, workspaceId) {
 }
 
 /**
+ * Build the "Open in Terminal" button and wire its click handler.
+ *
+ * The button calls `api.workspaces.launch.terminal` and shows a success or
+ * error toast based on the API response. It is only rendered when the
+ * workspace is initialised (`workspace.initialized === true`).
+ *
+ * @param {string} projectId
+ * @param {string} workspaceId
+ * @returns {HTMLButtonElement}
+ */
+function buildOpenTerminalButton(projectId, workspaceId) {
+    const btn = document.createElement('button');
+    btn.type      = 'button';
+    btn.className = 'btn btn-secondary btn-sm';
+    btn.textContent = 'Open in Terminal';
+    btn.title = 'Open this workspace folder in a terminal window.';
+
+    btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        btn.textContent = 'Opening…';
+
+        try {
+            await api.workspaces.launch.terminal(projectId, workspaceId);
+            showToast('Terminal launched for this workspace.', 'success');
+        } catch (err) {
+            showToast(err.message || 'Failed to open terminal.', 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Open in Terminal';
+        }
+    });
+
+    return btn;
+}
+
+/**
  * Build the workspace header section — compact layout with breadcrumb,
  * workspace name, and a meta card for description + management actions.
  *
@@ -6482,8 +6518,8 @@ function buildOpenVscodeButton(projectId, workspaceId) {
  * @param {{ id: string, description: string, initialized: boolean, folderPath: string }} workspace
  * @param {boolean} isStable
  * @param {function(Object): void} [onSetupSuccess] - Called after a successful workspace setup, *after*
- *   the DOM mutation is complete (setupBtn removed from mgmtRow, vscodeBtn inserted before renameBtn,
- *   and `workspace.initialized` set to `true`). Receives the raw setup result from the API.
+ *   the DOM mutation is complete (setupBtn removed from mgmtRow, vscodeBtn and terminalBtn inserted
+ *   before renameBtn, and `workspace.initialized` set to `true`). Receives the raw setup result from the API.
  *   Intended to trigger a status refresh and apply credential error tracking in the caller.
  * @returns {HTMLElement}
  */
@@ -6552,7 +6588,8 @@ function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
 
     // Rename button — declared early so the setupBtn click handler can reference
     // it without a forward reference. Appended to mgmtRow after conditional buttons
-    // (Setup / VS Code) so the visual order is: [Setup|VS Code] → Rename → Delete.
+    // (Setup / VS Code / Terminal) so the visual order is:
+    // [Setup | VS Code | Terminal] → Rename → Delete.
     const renameBtn = document.createElement('button');
     renameBtn.type      = 'button';
     renameBtn.className = 'btn btn-secondary btn-sm';
@@ -6585,6 +6622,8 @@ function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
                 workspace.initialized = true;
                 const vscodeBtn = buildOpenVscodeButton(projectId, workspace.id);
                 mgmtRow.insertBefore(vscodeBtn, renameBtn);
+                const terminalBtn = buildOpenTerminalButton(projectId, workspace.id);
+                mgmtRow.insertBefore(terminalBtn, renameBtn);
                 if (onSetupSuccess) onSetupSuccess(result);
             } catch (err) {
                 showToast(err.message || 'Failed to set up workspace.', 'error');
@@ -6595,9 +6634,10 @@ function buildHeaderSection(projectId, workspace, isStable, onSetupSuccess) {
         mgmtRow.appendChild(setupBtn);
     }
 
-    // "Open in VS Code" button — shown only when the workspace is initialized
+    // "Open in VS Code" / "Open in Terminal" buttons — shown only when the workspace is initialized
     if (workspace.initialized) {
         mgmtRow.appendChild(buildOpenVscodeButton(projectId, workspace.id));
+        mgmtRow.appendChild(buildOpenTerminalButton(projectId, workspace.id));
     }
 
     mgmtRow.appendChild(renameBtn);
@@ -7443,6 +7483,6 @@ export function renderWorkspaceDetail(container, params) {
 ```
 ---
 **File Statistics**
-- **Size**: 243.81 KB
-- **Lines**: 6718
+- **Size**: 277.62 KB
+- **Lines**: 7489
 File: `modules/gui/architecture-views.md`
