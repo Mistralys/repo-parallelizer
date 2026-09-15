@@ -1,6 +1,7 @@
 /**
- * Unit tests for the api.workspaces.launch.vscode and
- * api.workspaces.launch.githubDesktop methods in api.js.
+ * Unit tests for the api.workspaces.launch.vscode,
+ * api.workspaces.launch.githubDesktop, and api.workspaces.launch.terminal
+ * methods in api.js.
  *
  * Uses Node's built-in test runner and a lightweight fetch mock.
  * Run individually with:
@@ -86,6 +87,10 @@ test('api.workspaces.launch.vscode is exported as a function', () => {
 
 test('api.workspaces.launch.githubDesktop is exported as a function', () => {
     assert.equal(typeof api.workspaces.launch.githubDesktop, 'function');
+});
+
+test('api.workspaces.launch.terminal is exported as a function', () => {
+    assert.equal(typeof api.workspaces.launch.terminal, 'function');
 });
 
 test('api.workspaces.openVscode no longer exists on the workspaces object', () => {
@@ -182,6 +187,50 @@ test('launch.githubDesktop() throws on non-2xx response', async () => {
         () => api.workspaces.launch.githubDesktop('my-project', 'my-workspace', 'my-repo'),
         (err) => {
             assert.equal(err.message, 'app not installed');
+            return true;
+        },
+    );
+});
+
+// ---------------------------------------------------------------------------
+// api.workspaces.launch.terminal()
+// ---------------------------------------------------------------------------
+
+test('launch.terminal() sends POST to the correct URL', async () => {
+    await api.workspaces.launch.terminal('my-project', 'my-workspace');
+
+    assert.equal(calls.length, 1, 'exactly one fetch call expected');
+    assert.equal(calls[0].method, 'POST');
+    assert.equal(calls[0].url, '/api/projects/my-project/workspaces/my-workspace/launch/terminal');
+});
+
+test('launch.terminal() encodes special characters in projectId and wid', async () => {
+    await api.workspaces.launch.terminal('proj/a b', 'ws/x y');
+
+    assert.equal(calls[0].url, '/api/projects/proj%2Fa%20b/workspaces/ws%2Fx%20y/launch/terminal');
+});
+
+test('launch.terminal() sends no request body', async () => {
+    await api.workspaces.launch.terminal('my-project', 'my-workspace');
+
+    assert.equal(calls[0].body, undefined, 'no request body should be sent');
+});
+
+test('launch.terminal() returns the parsed JSON response', async () => {
+    nextResponse = { status: 200, body: { success: true }, contentType: 'application/json' };
+
+    const result = await api.workspaces.launch.terminal('my-project', 'my-workspace');
+
+    assert.deepEqual(result, { success: true });
+});
+
+test('launch.terminal() throws on non-2xx response', async () => {
+    nextResponse = { status: 500, body: { error: 'terminal not available' }, contentType: 'application/json' };
+
+    await assert.rejects(
+        () => api.workspaces.launch.terminal('my-project', 'my-workspace'),
+        (err) => {
+            assert.equal(err.message, 'terminal not available');
             return true;
         },
     );

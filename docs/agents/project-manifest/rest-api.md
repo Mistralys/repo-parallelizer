@@ -211,6 +211,7 @@ At least one field is required. Both fields may be sent together.
 |---|---|---|---|---|
 | `POST` | `/api/projects/:id/workspaces/:wid/launch/vscode` | 200 | 400, 404, 500 | Open the workspace's `.code-workspace` file in VS Code. 404 if the workspace is unknown. 400 with `"Workspace file does not exist. Run setup first."` if the file is missing from disk. 500 + error log entry (Source: `'app-launcher'`, Operation: `'launch-vscode'`) if the OS-level spawn fails. Response: `{ success: true }`. |
 | `POST` | `/api/projects/:id/workspaces/:wid/launch/github-desktop/:rid` | 200 | 400, 404, 500 | Open a repository directory in GitHub Desktop. 404 if the workspace, project, or repository is unknown. 400 with `"Repository directory does not exist. Run setup first."` if the repo directory is missing from disk. 500 + error log entry (Source: `'app-launcher'`, Operation: `'launch-github-desktop'`) if the OS-level spawn fails. Response: `{ success: true }`. |
+| `POST` | `/api/projects/:id/workspaces/:wid/launch/terminal` | 200 | 400, 404, 500 | Open the workspace's root folder in a native terminal window. 404 if the workspace or its parent project is unknown. 400 with `"Workspace directory does not exist. Run setup first."` if the workspace's on-disk root folder is missing. 500 + error log entry (Source: `'app-launcher'`, Operation: `'launch-terminal'`) if the OS-level spawn fails (e.g. the platform's terminal command is not installed). Response: `{ success: true }`. |
 
 ---
 

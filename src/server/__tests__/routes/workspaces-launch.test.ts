@@ -1,12 +1,14 @@
 /**
- * Tests for the two launch route handlers added in WP-002:
+ * Tests for the launch route handlers added in WP-002 and the Open-in-Terminal
+ * feature:
  *   POST /api/projects/:id/workspaces/:wid/launch/vscode
  *   POST /api/projects/:id/workspaces/:wid/launch/github-desktop/:rid
+ *   POST /api/projects/:id/workspaces/:wid/launch/terminal
  *
- * `launchApplication` is injected via the optional 7th parameter of
- * `registerWorkspaceRoutes`, so no real child processes are spawned.
- * File-system checks (fs.existsSync) rely on real temporary directories
- * created and torn down per test, following the same pattern as
+ * `launchApplication` and `launchTerminal` are injected via the optional 7th
+ * and 8th parameters of `registerWorkspaceRoutes`, so no real child processes
+ * are spawned. File-system checks (fs.existsSync) rely on real temporary
+ * directories created and torn down per test, following the same pattern as
  * workspaces-health.test.ts.
  */
 
@@ -144,6 +146,24 @@ function makeLaunchStub(shouldReject = false, error = new Error('launch failed')
 }
 
 // ---------------------------------------------------------------------------
+// Stub launch-terminal function
+// ---------------------------------------------------------------------------
+
+function makeLaunchTerminalStub(shouldReject = false, error = new Error('launch failed')): {
+    fn: (directoryPath: string) => Promise<void>;
+    calls: string[];
+} {
+    const calls: string[] = [];
+    const fn = async (directoryPath: string): Promise<void> => {
+        calls.push(directoryPath);
+        if (shouldReject) {
+            throw error;
+        }
+    };
+    return { fn, calls };
+}
+
+// ---------------------------------------------------------------------------
 // Test fixture builder
 // ---------------------------------------------------------------------------
 
@@ -158,6 +178,7 @@ interface SutFixture {
 function buildSut(
     projectsFolder: string,
     launchFn?: (command: string, args: string[]) => Promise<void>,
+    launchTerminalFn?: (directoryPath: string) => Promise<void>,
 ): SutFixture {
     const router = new Router();
     const wm = new MockWorkspaceManager();
@@ -173,6 +194,7 @@ function buildSut(
         pm as never,
         elm as never,
         launchFn,
+        launchTerminalFn,
     );
     return { router, wm, pm, elm, projectsFolder };
 }
@@ -461,5 +483,122 @@ test('POST /launch/github-desktop/:rid: returns 500 and logs error when launch t
     assert.strictEqual(entry.Context['ProjectId'], 'proj-a');
     assert.strictEqual(entry.Context['WorkspaceId'], 'STABLE');
     assert.strictEqual(entry.Context['RepositoryId'], 'repo-1');
+    assert.ok(typeof entry.Message === 'string' && entry.Message.length > 0);
+});
+
+// ===========================================================================
+// POST /api/projects/:id/workspaces/:wid/launch/terminal
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 404: workspace does not exist
+// ---------------------------------------------------------------------------
+
+test('POST /launch/terminal: returns 404 when workspace does not exist', async () => {
+    const projectsFolder = makeTempDir();
+    const stub = makeLaunchTerminalStub();
+    const { router, wm } = buildSut(projectsFolder, undefined, stub.fn);
+    wm.seedProject('proj-a', ['STABLE']);
+
+    const req = mockRequest('POST', '/api/projects/proj-a/workspaces/GHOST/launch/terminal');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 404);
+});
+
+test('POST /launch/terminal: returns 404 when project does not exist', async () => {
+    const projectsFolder = makeTempDir();
+    const stub = makeLaunchTerminalStub();
+    const { router } = buildSut(projectsFolder, undefined, stub.fn);
+
+    const req = mockRequest('POST', '/api/projects/ghost/workspaces/STABLE/launch/terminal');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 404);
+});
+
+// ---------------------------------------------------------------------------
+// 400: workspace directory missing from disk
+// ---------------------------------------------------------------------------
+
+test('POST /launch/terminal: returns 400 with correct message when workspace directory is missing', async () => {
+    const projectsFolder = makeTempDir();
+    const stub = makeLaunchTerminalStub();
+    const { router, wm } = buildSut(projectsFolder, undefined, stub.fn);
+    wm.seedProject('proj-a', ['STABLE']);
+    // The workspace directory is NOT created on disk — so existsSync returns false.
+
+    const req = mockRequest('POST', '/api/projects/proj-a/workspaces/STABLE/launch/terminal');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 400);
+    const parsed = JSON.parse(mock.body) as { error: string };
+    assert.strictEqual(parsed.error, 'Workspace directory does not exist. Run setup first.');
+});
+
+// ---------------------------------------------------------------------------
+// 200: directory exists and launch succeeds
+// ---------------------------------------------------------------------------
+
+test('POST /launch/terminal: returns 200 { success: true } when directory exists and launch succeeds', async () => {
+    const projectsFolder = makeTempDir();
+    const stub = makeLaunchTerminalStub();
+    const { router, wm } = buildSut(projectsFolder, undefined, stub.fn);
+    wm.seedProject('proj-a', ['STABLE']);
+
+    // Create the expected workspace root directory on disk.
+    // Path format: {projectsFolder}/{projectId}/{workspaceId}
+    const wsDir = path.join(projectsFolder, 'proj-a', 'STABLE');
+    fs.mkdirSync(wsDir, { recursive: true });
+
+    const req = mockRequest('POST', '/api/projects/proj-a/workspaces/STABLE/launch/terminal');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const parsed = JSON.parse(mock.body) as { success: boolean };
+    assert.strictEqual(parsed.success, true);
+    assert.strictEqual(stub.calls.length, 1);
+    assert.strictEqual(stub.calls[0], wsDir);
+});
+
+// ---------------------------------------------------------------------------
+// 500: launch fails — returns error + logs to ErrorLogManager
+// ---------------------------------------------------------------------------
+
+test('POST /launch/terminal: returns 500 and logs error when launch throws', async () => {
+    const projectsFolder = makeTempDir();
+    const stub = makeLaunchTerminalStub(true, new Error('x-terminal-emulator: command not found'));
+    const { router, wm, elm } = buildSut(projectsFolder, undefined, stub.fn);
+    wm.seedProject('proj-a', ['STABLE']);
+
+    // Create the workspace directory so we get past the 400 guard.
+    const wsDir = path.join(projectsFolder, 'proj-a', 'STABLE');
+    fs.mkdirSync(wsDir, { recursive: true });
+
+    const req = mockRequest('POST', '/api/projects/proj-a/workspaces/STABLE/launch/terminal');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 500);
+    const parsed = JSON.parse(mock.body) as { error: string };
+    assert.ok(typeof parsed.error === 'string');
+
+    // Verify error log entry
+    assert.strictEqual(elm.entries.length, 1);
+    const entry = elm.entries[0]!;
+    assert.strictEqual(entry.Source, 'app-launcher');
+    assert.strictEqual(entry.Operation, 'launch-terminal');
+    assert.strictEqual(entry.Severity, 'error');
+    assert.strictEqual(entry.Context['ProjectId'], 'proj-a');
+    assert.strictEqual(entry.Context['WorkspaceId'], 'STABLE');
     assert.ok(typeof entry.Message === 'string' && entry.Message.length > 0);
 });

@@ -741,23 +741,33 @@ function stopServer(): Promise<void>
 ### Application Launcher (`app-launcher.ts`)
 
 > **Internal module** — not re-exported from `src/server/index.ts`. Import directly when needed:
-> `import { launchApplication } from './app-launcher.js'`
+> `import { launchApplication, launchTerminal, buildTerminalCommand } from './app-launcher.js'`
 
 ```typescript
 function launchApplication(command: string, args: string[]): Promise<void>
+function launchTerminal(directoryPath: string): Promise<void>
+function buildTerminalCommand(
+    directoryPath: string,
+    platform: NodeJS.Platform,
+): { command: string; args: string[]; cwd?: string }
 ```
 
-Launches an external application as a detached, fire-and-forget child process. The spawned process runs independently of the Node.js parent (`detached: true`, `stdio: 'ignore'`, `child.unref()`).
+`launchApplication` and `launchTerminal` both launch an external application as a detached, fire-and-forget child process (they share an internal `spawnDetached()` helper). The spawned process runs independently of the Node.js parent (`detached: true`, `stdio: 'ignore'`, `child.unref()`).
 
 **Cross-platform behaviour:**
 - **Windows (`process.platform === 'win32'`):** `shell: true` — routes through `cmd.exe` so `.cmd`/`.bat` launchers (e.g. `code.cmd`) are found on PATH.
 - **All other platforms:** `shell: false` — direct process execution, no intermediate shell.
 
-**Throws:**
-- `Error('Failed to launch application: command must not be empty.')` — when `command` is empty or blank.
+**Throws (both functions):**
+- `Error('Failed to launch application: command must not be empty.')` — when the resolved command is empty or blank.
 - `Error('Failed to launch application "<command>": <os-error-message>')` — when the OS-level spawn fails (e.g. command not found on PATH).
 
-**Security note (Windows):** When `shell: true` is active, shell metacharacters in `command` or `args` elements can be interpreted by `cmd.exe`. Call sites **must** validate inputs against an allowlist of known application commands (e.g. `'code'`, `'github'`) before calling this function.
+**Security note (Windows):** When `shell: true` is active, shell metacharacters in `command` or `args` elements can be interpreted by `cmd.exe`. Call sites **must** validate inputs against an allowlist of known application commands (e.g. `'code'`, `'github'`, `'open'`, `'cmd'`, `'x-terminal-emulator'`) before calling either function.
+
+`buildTerminalCommand(directoryPath, platform)` is a pure, exported helper that resolves the platform-specific `{ command, args, cwd }` triple used by `launchTerminal()` — unit-testable without spawning a real terminal:
+- `'darwin'` → `{ command: 'open', args: ['-a', 'Terminal', directoryPath] }`
+- `'win32'` → `{ command: 'cmd', args: ['/c', 'start', 'cmd'], cwd: directoryPath }`
+- any other platform (Linux, etc.) → `{ command: 'x-terminal-emulator', args: [], cwd: directoryPath }`
 
 ---
 
@@ -842,6 +852,7 @@ function registerWorkspaceRoutes(
     projectManager: ProjectManager,
     errorLogManager: ErrorLogManager,
     launchFn?: (command: string, args: string[]) => Promise<void>,  // test-only; defaults to launchApplication
+    launchTerminalFn?: (directoryPath: string) => Promise<void>,  // test-only; defaults to launchTerminal
 ): void
 
 // branches.ts
@@ -1014,6 +1025,7 @@ api.workspaces.health(pid, wid)              // GET /api/projects/:id/workspaces
 api.workspaces.regenerateFile(pid, wid)      // POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file
 api.workspaces.launch.vscode(pid, wid)       // POST /api/projects/:id/workspaces/:wid/launch/vscode
 api.workspaces.launch.githubDesktop(pid, wid, rid)  // POST /api/projects/:id/workspaces/:wid/launch/github-desktop/:rid
+api.workspaces.launch.terminal(pid, wid)     // POST /api/projects/:id/workspaces/:wid/launch/terminal
 ```
 
 ### `api.branches`

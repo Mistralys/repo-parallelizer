@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { launchApplication } from '../app-launcher.js';
+import { launchApplication, buildTerminalCommand } from '../app-launcher.js';
 
 // ---------------------------------------------------------------------------
 // launchApplication
@@ -31,4 +31,37 @@ test('launchApplication: rejects with a descriptive error for a non-existent com
             return true;
         },
     );
+});
+
+// ---------------------------------------------------------------------------
+// buildTerminalCommand
+// ---------------------------------------------------------------------------
+
+test('buildTerminalCommand: returns the macOS "open -a Terminal" command', () => {
+    const result = buildTerminalCommand('/some/dir', 'darwin');
+
+    assert.deepEqual(result, {
+        command: 'open',
+        args: ['-a', 'Terminal', '/some/dir'],
+    });
+});
+
+test('buildTerminalCommand: returns the Windows "cmd /c start cmd" command with cwd', () => {
+    const result = buildTerminalCommand('/some/dir', 'win32');
+
+    assert.deepEqual(result, {
+        command: 'cmd',
+        args: ['/c', 'start', 'cmd'],
+        cwd: '/some/dir',
+    });
+});
+
+test('buildTerminalCommand: returns the "x-terminal-emulator" command with cwd for other platforms', () => {
+    const result = buildTerminalCommand('/some/dir', 'linux');
+
+    assert.deepEqual(result, {
+        command: 'x-terminal-emulator',
+        args: [],
+        cwd: '/some/dir',
+    });
 });
