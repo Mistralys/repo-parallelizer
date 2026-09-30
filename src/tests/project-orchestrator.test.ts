@@ -9,6 +9,7 @@ import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import { WorkspaceOrchestrator } from '../orchestration/workspace-orchestrator.js';
+import { WorkspaceArtifactsOrchestrator } from '../orchestration/workspace-artifacts.js';
 import { ProjectOrchestrator } from '../orchestration/project-orchestrator.js';
 import type { AppConfig } from '../config/config.types.js';
 import { makeTestConfig } from './test-helpers.js';
@@ -59,8 +60,9 @@ function makeFixture(base: string): TestFixture {
     const repoManager = new RepositoryManager(config);
     const projectManager = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
-    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
-    const orchestrator = new ProjectOrchestrator(config, projectManager, workspaceOrchestrator);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
+    const orchestrator = new ProjectOrchestrator(config, projectManager, workspaceOrchestrator, workspaceArtifacts);
 
     repoManager.add({ url: originRepoPath, id: 'test-repo' });
 
@@ -172,6 +174,21 @@ test('deleteProject removes VS Code workspace files for all workspaces', async (
     assert.ok(!fs.existsSync(devWsFile), 'DEV VS Code workspace file should be removed');
 });
 
+test('deleteProject leaves no stale index files for any workspace', async () => {
+    const { config, orchestrator, workspaceManager } = makeFixture(makeTempDir());
+    await orchestrator.createProject('My Project', ['test-repo'], undefined, 'my-project');
+    workspaceManager.create('my-project', 'DEV');
+
+    const stableFolder = path.join(config.projectsFolder, 'my-project', 'STABLE');
+    for (const name of ['README.md', 'AGENTS.md', 'CLAUDE.md']) {
+        assert.ok(fs.existsSync(path.join(stableFolder, name)), `precondition: ${name} should exist for STABLE`);
+    }
+
+    orchestrator.deleteProject('my-project');
+
+    assert.ok(!fs.existsSync(path.join(config.projectsFolder, 'my-project')), 'project folder should be fully removed');
+});
+
 test('deleteProject removes the project data entry', async () => {
     const { orchestrator, projectManager } = makeFixture(makeTempDir());
     await orchestrator.createProject('My Project', ['test-repo'], undefined, 'my-project');
@@ -252,6 +269,25 @@ test('renameProject updates folder paths in the VS Code workspace file', async (
         !parsed.folders[0].path.includes('old-project'),
         'folder path should not contain the old project ID',
     );
+});
+
+test('renameProject regenerates index files under the new project folder for every workspace', async () => {
+    const { config, orchestrator, workspaceManager, workspaceOrchestrator } = makeFixture(makeTempDir());
+    await orchestrator.createProject('My Project', ['test-repo'], undefined, 'old-project');
+    workspaceManager.create('old-project', 'DEV');
+    await workspaceOrchestrator.createWorkspace('old-project', 'DEV');
+
+    orchestrator.renameProject('old-project', 'new-project');
+
+    for (const workspaceId of ['STABLE', 'DEV']) {
+        const wsFolder = path.join(config.projectsFolder, 'new-project', workspaceId);
+        for (const name of ['README.md', 'AGENTS.md', 'CLAUDE.md']) {
+            assert.ok(
+                fs.existsSync(path.join(wsFolder, name)),
+                `${name} should exist under new-project/${workspaceId} after rename`,
+            );
+        }
+    }
 });
 
 test('renameProject updates the project data entry', async () => {

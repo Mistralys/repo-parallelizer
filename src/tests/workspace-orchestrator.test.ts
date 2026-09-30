@@ -9,6 +9,7 @@ import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import { WorkspaceOrchestrator } from '../orchestration/workspace-orchestrator.js';
+import { WorkspaceArtifactsOrchestrator } from '../orchestration/workspace-artifacts.js';
 import { ErrorLogManager } from '../error-log/error-log.manager.js';
 import type { AppConfig } from '../config/config.types.js';
 import { setupFakeGit, makeTestConfig } from './test-helpers.js';
@@ -60,7 +61,8 @@ function makeFixture(base: string): TestFixture {
     const repoManager = new RepositoryManager(config);
     const projectManager = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
-    const orchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const orchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
 
     repoManager.add({ url: originRepoPath, id: 'test-repo' });
     projectManager.create('Test Project', ['test-repo'], undefined, 'test-project');
@@ -71,21 +73,34 @@ function makeFixture(base: string): TestFixture {
 // ─── createWorkspace ──────────────────────────────────────────────────────────
 
 test('createWorkspace creates the workspace folder', async () => {
-    const { config, orchestrator, projectId } = makeFixture(makeTempDir());
+    const { config, orchestrator, workspaceManager, projectId } = makeFixture(makeTempDir());
+    workspaceManager.create(projectId, 'DEV');
     await orchestrator.createWorkspace(projectId, 'DEV');
     const wsFolder = path.join(config.projectsFolder, projectId, 'DEV');
     assert.ok(fs.existsSync(wsFolder), 'workspace folder should exist');
 });
 
 test('createWorkspace generates the VS Code workspace file', async () => {
-    const { config, orchestrator, projectId } = makeFixture(makeTempDir());
+    const { config, orchestrator, workspaceManager, projectId } = makeFixture(makeTempDir());
+    workspaceManager.create(projectId, 'DEV');
     await orchestrator.createWorkspace(projectId, 'DEV');
     const wsFile = path.join(config.projectsFolder, projectId, `${projectId}-DEV.code-workspace`);
     assert.ok(fs.existsSync(wsFile), 'VS Code workspace file should exist');
 });
 
+test('createWorkspace generates the full index-file artefact set via the choke-point', async () => {
+    const { config, orchestrator, workspaceManager, projectId } = makeFixture(makeTempDir());
+    workspaceManager.create(projectId, 'DEV');
+    await orchestrator.createWorkspace(projectId, 'DEV');
+    const wsFolder = path.join(config.projectsFolder, projectId, 'DEV');
+    for (const name of ['README.md', 'AGENTS.md', 'CLAUDE.md']) {
+        assert.ok(fs.existsSync(path.join(wsFolder, name)), `${name} should exist after createWorkspace`);
+    }
+});
+
 test('createWorkspace generates a valid workspace file with correct folder paths', async () => {
-    const { config, orchestrator, projectId, repoId } = makeFixture(makeTempDir());
+    const { config, orchestrator, workspaceManager, projectId, repoId } = makeFixture(makeTempDir());
+    workspaceManager.create(projectId, 'DEV');
     await orchestrator.createWorkspace(projectId, 'DEV');
     const wsFile = path.join(config.projectsFolder, projectId, `${projectId}-DEV.code-workspace`);
     const parsed = JSON.parse(fs.readFileSync(wsFile, 'utf8'));
@@ -96,7 +111,8 @@ test('createWorkspace generates a valid workspace file with correct folder paths
 });
 
 test('createWorkspace returns successful result per repository', async () => {
-    const { orchestrator, projectId } = makeFixture(makeTempDir());
+    const { orchestrator, workspaceManager, projectId } = makeFixture(makeTempDir());
+    workspaceManager.create(projectId, 'DEV');
     const result = await orchestrator.createWorkspace(projectId, 'DEV');
     assert.strictEqual(result.results.length, 1);
     assert.strictEqual(result.results[0].repositoryId, 'test-repo');
@@ -105,7 +121,8 @@ test('createWorkspace returns successful result per repository', async () => {
 });
 
 test('createWorkspace clones the repository to the correct path', async () => {
-    const { config, orchestrator, projectId, repoId } = makeFixture(makeTempDir());
+    const { config, orchestrator, workspaceManager, projectId, repoId } = makeFixture(makeTempDir());
+    workspaceManager.create(projectId, 'DEV');
     await orchestrator.createWorkspace(projectId, 'DEV');
     const repoDir = path.join(config.projectsFolder, projectId, 'DEV', repoId);
     assert.ok(fs.existsSync(path.join(repoDir, '.git')), 'cloned repo should have a .git directory');
@@ -118,11 +135,13 @@ test('createWorkspace returns failure for unreachable repo without aborting work
     const repoManager = new RepositoryManager(config);
     const projectManager = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
-    const orchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const orchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
 
     repoManager.add({ url: originRepoPath, id: 'good-repo' });
     repoManager.add({ url: '/nonexistent/repo/path', id: 'bad-repo' });
     projectManager.create('Mixed Project', ['good-repo', 'bad-repo'], undefined, 'mixed-project');
+    workspaceManager.create('mixed-project', 'DEV');
 
     const result = await orchestrator.createWorkspace('mixed-project', 'DEV');
 
@@ -149,7 +168,8 @@ test('createWorkspace throws when project does not exist', async () => {
 });
 
 test('createWorkspace retries clone when repo directory exists but has no .git', async () => {
-    const { config, orchestrator, projectId, repoId } = makeFixture(makeTempDir());
+    const { config, orchestrator, workspaceManager, projectId, repoId } = makeFixture(makeTempDir());
+    workspaceManager.create(projectId, 'DEV');
     const wsFolder = path.join(config.projectsFolder, projectId, 'DEV');
     const repoDir  = path.join(wsFolder, repoId);
 
@@ -166,7 +186,8 @@ test('createWorkspace retries clone when repo directory exists but has no .git',
 });
 
 test('createWorkspace skips clone when repo directory already has .git', async () => {
-    const { config, orchestrator, projectId, repoId } = makeFixture(makeTempDir());
+    const { config, orchestrator, workspaceManager, projectId, repoId } = makeFixture(makeTempDir());
+    workspaceManager.create(projectId, 'DEV');
 
     // First run — clone normally.
     await orchestrator.createWorkspace(projectId, 'DEV');
@@ -211,6 +232,22 @@ test('deleteWorkspace removes the VS Code workspace file', async () => {
     assert.ok(!fs.existsSync(wsFile), 'VS Code workspace file should not exist after delete');
 });
 
+test('deleteWorkspace removes the generated index files', async () => {
+    const { config, orchestrator, workspaceManager, projectId } = makeFixture(makeTempDir());
+    workspaceManager.create(projectId, 'DEV');
+    await orchestrator.createWorkspace(projectId, 'DEV');
+    const wsFolder = path.join(config.projectsFolder, projectId, 'DEV');
+    for (const name of ['README.md', 'AGENTS.md', 'CLAUDE.md']) {
+        assert.ok(fs.existsSync(path.join(wsFolder, name)), `${name} should exist before delete`);
+    }
+
+    orchestrator.deleteWorkspace(projectId, 'DEV');
+
+    // The whole workspace folder is removed by deleteWorkspace() itself, so
+    // the index files (which lived inside it) are gone as a consequence.
+    assert.ok(!fs.existsSync(wsFolder), 'workspace folder (and its index files) should not exist after delete');
+});
+
 test('deleteWorkspace removes the workspace data entry', async () => {
     const { orchestrator, workspaceManager, projectId } = makeFixture(makeTempDir());
     workspaceManager.create(projectId, 'DEV');
@@ -238,7 +275,8 @@ test('deleteWorkspace validates that target path is under projectsFolder', () =>
     const repoManager = new RepositoryManager(config);
     const projectManager = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
-    const orchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const orchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
 
     // A projectId with path traversal segments resolves outside projectsFolder.
     assert.throws(
@@ -314,6 +352,22 @@ test('renameWorkspace updates folder paths in the VS Code workspace file content
     }
 });
 
+test('renameWorkspace generates index files under the new workspace ID using pre-rename metadata', async () => {
+    const { config, orchestrator, workspaceManager, projectId } = makeFixture(makeTempDir());
+    workspaceManager.create(projectId, 'DEV', 'Dev workspace');
+    await orchestrator.createWorkspace(projectId, 'DEV');
+
+    orchestrator.renameWorkspace(projectId, 'DEV', 'FEAT');
+
+    const newWsFolder = path.join(config.projectsFolder, projectId, 'FEAT');
+    for (const name of ['README.md', 'AGENTS.md', 'CLAUDE.md']) {
+        assert.ok(fs.existsSync(path.join(newWsFolder, name)), `${name} should exist under the new workspace ID after rename`);
+    }
+
+    const readme = fs.readFileSync(path.join(newWsFolder, 'README.md'), 'utf8');
+    assert.ok(readme.includes('Dev workspace'), 'regenerated README should carry the pre-rename workspace description');
+});
+
 test('renameWorkspace updates the workspace data entry', async () => {
     const { orchestrator, workspaceManager, projectId } = makeFixture(makeTempDir());
     workspaceManager.create(projectId, 'DEV');
@@ -367,10 +421,12 @@ test('createWorkspace passes token-injected URL to cloneRepository when credenti
     const repoManager     = new RepositoryManager(config);
     const projectManager  = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
-    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
 
     repoManager.add({ url: 'https://private.example/org/priv-repo.git', id: 'priv-repo' });
     projectManager.create('Priv Project', ['priv-repo'], undefined, 'priv-project-ws-inject');
+    workspaceManager.create('priv-project-ws-inject', 'DEV');
 
     // Temporarily prepend the fake-git directory to PATH so the orchestrator's
     // git spawn picks up our stub binary instead of the real git.
@@ -402,10 +458,12 @@ test('createWorkspace returns credential-missing error when no credentials are c
     const repoManager     = new RepositoryManager(config);
     const projectManager  = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
-    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
 
     repoManager.add({ url: 'https://private.example/org/priv-repo.git', id: 'priv-repo', name: 'Priv Repo' });
     projectManager.create('Priv Project', ['priv-repo'], undefined, 'priv-project-ws-no-creds');
+    workspaceManager.create('priv-project-ws-no-creds', 'DEV');
 
     const result = await orchestrator.createWorkspace('priv-project-ws-no-creds', 'DEV');
 
@@ -437,11 +495,13 @@ test('createWorkspace returns credential-missing error when multiple credentials
     const repoManager     = new RepositoryManager(config);
     const projectManager  = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
-    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
 
     // Repo has no CredentialId — auto-selection fails (ambiguous).
     repoManager.add({ url: 'https://private.example/org/priv-repo.git', id: 'priv-repo-amb-ws', name: 'Priv Repo' });
     projectManager.create('Priv Project Amb', ['priv-repo-amb-ws'], undefined, 'priv-project-ws-ambiguous');
+    workspaceManager.create('priv-project-ws-ambiguous', 'DEV');
 
     const result = await orchestrator.createWorkspace('priv-project-ws-ambiguous', 'DEV');
 
@@ -465,10 +525,12 @@ test('createWorkspace logs credential-missing error via ErrorLogManager with sou
     const projectManager  = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
     const errorLogManager = new ErrorLogManager(config);
-    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, errorLogManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts, errorLogManager);
 
     repoManager.add({ url: 'https://private.example/org/priv-repo.git', id: 'priv-repo-ws-log', name: 'Priv Repo' });
     projectManager.create('Priv Project Log', ['priv-repo-ws-log'], undefined, 'priv-project-ws-log');
+    workspaceManager.create('priv-project-ws-log', 'DEV');
 
     await orchestrator.createWorkspace('priv-project-ws-log', 'DEV');
 
@@ -507,10 +569,12 @@ test('createWorkspace writes a credentials/info log entry after successful crede
     const projectManager  = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
     const errorLogManager = new ErrorLogManager(config);
-    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, errorLogManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts, errorLogManager);
 
     repoManager.add({ url: 'https://private.example/org/cred-repo.git', id: 'cred-repo-ws', name: 'Cred Repo' });
     projectManager.create('Cred Project WS', ['cred-repo-ws'], undefined, 'cred-project-ws-success');
+    workspaceManager.create('cred-project-ws-success', 'DEV');
 
     const origPath = process.env.PATH ?? '';
     process.env.PATH = `${fakeGitDir}:${origPath}`;
@@ -548,11 +612,13 @@ test('createWorkspace does NOT write a credentials/info log entry for SSH clones
     const projectManager  = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
     const errorLogManager = new ErrorLogManager(config);
-    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, errorLogManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const orchestrator    = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts, errorLogManager);
 
     // SSH URL → credential is null (host is null for SSH, so no credential check).
     repoManager.add({ url: 'git@github.com:org/ssh-repo.git', id: 'ssh-repo-ws-nolog', name: 'SSH Repo' });
     projectManager.create('SSH Project WS', ['ssh-repo-ws-nolog'], undefined, 'ssh-project-ws-nolog');
+    workspaceManager.create('ssh-project-ws-nolog', 'DEV');
 
     const origPath = process.env.PATH ?? '';
     process.env.PATH = `${fakeGitDir}:${origPath}`;

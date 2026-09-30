@@ -1,6 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Router } from '../router.js';
 import type { ProjectManager } from '../../models/project/project.manager.js';
+import type { WorkspaceArtifactsOrchestrator } from '../../orchestration/workspace-artifacts.js';
+import type { RepositoryOrchestrator } from '../../orchestration/repository-orchestrator.js';
+import type { ErrorLogManager } from '../../error-log/error-log.manager.js';
 import { NotFoundError } from '../../errors.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
 import type { ProjectData } from '../../models/project/project.types.js';
@@ -26,12 +29,77 @@ import type { ProjectData } from '../../models/project/project.types.js';
  * | PUT    | /api/projects/:id/rename                  | 200     | 404/400 |
  * | DELETE | /api/projects/:id                         | 204     | 404     |
  * | POST   | /api/projects/:id/repositories            | 200     | 404/400 |
- * | DELETE | /api/projects/:id/repositories/:repoId   | 204     | 404     |
+ * | DELETE | /api/projects/:id/repositories/:repoId   | 204     | 404, 500 |
+ *
+ * The four lifecycle handlers that mutate a project's metadata or
+ * workspace/repository set — `PUT /:id`, `DELETE /:id`, `PUT /:id/rename`,
+ * and `POST /:id/repositories` —
+ * additionally call
+ * `workspaceArtifacts` (the per-workspace artefact choke-point) after their
+ * `ProjectManager` call succeeds, so the generated `.code-workspace` and
+ * index files never go stale. A failure inside one of those calls is logged
+ * to `errorLogManager` at `Severity: 'warning'` and does not affect the
+ * handler's own response — see `logArtifactWarning()` below.
+ *
+ * `DELETE /:id/repositories/:repoId` reaches the same artefact choke-point
+ * indirectly through `repositoryOrchestrator.removeRepositoryFromProject()`
+ * instead, which also deletes the repository's clone folders from every
+ * workspace of the project (under a path-traversal guard) and emits an
+ * `unlink-repository` audit entry — mirroring how
+ * `DELETE /api/repositories/:id` delegates to
+ * `repositoryOrchestrator.deleteRepositoryGlobally()` in `routes/repositories.ts`.
  */
 export function registerProjectRoutes(
     router: Router,
     projectManager: ProjectManager,
+    /**
+     * Choke-point orchestrator for the per-workspace artefact set
+     * (`.code-workspace` + generated index files). Consulted by the four
+     * lifecycle handlers listed above.
+     */
+    workspaceArtifacts: WorkspaceArtifactsOrchestrator,
+    /**
+     * Orchestrator for repository lifecycle operations across projects.
+     * `DELETE /:id/repositories/:repoId` calls
+     * `removeRepositoryFromProject()` on it so unlinking a repository also
+     * removes its clone folders from every workspace of the project and
+     * emits the audit trail entry, rather than only updating the project's
+     * data record.
+     */
+    repositoryOrchestrator: RepositoryOrchestrator,
+    errorLogManager: ErrorLogManager,
 ): void {
+    /**
+     * Records a `Severity: 'warning'` entry when an artefact-choke-point call
+     * fails after its triggering `ProjectManager` operation has already
+     * succeeded. The triggering handler's own response is unaffected — the
+     * artefact set going briefly stale is preferable to surfacing a 5xx for a
+     * mutation that otherwise completed correctly.
+     *
+     * @param operation - Short identifier for the lifecycle action in progress
+     *                    (e.g. `'delete-project'`, `'rename-project'`).
+     * @param projectId - The project ID involved in the operation.
+     * @param workspaceId - The workspace ID involved, when applicable.
+     * @param err       - The error thrown by the artefact-choke-point call.
+     */
+    function logArtifactWarning(
+        operation: string,
+        projectId: string,
+        workspaceId: string | undefined,
+        err: unknown,
+    ): void {
+        const message = err instanceof Error ? err.message : String(err);
+        errorLogManager.append({
+            Severity: 'warning',
+            Source: 'workspace-index',
+            Operation: operation,
+            Context: workspaceId !== undefined
+                ? { ProjectId: projectId, WorkspaceId: workspaceId }
+                : { ProjectId: projectId },
+            Message: `Failed to update workspace artefacts after "${operation}": ${message}`,
+        });
+    }
+
     /**
      * Look up a project by ID.
      *
@@ -175,6 +243,15 @@ export function registerProjectRoutes(
 
         try {
             const updated = projectManager.update(id, changes);
+
+            // Regenerate the artefact set for every workspace so an edited
+            // description is reflected without a manual regenerate step.
+            try {
+                workspaceArtifacts.regenerateProject(id);
+            } catch (err) {
+                logArtifactWarning('update-project', id, undefined, err);
+            }
+
             sendJson(res, 200, updated);
         } catch (err) {
             sendError(res, 404, err instanceof Error ? err.message : 'Project not found.');
@@ -213,6 +290,23 @@ export function registerProjectRoutes(
 
         try {
             const renamed = projectManager.rename(oldId, newId.trim());
+
+            // Regenerate the artefact set for every workspace under the new
+            // project ID, then remove the stale set left behind under the old
+            // ID. `renamed.Workspaces` reflects the post-rename data, so the
+            // regenerate side already has everything it needs — unlike
+            // `WorkspaceOrchestrator.renameWorkspace()`'s on-disk folder move,
+            // no `workspaceMeta` override is required here (see
+            // `RegenerateWorkspaceOverrides`).
+            for (const workspaceId of Object.keys(renamed.Workspaces)) {
+                try {
+                    workspaceArtifacts.regenerateWorkspace(renamed.Id, workspaceId);
+                    workspaceArtifacts.removeWorkspace(oldId, workspaceId);
+                } catch (err) {
+                    logArtifactWarning('rename-project', renamed.Id, workspaceId, err);
+                }
+            }
+
             sendJson(res, 200, renamed);
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Could not rename project.';
@@ -229,12 +323,30 @@ export function registerProjectRoutes(
         res: ServerResponse,
         params: Record<string, string>,
     ): void => {
+        const projectId = params['id'];
+
+        // Captured before removal — the workspace list is unavailable once the
+        // project's data file is gone, and it's needed to remove every
+        // workspace's artefact set below.
+        const project = projectManager.getById(projectId);
+
         try {
-            projectManager.remove(params['id']);
+            projectManager.remove(projectId);
         } catch {
-            sendError(res, 404, `Project with ID "${params['id']}" not found.`);
+            sendError(res, 404, `Project with ID "${projectId}" not found.`);
             return;
         }
+
+        if (project !== undefined) {
+            for (const workspaceId of Object.keys(project.Workspaces)) {
+                try {
+                    workspaceArtifacts.removeWorkspace(projectId, workspaceId);
+                } catch (err) {
+                    logArtifactWarning('delete-project', projectId, workspaceId, err);
+                }
+            }
+        }
+
         res.writeHead(204, {});
         res.end('');
     });
@@ -271,6 +383,13 @@ export function registerProjectRoutes(
 
         try {
             const updated = projectManager.addRepository(projectId, repositoryId.trim());
+
+            try {
+                workspaceArtifacts.regenerateProject(projectId);
+            } catch (err) {
+                logArtifactWarning('link-repository', projectId, undefined, err);
+            }
+
             sendJson(res, 200, updated);
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Could not link repository.';
@@ -281,19 +400,41 @@ export function registerProjectRoutes(
 
     // ------------------------------------------------------------------
     // DELETE /api/projects/:id/repositories/:repoId — unlink a repo
+    //
+    //   Routes through `RepositoryOrchestrator.removeRepositoryFromProject()`
+    //   rather than `projectManager.removeRepository()` directly, so the
+    //   unlink also deletes the repository's clone folders from every
+    //   workspace of the project (under a path-traversal guard) and emits an
+    //   `unlink-repository` audit entry. Both the project-existence and
+    //   repository-association checks are performed here rather than relying
+    //   on `removeRepositoryFromProject()`'s own not-found throws, because
+    //   those throws are plain `Error`s (not `NotFoundError`) and would
+    //   otherwise be misclassified as a 500 below — mirrors the precondition
+    //   precedent in `routes/repositories.ts`'s `DELETE /:id` handler.
     // ------------------------------------------------------------------
     router.delete('/api/projects/:id/repositories/:repoId', (
         _req: IncomingMessage,
         res: ServerResponse,
         params: Record<string, string>,
     ): void => {
-        try {
-            projectManager.removeRepository(params['id'], params['repoId']);
-        } catch (err) {
-            const msg = err instanceof Error ? err.message : 'Not found.';
-            sendError(res, 404, msg);
+        const projectId = params['id'];
+        const repoId = params['repoId'];
+
+        const project = resolveProject(res, projectId);
+        if (project === undefined) return;
+
+        if (!project.Repositories.includes(repoId)) {
+            sendError(res, 404, `Repository "${repoId}" is not listed in project "${projectId}".`);
             return;
         }
+
+        try {
+            repositoryOrchestrator.removeRepositoryFromProject(projectId, repoId);
+        } catch {
+            sendError(res, 500, 'Internal server error.');
+            return;
+        }
+
         res.writeHead(204, {});
         res.end('');
     });

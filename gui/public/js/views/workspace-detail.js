@@ -897,7 +897,7 @@ function buildHealthAlertSection(healthReport, callbacks) {
             const btn = document.createElement('button');
             btn.type = 'button';
             btn.className = 'btn btn-secondary btn-sm';
-            btn.textContent = 'Regenerate File';
+            btn.textContent = 'Regenerate Files';
             btn.addEventListener('click', async () => {
                 btn.disabled = true;
                 btn.textContent = 'Regenerating\u2026';
@@ -905,7 +905,7 @@ function buildHealthAlertSection(healthReport, callbacks) {
                     await callbacks.onRegenerate();
                 } finally {
                     btn.disabled = false;
-                    btn.textContent = 'Regenerate File';
+                    btn.textContent = 'Regenerate Files';
                 }
             });
             actionWrap.appendChild(btn);
@@ -953,35 +953,46 @@ function buildHealthAlertSection(healthReport, callbacks) {
 }
 
 // ---------------------------------------------------------------------------
-// Notes section builder
+// Debounced text-field section builder
 // ---------------------------------------------------------------------------
 
 /**
- * Build the Notes textarea section with debounced auto-save and status indicator.
+ * Build a debounced-textarea field section with auto-save and a status
+ * indicator. Shared by the Notes and Description sections \u2014 both are plain
+ * string fields on the same workspace resource, saved through the same
+ * `api.workspaces.update()` call.
  *
- * @param {string} initialNotes - Pre-populated notes value from the workspace.
+ * DOM structure and class names are generated from `idSuffix` as
+ * `workspace-{idSuffix}-section` / `-label` / `-textarea` / `-status`, and
+ * the textarea's `id` is `workspace-{idSuffix}-textarea`. Passing `'notes'`
+ * reproduces the original `buildNotesSection()` output byte-for-byte.
+ *
+ * @param {string} label - Visible label text for the field (e.g. `'Notes'`).
+ * @param {string} idSuffix - Kebab-case suffix used to derive element IDs and
+ *   class names (e.g. `'notes'`, `'description'`).
+ * @param {string} initialValue - Pre-populated value from the workspace.
  * @param {function(string): Promise<void>} onSave - Called with the current
- *   textarea value after the 1000 ms debounce; should persist the notes.
+ *   textarea value after the 1000 ms debounce; should persist the field.
  * @returns {HTMLElement}
  */
-function buildNotesSection(initialNotes, onSave) {
+function buildTextFieldSection(label, idSuffix, initialValue, onSave) {
     const section = document.createElement('section');
-    section.className = 'workspace-notes-section';
+    section.className = `workspace-${idSuffix}-section`;
 
-    const label = document.createElement('label');
-    label.htmlFor = 'workspace-notes-textarea';
-    label.className = 'workspace-notes-label';
-    label.textContent = 'Notes';
-    section.appendChild(label);
+    const labelEl = document.createElement('label');
+    labelEl.htmlFor = `workspace-${idSuffix}-textarea`;
+    labelEl.className = `workspace-${idSuffix}-label`;
+    labelEl.textContent = label;
+    section.appendChild(labelEl);
 
     const textarea = document.createElement('textarea');
-    textarea.id = 'workspace-notes-textarea';
-    textarea.className = 'workspace-notes-textarea';
-    textarea.value = initialNotes;
+    textarea.id = `workspace-${idSuffix}-textarea`;
+    textarea.className = `workspace-${idSuffix}-textarea`;
+    textarea.value = initialValue;
     section.appendChild(textarea);
 
     const statusEl = document.createElement('span');
-    statusEl.className = 'workspace-notes-status';
+    statusEl.className = `workspace-${idSuffix}-status`;
     statusEl.setAttribute('aria-live', 'polite');
     statusEl.hidden = true;
     section.appendChild(statusEl);
@@ -1004,6 +1015,18 @@ function buildNotesSection(initialNotes, onSave) {
     });
 
     return section;
+}
+
+/**
+ * Build the Notes textarea section with debounced auto-save and status indicator.
+ *
+ * @param {string} initialNotes - Pre-populated notes value from the workspace.
+ * @param {function(string): Promise<void>} onSave - Called with the current
+ *   textarea value after the 1000 ms debounce; should persist the notes.
+ * @returns {HTMLElement}
+ */
+function buildNotesSection(initialNotes, onSave) {
+    return buildTextFieldSection('Notes', 'notes', initialNotes, onSave);
 }
 
 // ---------------------------------------------------------------------------
@@ -1477,6 +1500,12 @@ export function renderWorkspaceDetail(container, params) {
         if (!isStable) {
             container.appendChild(buildSwitchBranchesButton(projectId, wid));
         }
+
+        // Description section — always shown below the status table, above Notes.
+        container.appendChild(buildTextFieldSection('Description', 'description', workspace.description, async (description) => {
+            await api.workspaces.update(projectId, wid, { description });
+            workspace.description = description;
+        }));
 
         // Notes section — always shown below the status table.
         container.appendChild(buildNotesSection(workspace.notes, async (notes) => {

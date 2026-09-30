@@ -5,8 +5,8 @@
  *   POST /api/projects/:id/workspaces/:wid/launch/github-desktop/:rid
  *   POST /api/projects/:id/workspaces/:wid/launch/terminal
  *
- * `launchApplication` and `launchTerminal` are injected via the optional 7th
- * and 8th parameters of `registerWorkspaceRoutes`, so no real child processes
+ * `launchApplication` and `launchTerminal` are injected via the optional 8th
+ * and 9th parameters of `registerWorkspaceRoutes`, so no real child processes
  * are spawned. File-system checks (fs.existsSync) rely on real temporary
  * directories created and torn down per test, following the same pattern as
  * workspaces-health.test.ts.
@@ -186,6 +186,7 @@ function buildSut(
     const elm = new MockErrorLogManager();
     const stubOrchestrator = {} as never;
     const stubConfig = { projectsFolder } as never;
+    const stubWorkspaceArtifactsOrchestrator = {} as never;
     registerWorkspaceRoutes(
         router,
         wm as never,
@@ -193,6 +194,7 @@ function buildSut(
         stubConfig,
         pm as never,
         elm as never,
+        stubWorkspaceArtifactsOrchestrator,
         launchFn,
         launchTerminalFn,
     );

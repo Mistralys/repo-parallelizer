@@ -1,10 +1,49 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { Router } from '../../router.js';
 import { registerWorkspaceRoutes } from '../../routes/workspaces.js';
 import { NotFoundError } from '../../../errors.js';
 import type { WorkspaceInfo } from '../../../models/workspace/workspace.types.js';
 import { mockRequest, mockResponse, type MockResponse } from '../helpers/mock-http.js';
+import { makeMockErrorLogManager } from '../helpers/mock-error-log-manager.js';
+
+// ---------------------------------------------------------------------------
+// Mock WorkspaceArtifactsOrchestrator
+// ---------------------------------------------------------------------------
+
+/**
+ * Records every call made to the artefact choke-point so tests can assert on
+ * which method was invoked with which arguments, and can optionally be
+ * configured (`shouldThrow`) to exercise the AC-20 contract-preservation path
+ * — a failure inside the choke-point must not affect the handler's own
+ * response, beyond appending a `Severity: 'warning'` entry to the error log.
+ */
+class MockWorkspaceArtifacts {
+    calls: { method: string; args: unknown[] }[] = [];
+    shouldThrow = false;
+
+    private record(method: string, args: unknown[]): void {
+        this.calls.push({ method, args });
+        if (this.shouldThrow) {
+            throw new Error(`Simulated ${method} failure.`);
+        }
+    }
+
+    regenerateWorkspace(projectId: string, workspaceId: string): void {
+        this.record('regenerateWorkspace', [projectId, workspaceId]);
+    }
+
+    removeWorkspace(projectId: string, workspaceId: string): void {
+        this.record('removeWorkspace', [projectId, workspaceId]);
+    }
+
+    regenerateProject(projectId: string): void {
+        this.record('regenerateProject', [projectId]);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Mock WorkspaceManager
@@ -113,17 +152,31 @@ class MockWorkspaceManager {
     }
 }
 
-function buildSut(): { router: Router; wm: MockWorkspaceManager } {
+function buildSut(overrides?: {
+    projectManager?: unknown;
+    appConfig?: unknown;
+}): {
+    router: Router;
+    wm: MockWorkspaceManager;
+    artifacts: MockWorkspaceArtifacts;
+    errorLog: ReturnType<typeof makeMockErrorLogManager>;
+} {
     const router = new Router();
     const wm = new MockWorkspaceManager();
-    // The orchestrator, appConfig, projectManager, and errorLogManager are only
-    // used by specific endpoints not exercised by this suite, so stubs suffice.
+    // The orchestrator is only used by an endpoint not exercised by this
+    // suite, so a stub suffices. `artifacts` and `errorLog` back the
+    // DELETE/rename/regenerate handlers' choke-point calls and must be
+    // working implementations (not `{} as never`) since those handlers now
+    // consult them unconditionally. `projectManager`/`appConfig` default to
+    // stubs but can be overridden for tests (e.g. regenerate-workspace-file)
+    // that need a real project lookup and an on-disk projects folder.
     const stubOrchestrator = {} as never;
-    const stubConfig = { projectsFolder: '/tmp/nonexistent-test-projects' } as never;
-    const stubProjectManager = {} as never;
-    const stubErrorLogManager = {} as never;
-    registerWorkspaceRoutes(router, wm as never, stubOrchestrator, stubConfig, stubProjectManager, stubErrorLogManager);
-    return { router, wm };
+    const stubConfig = overrides?.appConfig ?? ({ projectsFolder: '/tmp/nonexistent-test-projects' } as never);
+    const stubProjectManager = overrides?.projectManager ?? ({} as never);
+    const artifacts = new MockWorkspaceArtifacts();
+    const errorLog = makeMockErrorLogManager();
+    registerWorkspaceRoutes(router, wm as never, stubOrchestrator, stubConfig as never, stubProjectManager as never, errorLog, artifacts as never);
+    return { router, wm, artifacts, errorLog };
 }
 
 async function flushAsync(): Promise<void> {
@@ -306,6 +359,41 @@ test('PUT /api/projects/:id/workspaces/:wid: returns 200 and persists both field
     assert.strictEqual(updated.Description, 'both desc');
 });
 
+test('PUT /api/projects/:id/workspaces/:wid: regenerates this workspace\'s artefact set on success', async () => {
+    const { router, wm, artifacts } = buildSut();
+    wm.seedProject('proj-a', ['STABLE', 'DEV']);
+
+    const req = mockRequest('PUT', '/api/projects/proj-a/workspaces/DEV', { notes: 'my notes' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.deepEqual(
+        artifacts.calls.map((c) => c.method),
+        ['regenerateWorkspace'],
+    );
+    assert.deepEqual(artifacts.calls[0].args, ['proj-a', 'DEV']);
+});
+
+test('PUT /api/projects/:id/workspaces/:wid: a throwing choke-point does not change the 200 response, but logs a warning', async () => {
+    const { router, wm, artifacts, errorLog } = buildSut();
+    wm.seedProject('proj-a', ['STABLE', 'DEV']);
+    artifacts.shouldThrow = true;
+
+    const req = mockRequest('PUT', '/api/projects/proj-a/workspaces/DEV', { notes: 'my notes' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as WorkspaceInfo;
+    assert.strictEqual(updated.Notes, 'my notes');
+    assert.strictEqual(errorLog.appendedEntries.length, 1);
+    assert.strictEqual(errorLog.appendedEntries[0].Severity, 'warning');
+    assert.strictEqual(errorLog.appendedEntries[0].Source, 'workspace-index');
+});
+
 test('PUT /api/projects/:id/workspaces/:wid: returns 400 when body is empty object', async () => {
     const { router, wm } = buildSut();
     wm.seedProject('proj-a', ['STABLE', 'DEV']);
@@ -378,6 +466,42 @@ test('PUT /api/projects/:id/workspaces/:wid/rename: returns 400 when attempting 
     assert.strictEqual(mock.statusCode, 400);
 });
 
+test('PUT /api/projects/:id/workspaces/:wid/rename: regenerates artefacts under the new ID and removes them under the old ID', async () => {
+    const { router, wm, artifacts } = buildSut();
+    wm.seedProject('proj-a', ['STABLE', 'DEV']);
+
+    const req = mockRequest('PUT', '/api/projects/proj-a/workspaces/DEV/rename', { newId: 'QA' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.deepEqual(
+        artifacts.calls.map((c) => c.method),
+        ['regenerateWorkspace', 'removeWorkspace'],
+    );
+    assert.deepEqual(artifacts.calls[0].args, ['proj-a', 'QA']);
+    assert.deepEqual(artifacts.calls[1].args, ['proj-a', 'DEV']);
+});
+
+test('PUT /api/projects/:id/workspaces/:wid/rename: AC-20 — a throwing choke-point does not change the 200 response, but logs a warning', async () => {
+    const { router, wm, artifacts, errorLog } = buildSut();
+    wm.seedProject('proj-a', ['STABLE', 'DEV']);
+    artifacts.shouldThrow = true;
+
+    const req = mockRequest('PUT', '/api/projects/proj-a/workspaces/DEV/rename', { newId: 'QA' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const renamed = JSON.parse(mock.body) as WorkspaceInfo;
+    assert.strictEqual(renamed.WorkspaceID, 'QA');
+    assert.strictEqual(errorLog.appendedEntries.length, 1);
+    assert.strictEqual(errorLog.appendedEntries[0].Severity, 'warning');
+    assert.strictEqual(errorLog.appendedEntries[0].Source, 'workspace-index');
+});
+
 // ---------------------------------------------------------------------------
 // DELETE /api/projects/:id/workspaces/:wid — delete
 // ---------------------------------------------------------------------------
@@ -393,6 +517,48 @@ test('DELETE /api/projects/:id/workspaces/:wid: returns 204 when workspace is de
     assert.strictEqual(mock.statusCode, 204);
     // Confirm workspace is gone
     assert.strictEqual(wm.getById('proj-a', 'DEV'), undefined);
+});
+
+test('DELETE /api/projects/:id/workspaces/:wid: removes the workspace artefact set', () => {
+    const { router, wm, artifacts } = buildSut();
+    wm.seedProject('proj-a', ['STABLE', 'DEV']);
+
+    const req = mockRequest('DELETE', '/api/projects/proj-a/workspaces/DEV');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 204);
+    assert.deepEqual(artifacts.calls, [{ method: 'removeWorkspace', args: ['proj-a', 'DEV'] }]);
+});
+
+test('DELETE /api/projects/:id/workspaces/:wid: AC-20 — a throwing choke-point does not change the 204 response, but logs a warning', () => {
+    const { router, wm, artifacts, errorLog } = buildSut();
+    wm.seedProject('proj-a', ['STABLE', 'DEV']);
+    artifacts.shouldThrow = true;
+
+    const req = mockRequest('DELETE', '/api/projects/proj-a/workspaces/DEV');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 204);
+    assert.strictEqual(wm.getById('proj-a', 'DEV'), undefined);
+    assert.strictEqual(errorLog.appendedEntries.length, 1);
+    assert.strictEqual(errorLog.appendedEntries[0].Severity, 'warning');
+    assert.strictEqual(errorLog.appendedEntries[0].Source, 'workspace-index');
+});
+
+test('DELETE /api/projects/:id/workspaces/STABLE: a throwing choke-point is never reached — STABLE rejection short-circuits first', () => {
+    const { router, wm, artifacts, errorLog } = buildSut();
+    wm.seedProject('proj-a', ['STABLE']);
+    artifacts.shouldThrow = true;
+
+    const req = mockRequest('DELETE', '/api/projects/proj-a/workspaces/STABLE');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 400);
+    assert.deepEqual(artifacts.calls, []);
+    assert.strictEqual(errorLog.appendedEntries.length, 0);
 });
 
 test('DELETE /api/projects/:id/workspaces/:wid: returns 404 when workspace does not exist', () => {
@@ -432,4 +598,65 @@ test('DELETE /api/projects/:id/workspaces/STABLE: returns 400 (not 404) for STAB
     assert.strictEqual(mock.statusCode, 400);
     const parsed = JSON.parse(mock.body) as { error: string };
     assert.ok(parsed.error.includes('Cannot remove the STABLE workspace'));
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file — widened
+// to regenerate the full artefact set via the choke-point (see also the
+// fs-backed guard/response-shape coverage in workspaces-health.test.ts).
+// ---------------------------------------------------------------------------
+
+/** Minimal stand-in for ProjectManager, sufficient for this route's guards. */
+function makeStubProjectManager(project: { Id: string; Repositories: string[] } | undefined) {
+    return { getById: (_id: string) => project };
+}
+
+test('POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file: returns 404 when project does not exist', () => {
+    const { router } = buildSut({ projectManager: makeStubProjectManager(undefined) });
+
+    const req = mockRequest('POST', '/api/projects/ghost/workspaces/DEV/regenerate-workspace-file');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 404);
+});
+
+test('POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file: calls the choke-point and returns { success: true } once the workspace folder exists', () => {
+    const projectsFolder = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-regen-test-'));
+    const wsFolder = path.join(projectsFolder, 'proj-a', 'DEV');
+    fs.mkdirSync(wsFolder, { recursive: true });
+
+    const { router, wm, artifacts } = buildSut({
+        projectManager: makeStubProjectManager({ Id: 'proj-a', Repositories: [] }),
+        appConfig: { projectsFolder },
+    });
+    wm.seedProject('proj-a', ['STABLE', 'DEV']);
+
+    const req = mockRequest('POST', '/api/projects/proj-a/workspaces/DEV/regenerate-workspace-file');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.deepEqual(JSON.parse(mock.body), { success: true });
+    assert.deepEqual(artifacts.calls, [{ method: 'regenerateWorkspace', args: ['proj-a', 'DEV'] }]);
+
+    fs.rmSync(projectsFolder, { recursive: true, force: true });
+});
+
+test('POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file: returns 400 when the workspace folder does not exist on disk', () => {
+    const projectsFolder = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-regen-test-'));
+
+    const { router, wm } = buildSut({
+        projectManager: makeStubProjectManager({ Id: 'proj-a', Repositories: [] }),
+        appConfig: { projectsFolder },
+    });
+    wm.seedProject('proj-a', ['STABLE', 'DEV']);
+
+    const req = mockRequest('POST', '/api/projects/proj-a/workspaces/DEV/regenerate-workspace-file');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 400);
+
+    fs.rmSync(projectsFolder, { recursive: true, force: true });
 });

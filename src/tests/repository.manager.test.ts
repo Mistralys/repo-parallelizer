@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { NotFoundError } from '../errors.js';
+import { MAX_REPOSITORY_DESCRIPTION_LENGTH } from '../config/config.constants.js';
 import { createTempDirTracker, makeTestConfig } from './test-helpers.js';
 
 const makeTempDir = createTempDirTracker('paralizer-repo-test-');
@@ -225,6 +226,109 @@ test('update duplicate url check compares against the cleaned URL, not the raw i
     assert.throws(
         () => manager.update('beta', { name: 'Beta', url: 'https://ghp_abc@github.com/user/alpha.git' }),
         /already exists/,
+    );
+});
+
+// ─── add: description ────────────────────────────────────────────────────────
+
+test('add stores the provided description trimmed', () => {
+    const manager = makeManager(makeTempDir());
+    const repo = manager.add({ url: 'https://github.com/user/repo.git', description: '  A neat repo.  ' });
+    assert.strictEqual(repo.Description, 'A neat repo.');
+});
+
+test('add persists the description so getById() reflects it', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git', description: 'A neat repo.' });
+    assert.strictEqual(manager.getById('repo')?.Description, 'A neat repo.');
+});
+
+test('add omits Description entirely when not provided', () => {
+    const manager = makeManager(makeTempDir());
+    const repo = manager.add({ url: 'https://github.com/user/repo.git' });
+    assert.strictEqual(repo.Description, undefined);
+    assert.ok(!Object.hasOwn(repo, 'Description'), 'Description must not be present when omitted');
+});
+
+test('add omits Description entirely when given a whitespace-only string', () => {
+    const manager = makeManager(makeTempDir());
+    const repo = manager.add({ url: 'https://github.com/user/repo.git', description: '   ' });
+    assert.strictEqual(repo.Description, undefined);
+    assert.ok(!Object.hasOwn(repo, 'Description'), 'Description must not be present after trimming to empty');
+});
+
+test('add throws a descriptive error naming the limit when description exceeds the maximum length', () => {
+    const manager = makeManager(makeTempDir());
+    const tooLong = 'x'.repeat(MAX_REPOSITORY_DESCRIPTION_LENGTH + 1);
+    assert.throws(
+        () => manager.add({ url: 'https://github.com/user/repo.git', description: tooLong }),
+        new RegExp(String(MAX_REPOSITORY_DESCRIPTION_LENGTH)),
+    );
+});
+
+test('add accepts a description exactly at the maximum length', () => {
+    const manager = makeManager(makeTempDir());
+    const maxLength = 'x'.repeat(MAX_REPOSITORY_DESCRIPTION_LENGTH);
+    const repo = manager.add({ url: 'https://github.com/user/repo.git', description: maxLength });
+    assert.strictEqual(repo.Description, maxLength);
+});
+
+// ─── update: description ─────────────────────────────────────────────────────
+
+test('update sets the description trimmed', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git', name: 'Repo' });
+    const updated = manager.update('repo', { name: 'Repo', description: '  Updated description.  ' });
+    assert.strictEqual(updated.Description, 'Updated description.');
+});
+
+test('update persists the description so getById() reflects it', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git', name: 'Repo' });
+    manager.update('repo', { name: 'Repo', description: 'Updated description.' });
+    assert.strictEqual(manager.getById('repo')?.Description, 'Updated description.');
+});
+
+test('update omitting description leaves the existing value untouched', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git', name: 'Repo', description: 'Original.' });
+    const updated = manager.update('repo', { name: 'Renamed' });
+    assert.strictEqual(updated.Description, 'Original.');
+    assert.strictEqual(manager.getById('repo')?.Description, 'Original.');
+});
+
+test('update with an empty string clears the stored description', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git', name: 'Repo', description: 'Original.' });
+    const updated = manager.update('repo', { name: 'Repo', description: '' });
+    assert.strictEqual(updated.Description, undefined);
+    assert.ok(!Object.hasOwn(updated, 'Description'), 'Description must be removed, not stored as empty string');
+});
+
+test('update with a whitespace-only string clears the stored description', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git', name: 'Repo', description: 'Original.' });
+    manager.update('repo', { name: 'Repo', description: '   ' });
+    const stored = manager.getById('repo');
+    assert.strictEqual(stored?.Description, undefined);
+    assert.ok(stored !== undefined && !Object.hasOwn(stored, 'Description'), 'Description must be removed from the persisted record');
+});
+
+test('update clearing description does not persist an empty string to the store', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git', name: 'Repo', description: 'Original.' });
+    manager.update('repo', { name: 'Repo', description: '' });
+    const stored = manager.getById('repo');
+    assert.ok(stored !== undefined && !Object.hasOwn(stored, 'Description'), 'Description key must be absent, not an empty string');
+});
+
+test('update throws a descriptive error naming the limit when description exceeds the maximum length', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git', name: 'Repo' });
+    const tooLong = 'x'.repeat(MAX_REPOSITORY_DESCRIPTION_LENGTH + 1);
+    assert.throws(
+        () => manager.update('repo', { name: 'Repo', description: tooLong }),
+        new RegExp(String(MAX_REPOSITORY_DESCRIPTION_LENGTH)),
     );
 });
 

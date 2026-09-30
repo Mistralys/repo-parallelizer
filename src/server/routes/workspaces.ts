@@ -4,13 +4,14 @@ import * as path from 'node:path';
 import type { Router } from '../router.js';
 import type { WorkspaceManager } from '../../models/workspace/workspace.manager.js';
 import type { WorkspaceOrchestrator } from '../../orchestration/workspace-orchestrator.js';
+import type { WorkspaceArtifactsOrchestrator } from '../../orchestration/workspace-artifacts.js';
 import type { ProjectManager } from '../../models/project/project.manager.js';
 import type { AppConfig } from '../../config/config.types.js';
 import type { ErrorLogManager } from '../../error-log/error-log.manager.js';
 import type { WorkspaceInfo } from '../../models/workspace/workspace.types.js';
 import { NotFoundError } from '../../errors.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
-import { generateWorkspaceFile, getWorkspaceFilePath } from '../../orchestration/vscode-workspace.js';
+import { getWorkspaceFilePath } from '../../orchestration/vscode-workspace.js';
 import { checkWorkspaceHealth } from '../../orchestration/workspace-health.js';
 import { launchApplication, launchTerminal } from '../app-launcher.js';
 
@@ -49,6 +50,19 @@ export function registerWorkspaceRoutes(
     projectManager: ProjectManager,
     errorLogManager: ErrorLogManager,
     /**
+     * Choke-point orchestrator for the per-workspace artefact set
+     * (`.code-workspace` + generated index files).
+     *
+     * Consulted by `PUT /:wid`, `DELETE /:wid`, and `PUT /:wid/rename` after
+     * their `WorkspaceManager` call succeeds, so the artefact set is
+     * regenerated or removed to match — a failure inside one of those calls
+     * is logged to `errorLogManager` at `Severity: 'warning'` and does not
+     * affect the handler's own response. Also consulted directly by
+     * `POST /:wid/regenerate-workspace-file`, whose own try/catch maps a
+     * failure to a `500` response instead (see that handler for details).
+     */
+    workspaceArtifactsOrchestrator: WorkspaceArtifactsOrchestrator,
+    /**
      * Overrides the default `launchApplication` function.
      *
      * **For testing only.** Production callers must not pass this argument.
@@ -76,6 +90,35 @@ export function registerWorkspaceRoutes(
     // Helper: compute absolute workspace folder path.
     function workspaceFolder(projectId: string, workspaceId: string): string {
         return path.join(appConfig.projectsFolder, projectId, workspaceId);
+    }
+
+    /**
+     * Records a `Severity: 'warning'` entry when an artefact-choke-point call
+     * fails after its triggering `WorkspaceManager` operation has already
+     * succeeded. The triggering handler's own response is unaffected — the
+     * artefact set going briefly stale is preferable to surfacing a 5xx for a
+     * mutation that otherwise completed correctly.
+     *
+     * @param operation   - Short identifier for the lifecycle action in
+     *                      progress (e.g. `'delete-workspace'`).
+     * @param projectId   - The project ID involved in the operation.
+     * @param workspaceId - The workspace ID involved in the operation.
+     * @param err         - The error thrown by the artefact-choke-point call.
+     */
+    function logArtifactWarning(
+        operation: string,
+        projectId: string,
+        workspaceId: string,
+        err: unknown,
+    ): void {
+        const message = err instanceof Error ? err.message : String(err);
+        errorLogManager.append({
+            Severity: 'warning',
+            Source: 'workspace-index',
+            Operation: operation,
+            Context: { ProjectId: projectId, WorkspaceId: workspaceId },
+            Message: `Failed to update workspace artefacts after "${operation}": ${message}`,
+        });
     }
 
     // Helper: augment a WorkspaceInfo with an `Initialized` boolean and `FolderPath` string.
@@ -231,8 +274,21 @@ export function registerWorkspaceRoutes(
         if (hasDescription) changes.Description = description as string;
         if (hasNotes) changes.Notes = notes as string;
 
+        const projectId = params['id'];
+        const workspaceId = params['wid'];
+
         try {
-            const updated = workspaceManager.update(params['id'], params['wid'], changes);
+            const updated = workspaceManager.update(projectId, workspaceId, changes);
+
+            // Regenerate this workspace's artefact set so an edited
+            // description/notes value is reflected without a manual
+            // regenerate step.
+            try {
+                workspaceArtifactsOrchestrator.regenerateWorkspace(projectId, workspaceId);
+            } catch (err) {
+                logArtifactWarning('update-workspace', projectId, workspaceId, err);
+            }
+
             sendJson(res, 200, updated);
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Not found.';
@@ -269,8 +325,24 @@ export function registerWorkspaceRoutes(
             return;
         }
 
+        const projectId = params['id'];
+        const oldId = params['wid'];
+
         try {
-            const renamed = workspaceManager.rename(params['id'], params['wid'], newId.trim());
+            const renamed = workspaceManager.rename(projectId, oldId, newId.trim());
+
+            // `WorkspaceManager.rename()` is data-layer only (no filesystem
+            // move), so `project.Workspaces[renamed.WorkspaceID]` already
+            // exists by the time it returns — unlike
+            // `WorkspaceOrchestrator.renameWorkspace()`'s on-disk folder move,
+            // no `workspaceMeta` override is required here.
+            try {
+                workspaceArtifactsOrchestrator.regenerateWorkspace(projectId, renamed.WorkspaceID);
+                workspaceArtifactsOrchestrator.removeWorkspace(projectId, oldId);
+            } catch (err) {
+                logArtifactWarning('rename-workspace', projectId, renamed.WorkspaceID, err);
+            }
+
             sendJson(res, 200, renamed);
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Could not rename workspace.';
@@ -287,14 +359,24 @@ export function registerWorkspaceRoutes(
         res: ServerResponse,
         params: Record<string, string>,
     ): void => {
+        const projectId = params['id'];
+        const workspaceId = params['wid'];
+
         try {
-            workspaceManager.remove(params['id'], params['wid']);
+            workspaceManager.remove(projectId, workspaceId);
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Not found.';
             const is404 = err instanceof NotFoundError;
             sendError(res, is404 ? 404 : 400, msg);
             return;
         }
+
+        try {
+            workspaceArtifactsOrchestrator.removeWorkspace(projectId, workspaceId);
+        } catch (err) {
+            logArtifactWarning('delete-workspace', projectId, workspaceId, err);
+        }
+
         res.writeHead(204, {});
         res.end('');
     });
@@ -325,8 +407,13 @@ export function registerWorkspaceRoutes(
 
     // ------------------------------------------------------------------
     // POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file
-    // Regenerates the .code-workspace file from the current project
-    // repository list without cloning. Lightweight, no git operations.
+    // Regenerates the full per-workspace artefact set (the .code-workspace
+    // file plus the three generated index files) from the current project
+    // repository list without cloning, via the WorkspaceArtifactsOrchestrator
+    // choke-point. Lightweight, no git operations. The route path is kept
+    // despite the wider behaviour — renaming it would break the existing
+    // GUI client method and the workspace-health `fixAction` contract for no
+    // user-visible gain.
     // ------------------------------------------------------------------
     router.post('/api/projects/:id/workspaces/:wid/regenerate-workspace-file', (
         _req: IncomingMessage,
@@ -354,12 +441,7 @@ export function registerWorkspaceRoutes(
         }
 
         try {
-            const repoPaths = project.Repositories.map((repoId) => ({
-                slug: repoId,
-                path: path.join(appConfig.projectsFolder, projectId, workspaceId, repoId),
-            }));
-            const wsFilePath = getWorkspaceFilePath(appConfig.projectsFolder, projectId, workspaceId);
-            generateWorkspaceFile(workspaceId, repoPaths, wsFilePath);
+            workspaceArtifactsOrchestrator.regenerateWorkspace(projectId, workspaceId);
             sendJson(res, 200, { success: true });
         } catch (err) {
             sendError(res, 500, err instanceof Error ? err.message : 'Failed to regenerate workspace file.');

@@ -264,7 +264,7 @@ test('AC3 — Saving the edit modal calls api.repositories.update(id, { name, ur
 
         assert.equal(updateCalls.length, 1);
         assert.equal(updateCalls[0].id, REPO_ID);
-        assert.deepEqual(updateCalls[0].data, { name: 'Updated Name', url: REPO_URL });
+        assert.deepEqual(updateCalls[0].data, { name: 'Updated Name', url: REPO_URL, description: '' });
 
         assert.equal(document.querySelector('.modal--form'), null, 'modal should close after a successful save');
 
@@ -339,6 +339,69 @@ test('AC-Add — Cancelling the create modal makes no api.repositories.create ca
 // ---------------------------------------------------------------------------
 // Credential status indicator tests
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Description column tests — WP-006
+// ---------------------------------------------------------------------------
+
+test('Description — table header includes a "Description" column', async () => {
+    const container = await renderAndWait();
+    try {
+        const table = container.querySelector('table.repositories-table');
+        const headers = [...table.querySelectorAll('thead th')].map((th) => th.textContent);
+        assert.ok(headers.includes('Description'), 'Table header should include "Description" column');
+    } finally {
+        cleanupContainers();
+    }
+});
+
+test('Description — row shows "—" when the repository has no description', async () => {
+    const container = await renderAndWait();
+    try {
+        const descCell = container.querySelector('td.repo-description-cell');
+        assert.ok(descCell, 'Description cell should exist');
+        assert.equal(descCell.textContent, '—');
+        assert.equal(descCell.title, '', 'no title attribute should be set when there is no description');
+    } finally {
+        cleanupContainers();
+    }
+});
+
+test('Description — row shows the full description text and title attribute when short', async () => {
+    const origList = api.repositories.list;
+    api.repositories.list = async () => [
+        { Id: REPO_ID, Name: REPO_NAME, Url: REPO_URL, Description: 'A short description.' },
+    ];
+
+    const container = await renderAndWait();
+    try {
+        const descCell = container.querySelector('td.repo-description-cell');
+        assert.equal(descCell.textContent, 'A short description.');
+        assert.equal(descCell.title, 'A short description.');
+    } finally {
+        api.repositories.list = origList;
+        cleanupContainers();
+    }
+});
+
+test('Description — a long description is truncated inline with an ellipsis, full text kept in the title attribute', async () => {
+    const longDescription = 'A'.repeat(120);
+    const origList = api.repositories.list;
+    api.repositories.list = async () => [
+        { Id: REPO_ID, Name: REPO_NAME, Url: REPO_URL, Description: longDescription },
+    ];
+
+    const container = await renderAndWait();
+    try {
+        const descCell = container.querySelector('td.repo-description-cell');
+        assert.ok(descCell.textContent.length < longDescription.length, 'displayed text should be shorter than the original');
+        assert.ok(descCell.textContent.endsWith('…'), 'truncated text should end with an ellipsis');
+        assert.equal(descCell.title, longDescription, 'title attribute should hold the untruncated description');
+    } finally {
+        api.repositories.list = origList;
+        cleanupContainers();
+    }
+});
 
 test('Credential — table header includes a "Credential" column', async () => {
     const container = await renderAndWait();

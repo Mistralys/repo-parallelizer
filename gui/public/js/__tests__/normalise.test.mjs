@@ -174,3 +174,47 @@ test('normaliseRepo: existing fields still work when CredentialId is present', (
     assert.strictEqual(result.credentialId, 'cred-abc');
     assert.strictEqual(result.LastRefreshedAt, '2026-01-01T00:00:00Z');
 });
+
+// ─── normaliseRepo — Description field (WP-006) ──────────────────────────────
+
+test('normaliseRepo: Description field is returned as description', () => {
+    const result = normaliseRepo({ Id: 'repo-1', Description: 'A useful repository.' });
+    assert.strictEqual(result.description, 'A useful repository.');
+});
+
+test('normaliseRepo: lowercase description field is accepted', () => {
+    const result = normaliseRepo({ Id: 'repo-1', description: 'from lower' });
+    assert.strictEqual(result.description, 'from lower');
+});
+
+test('normaliseRepo: Description takes precedence over description', () => {
+    const result = normaliseRepo({ Id: 'repo-1', Description: 'upper', description: 'lower' });
+    assert.strictEqual(result.description, 'upper');
+});
+
+test('normaliseRepo: missing Description defaults to empty string', () => {
+    const result = normaliseRepo({ Id: 'repo-1', Name: 'Repo', Url: 'https://github.com/org/repo.git' });
+    assert.strictEqual(result.description, '');
+});
+
+test('normaliseRepo: empty string Description defaults to empty string', () => {
+    const result = normaliseRepo({ Id: 'repo-1', Description: '' });
+    assert.strictEqual(result.description, '');
+});
+
+test('normaliseRepo: existing fields still work when Description is present', () => {
+    const result = normaliseRepo({
+        Id: 'repo-1',
+        Name: 'Repo One',
+        Url: 'https://github.com/org/repo.git',
+        Description: 'A useful repository.',
+        CredentialId: 'cred-abc',
+        LastRefreshedAt: '2026-01-01T00:00:00Z',
+    });
+    assert.strictEqual(result.id, 'repo-1');
+    assert.strictEqual(result.name, 'Repo One');
+    assert.strictEqual(result.url, 'https://github.com/org/repo.git');
+    assert.strictEqual(result.description, 'A useful repository.');
+    assert.strictEqual(result.credentialId, 'cred-abc');
+    assert.strictEqual(result.LastRefreshedAt, '2026-01-01T00:00:00Z');
+});

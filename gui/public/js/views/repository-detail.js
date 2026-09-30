@@ -348,7 +348,7 @@ function formatRelativeTime(date) {
  *   - Repository ID and URL (URL as an external `<a>`).
  *   - A "Refresh" button (wired by the caller after construction).
  *
- * @param {{ id: string, name: string, url: string }} repo
+ * @param {{ id: string, name: string, url: string, description: string }} repo
  * @returns {{ header: HTMLElement, refreshBtn: HTMLButtonElement }}
  */
 function buildHeader(repo) {
@@ -391,6 +391,14 @@ function buildHeader(repo) {
     }
 
     header.appendChild(titleRow);
+
+    // Description (shown only when present)
+    if (repo.description) {
+        const descEl = document.createElement('p');
+        descEl.className   = 'project-meta-description text-secondary';
+        descEl.textContent = repo.description;
+        header.appendChild(descEl);
+    }
 
     // URL row
     if (repo.url) {

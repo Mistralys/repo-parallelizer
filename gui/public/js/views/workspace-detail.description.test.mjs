@@ -1,20 +1,17 @@
 /**
- * Unit tests for the Notes section added to the workspace detail view — WP-007.
+ * Unit tests for the Description section added to the workspace detail view.
  *
  * Covers:
- *   - A <textarea> with label "Notes" is rendered below the status table.
- *   - The textarea is pre-populated with existing notes from the workspace.
- *   - Typing triggers `api.workspaces.update` after the 1000 ms debounce.
+ *   - A <textarea> with label "Description" is rendered below the status table.
+ *   - The textarea is pre-populated with the existing description from the workspace.
+ *   - Typing triggers `api.workspaces.update` with { description } after the 1000 ms debounce.
  *   - A "Saving…" indicator is visible during the save request.
  *   - A "Saved" indicator is visible after a successful save.
- *   - Regression (WP-003): the Notes section's class names, debounce, status
- *     text, and `api.workspaces.update(projectId, wid, { notes })` call are
- *     unchanged after `buildNotesSection()` was generalised into
- *     `buildTextFieldSection()` to also support the Description section.
+ *   - The Description section is placed directly above the Notes section.
  *
  * Uses Node's built-in test runner with jsdom for a minimal DOM environment.
  * Run individually with:
- *   node --test gui/public/js/views/workspace-detail.notes.test.mjs
+ *   node --test gui/public/js/views/workspace-detail.description.test.mjs
  */
 
 import { test, beforeEach } from 'node:test';
@@ -40,7 +37,7 @@ globalThis.CSS = window.CSS ?? { escape: (s) => s.replace(/["\\]/g, '\\$&') };
 
 // ---------------------------------------------------------------------------
 // Timer stubs — allow fine-grained control in tests.
-// The debounce inside buildNotesSection uses setTimeout(fn, 1000).
+// The debounce inside buildTextFieldSection uses setTimeout(fn, 1000).
 // We replace setTimeout/clearTimeout globally so tests can fire it
 // synchronously via flushDebounce().
 // ---------------------------------------------------------------------------
@@ -113,7 +110,7 @@ api.config.polling.get = async () => ({ gitPollingIntervalSeconds: 60 });
 if (!api.config.webserverUrl) api.config.webserverUrl = {};
 api.config.webserverUrl.get = async () => ({ webserverUrl: '' });
 
-// Default workspace stub — no notes.
+// Default workspace stub — no description.
 let workspaceStub = { Id: 'DEV', Description: '', Initialized: true, FolderPath: '/tmp/dev', Notes: '' };
 api.workspaces.get = async () => workspaceStub;
 
@@ -175,42 +172,42 @@ beforeEach(() => {
     workspaceStub = { Id: 'DEV', Description: '', Initialized: true, FolderPath: '/tmp/dev', Notes: '' };
 });
 
-test('Notes textarea is rendered in the workspace detail view', async () => {
+test('Description textarea is rendered in the workspace detail view', async () => {
     await render();
-    const textarea = container.querySelector('textarea#workspace-notes-textarea');
-    assert.ok(textarea, 'textarea#workspace-notes-textarea should be in the DOM');
+    const textarea = container.querySelector('textarea#workspace-description-textarea');
+    assert.ok(textarea, 'textarea#workspace-description-textarea should be in the DOM');
     restoreTimers();
 });
 
-test('A label with text "Notes" is rendered', async () => {
+test('A label with text "Description" is rendered', async () => {
     await render();
-    const label = container.querySelector('label[for="workspace-notes-textarea"]');
-    assert.ok(label, 'label[for="workspace-notes-textarea"] should be in the DOM');
-    assert.strictEqual(label.textContent, 'Notes');
+    const label = container.querySelector('label[for="workspace-description-textarea"]');
+    assert.ok(label, 'label[for="workspace-description-textarea"] should be in the DOM');
+    assert.strictEqual(label.textContent, 'Description');
     restoreTimers();
 });
 
-test('Textarea is pre-populated with existing notes on page load', async () => {
-    workspaceStub = { Id: 'DEV', Description: '', Initialized: true, FolderPath: '/tmp/dev', Notes: 'existing notes' };
+test('Textarea is pre-populated with existing description on page load', async () => {
+    workspaceStub = { Id: 'DEV', Description: 'existing description', Initialized: true, FolderPath: '/tmp/dev', Notes: '' };
     await render();
-    const textarea = container.querySelector('textarea#workspace-notes-textarea');
-    assert.strictEqual(textarea.value, 'existing notes');
+    const textarea = container.querySelector('textarea#workspace-description-textarea');
+    assert.strictEqual(textarea.value, 'existing description');
     restoreTimers();
 });
 
-test('Textarea is empty when workspace has no notes', async () => {
+test('Textarea is empty when workspace has no description', async () => {
     workspaceStub = { Id: 'DEV', Description: '', Initialized: true, FolderPath: '/tmp/dev', Notes: '' };
     await render();
-    const textarea = container.querySelector('textarea#workspace-notes-textarea');
+    const textarea = container.querySelector('textarea#workspace-description-textarea');
     assert.strictEqual(textarea.value, '');
     restoreTimers();
 });
 
-test('Typing triggers api.workspaces.update after the debounce fires', async () => {
+test('Typing triggers api.workspaces.update with { description } after the debounce fires', async () => {
     await render();
-    const textarea = container.querySelector('textarea#workspace-notes-textarea');
+    const textarea = container.querySelector('textarea#workspace-description-textarea');
 
-    textarea.value = 'new notes';
+    textarea.value = 'new description';
     textarea.dispatchEvent(new window.Event('input'));
 
     // Debounce has not fired yet — no API call.
@@ -220,7 +217,7 @@ test('Typing triggers api.workspaces.update after the debounce fires', async () 
     await flushDebounce();
 
     assert.strictEqual(updateCalls.length, 1);
-    assert.deepStrictEqual(updateCalls[0].data, { notes: 'new notes' });
+    assert.deepStrictEqual(updateCalls[0].data, { description: 'new description' });
     assert.strictEqual(updateCalls[0].projectId, 'my-project');
     assert.strictEqual(updateCalls[0].wid, 'DEV');
 
@@ -237,8 +234,8 @@ test('"Saving…" indicator is visible while the save is in flight', async () =>
     };
 
     await render();
-    const textarea = container.querySelector('textarea#workspace-notes-textarea');
-    const statusEl = container.querySelector('.workspace-notes-status');
+    const textarea = container.querySelector('textarea#workspace-description-textarea');
+    const statusEl = container.querySelector('.workspace-description-status');
 
     textarea.value = 'draft';
     textarea.dispatchEvent(new window.Event('input'));
@@ -268,10 +265,10 @@ test('"Saving…" indicator is visible while the save is in flight', async () =>
 
 test('"Saved" indicator is visible after a successful save', async () => {
     await render();
-    const textarea = container.querySelector('textarea#workspace-notes-textarea');
-    const statusEl = container.querySelector('.workspace-notes-status');
+    const textarea = container.querySelector('textarea#workspace-description-textarea');
+    const statusEl = container.querySelector('.workspace-description-status');
 
-    textarea.value = 'saved notes';
+    textarea.value = 'saved description';
     textarea.dispatchEvent(new window.Event('input'));
     await flushDebounce();
 
@@ -281,48 +278,35 @@ test('"Saved" indicator is visible after a successful save', async () => {
     restoreTimers();
 });
 
-// ---------------------------------------------------------------------------
-// Regression (WP-003): buildNotesSection() generalisation into
-// buildTextFieldSection() must not change the Notes section's DOM shape,
-// class names, or the payload key sent to api.workspaces.update().
-// ---------------------------------------------------------------------------
-
-test('Regression: Notes section DOM structure and class names are unchanged after generalisation', async () => {
-    await render();
-
-    assert.ok(container.querySelector('section.workspace-notes-section'), 'section.workspace-notes-section should exist');
-    assert.ok(container.querySelector('label.workspace-notes-label'), 'label.workspace-notes-label should exist');
-    assert.ok(container.querySelector('textarea#workspace-notes-textarea.workspace-notes-textarea'), 'textarea#workspace-notes-textarea.workspace-notes-textarea should exist');
-    assert.ok(container.querySelector('span.workspace-notes-status'), 'span.workspace-notes-status should exist');
-
-    restoreTimers();
-});
-
-test('Regression: Notes save payload still only contains { notes }, not description', async () => {
-    await render();
-    const textarea = container.querySelector('textarea#workspace-notes-textarea');
-
-    textarea.value = 'notes only';
-    textarea.dispatchEvent(new window.Event('input'));
-    await flushDebounce();
-
-    assert.strictEqual(updateCalls.length, 1);
-    assert.deepStrictEqual(Object.keys(updateCalls[0].data), ['notes']);
-
-    restoreTimers();
-});
-
-test('"Save failed." indicator is visible after a failed Notes save (regression)', async () => {
+test('"Save failed." indicator is visible after a failed save', async () => {
     updateShouldFail = true;
     await render();
-    const textarea = container.querySelector('textarea#workspace-notes-textarea');
-    const statusEl = container.querySelector('.workspace-notes-status');
+    const textarea = container.querySelector('textarea#workspace-description-textarea');
+    const statusEl = container.querySelector('.workspace-description-status');
 
     textarea.value = 'will fail';
     textarea.dispatchEvent(new window.Event('input'));
     await flushDebounce();
 
     assert.strictEqual(statusEl.textContent, 'Save failed.');
+
+    restoreTimers();
+});
+
+test('Description section is placed directly above the Notes section', async () => {
+    await render();
+    const descSection  = container.querySelector('.workspace-description-section');
+    const notesSection = container.querySelector('.workspace-notes-section');
+    assert.ok(descSection, '.workspace-description-section should be in the DOM');
+    assert.ok(notesSection, '.workspace-notes-section should be in the DOM');
+
+    // Compare document position: description section must precede notes section.
+    const position = descSection.compareDocumentPosition(notesSection);
+    assert.ok(
+        (position & window.Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+        'Description section should come before the Notes section in the DOM',
+    );
+    assert.strictEqual(descSection.nextElementSibling, notesSection, 'Description section should be immediately followed by the Notes section');
 
     restoreTimers();
 });

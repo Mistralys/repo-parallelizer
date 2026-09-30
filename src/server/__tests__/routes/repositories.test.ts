@@ -10,6 +10,59 @@ import { mockRequest, mockResponse, flushAsync, type MockResponse } from '../hel
 import { makeMockErrorLogManager } from '../helpers/mock-error-log-manager.js';
 
 // ---------------------------------------------------------------------------
+// Mock WorkspaceArtifactsOrchestrator
+// ---------------------------------------------------------------------------
+
+/**
+ * Records every call made to the artefact choke-point so tests can assert on
+ * which method was invoked with which arguments, and can optionally be
+ * configured (`shouldThrow`) to exercise the "a throwing choke-point does not
+ * change the success response, but logs a warning" contract. Mirrors the
+ * equivalent mock in `projects.test.ts` and `workspaces.test.ts`.
+ */
+class MockWorkspaceArtifacts {
+    calls: { method: string; args: unknown[] }[] = [];
+    shouldThrow = false;
+
+    private record(method: string, args: unknown[]): void {
+        this.calls.push({ method, args });
+        if (this.shouldThrow) {
+            throw new Error(`Simulated ${method} failure.`);
+        }
+    }
+
+    regenerateForRepository(repositoryId: string): void {
+        this.record('regenerateForRepository', [repositoryId]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mock RepositoryOrchestrator
+// ---------------------------------------------------------------------------
+
+/**
+ * Delegates `deleteRepositoryGlobally()` to the paired `MockRepositoryManager`
+ * (mirroring the real orchestrator's eventual `repositoryManager.remove()`
+ * call), while recording every invocation so tests can assert it was reached
+ * (or, for the 404 path, that it was *not*). `shouldThrow` exercises the
+ * 500-mapping path this WP's AC requires.
+ */
+class MockRepositoryOrchestrator {
+    calls: string[] = [];
+    shouldThrow = false;
+
+    constructor(private readonly manager: MockRepositoryManager) {}
+
+    deleteRepositoryGlobally(id: string): void {
+        this.calls.push(id);
+        if (this.shouldThrow) {
+            throw new Error('Simulated deleteRepositoryGlobally failure.');
+        }
+        this.manager.remove(id);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Mock RepositoryManager
 // ---------------------------------------------------------------------------
 
@@ -32,7 +85,7 @@ class MockRepositoryManager {
         return this.getById(id) !== undefined;
     }
 
-    add(params: { url: string; name?: string; id?: string }): Repository {
+    add(params: { url: string; name?: string; id?: string; description?: string }): Repository {
         const id = params.id ?? 'inferred-id';
         const name = params.name ?? id;
 
@@ -47,11 +100,15 @@ class MockRepositoryManager {
         }
 
         const repo: Repository = { Id: id, Name: name, Url: params.url };
+        const trimmedDescription = params.description?.trim();
+        if (trimmedDescription) {
+            repo.Description = trimmedDescription;
+        }
         this.store.push(repo);
         return repo;
     }
 
-    update(id: string, params: { name: string; url?: string }): Repository {
+    update(id: string, params: { name: string; url?: string; description?: string }): Repository {
         const index = this.store.findIndex((r) => r.Id === id);
         if (index === -1) {
             throw new NotFoundError(`Cannot update: repository with ID "${id}" does not exist.`);
@@ -64,6 +121,16 @@ class MockRepositoryManager {
                 throw new Error(`A repository with URL "${params.url}" already exists (ID: "${duplicateUrl.Id}").`);
             }
             updated = { ...updated, Url: params.url };
+        }
+
+        if (params.description !== undefined) {
+            const trimmedDescription = params.description.trim();
+            if (trimmedDescription) {
+                updated = { ...updated, Description: trimmedDescription };
+            } else {
+                const { Description: _removed, ...rest } = updated;
+                updated = rest as Repository;
+            }
         }
 
         this.store[index] = updated;
@@ -121,13 +188,18 @@ function makeAppConfig(credentials: GitCredentialEntry[] = []): AppConfig {
  * Convenience: builds a fresh Router + MockManager pair with routes registered.
  * Accepts an optional `AppConfig` for tests that exercise credential routes.
  */
-function buildSut(appConfig?: AppConfig, errorLogManager?: ErrorLogManager): { router: Router; manager: MockRepositoryManager } {
+function buildSut(
+    appConfig?: AppConfig,
+    errorLogManager?: ErrorLogManager,
+): { router: Router; manager: MockRepositoryManager; repositoryOrchestrator: MockRepositoryOrchestrator; artifacts: MockWorkspaceArtifacts } {
     const router = new Router();
     const manager = new MockRepositoryManager();
     const config = appConfig ?? makeAppConfig();
-    // Cast is safe: our mock satisfies the same duck-type interface used by the routes.
-    registerRepositoryRoutes(router, manager as never, config, errorLogManager);
-    return { router, manager };
+    const artifacts = new MockWorkspaceArtifacts();
+    const repositoryOrchestrator = new MockRepositoryOrchestrator(manager);
+    // Cast is safe: our mocks satisfy the same duck-type interfaces used by the routes.
+    registerRepositoryRoutes(router, manager as never, config, artifacts as never, repositoryOrchestrator as never, errorLogManager);
+    return { router, manager, repositoryOrchestrator, artifacts };
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +354,48 @@ test('POST /api/repositories: returns 400 when manager.add throws (duplicate ID)
     assert.ok(typeof parsed.error === 'string');
 });
 
+test('POST /api/repositories: accepts an optional description and returns it on the created repository', async () => {
+    const { router } = buildSut();
+
+    const payload = { url: 'https://github.com/org/new-repo.git', id: 'new-repo', description: '  A short description.  ' };
+    const req = mockRequest('POST', '/api/repositories', payload);
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 201);
+    const created = JSON.parse(mock.body) as Repository;
+    assert.strictEqual(created.Description, 'A short description.');
+});
+
+test('POST /api/repositories: returns 400 naming MAX_REPOSITORY_DESCRIPTION_LENGTH when description is not a string', async () => {
+    const { router } = buildSut();
+
+    const payload = { url: 'https://github.com/org/new-repo.git', description: 42 };
+    const req = mockRequest('POST', '/api/repositories', payload);
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 400);
+    const parsed = JSON.parse(mock.body) as { error: string };
+    assert.match(parsed.error, /description/);
+});
+
+test('POST /api/repositories: returns 400 naming MAX_REPOSITORY_DESCRIPTION_LENGTH when description exceeds the maximum length', async () => {
+    const { router } = buildSut();
+
+    const payload = { url: 'https://github.com/org/new-repo.git', description: 'x'.repeat(501) };
+    const req = mockRequest('POST', '/api/repositories', payload);
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 400);
+    const parsed = JSON.parse(mock.body) as { error: string };
+    assert.match(parsed.error, /MAX_REPOSITORY_DESCRIPTION_LENGTH|500/);
+});
+
 // ---------------------------------------------------------------------------
 // PUT /api/repositories/:id — update
 // ---------------------------------------------------------------------------
@@ -303,6 +417,42 @@ test('PUT /api/repositories/:id: returns 200 with the updated repository on vali
     const updated = JSON.parse(mock.body) as Repository;
     assert.strictEqual(updated.Name, 'New Name');
     assert.strictEqual(updated.Id, 'my-repo');
+});
+
+test('PUT /api/repositories/:id: regenerates artefacts for every referencing project on success', async () => {
+    const { router, manager, artifacts } = buildSut();
+    manager.seed([{ Id: 'my-repo', Name: 'Old Name', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const req = mockRequest('PUT', '/api/repositories/my-repo', { name: 'New Name' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.deepEqual(
+        artifacts.calls.map((c) => c.method),
+        ['regenerateForRepository'],
+    );
+    assert.deepEqual(artifacts.calls[0].args, ['my-repo']);
+});
+
+test('PUT /api/repositories/:id: a throwing choke-point does not change the 200 response, but logs a warning', async () => {
+    const errorLogManager = makeMockErrorLogManager();
+    const { router, manager, artifacts } = buildSut(undefined, errorLogManager);
+    manager.seed([{ Id: 'my-repo', Name: 'Old Name', Url: 'https://github.com/org/my-repo.git' }]);
+    artifacts.shouldThrow = true;
+
+    const req = mockRequest('PUT', '/api/repositories/my-repo', { name: 'New Name' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as Repository;
+    assert.strictEqual(updated.Name, 'New Name');
+    assert.strictEqual(errorLogManager.appendedEntries.length, 1);
+    assert.strictEqual(errorLogManager.appendedEntries[0].Severity, 'warning');
+    assert.strictEqual(errorLogManager.appendedEntries[0].Source, 'workspace-index');
 });
 
 test('PUT /api/repositories/:id: returns 404 when ID does not exist', async () => {
@@ -353,6 +503,51 @@ test('PUT /api/repositories/:id: returns 200 with both name and url persisted wh
     const updated = JSON.parse(mock.body) as Repository;
     assert.strictEqual(updated.Name, 'New Name');
     assert.strictEqual(updated.Url, 'https://gitlab.com/org/my-repo.git');
+});
+
+test('PUT /api/repositories/:id: accepts an optional description and returns it on the updated repository', async () => {
+    const { router, manager } = buildSut();
+    manager.seed([{ Id: 'my-repo', Name: 'Old Name', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const payload = { name: 'New Name', description: '  Updated description.  ' };
+    const req = mockRequest('PUT', '/api/repositories/my-repo', payload);
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as Repository;
+    assert.strictEqual(updated.Description, 'Updated description.');
+});
+
+test('PUT /api/repositories/:id: returns 400 naming MAX_REPOSITORY_DESCRIPTION_LENGTH when description is not a string', async () => {
+    const { router, manager } = buildSut();
+    manager.seed([{ Id: 'my-repo', Name: 'Current Name', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const payload = { name: 'Current Name', description: { nested: true } };
+    const req = mockRequest('PUT', '/api/repositories/my-repo', payload);
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 400);
+    const parsed = JSON.parse(mock.body) as { error: string };
+    assert.match(parsed.error, /description/);
+});
+
+test('PUT /api/repositories/:id: returns 400 naming MAX_REPOSITORY_DESCRIPTION_LENGTH when description exceeds the maximum length', async () => {
+    const { router, manager } = buildSut();
+    manager.seed([{ Id: 'my-repo', Name: 'Current Name', Url: 'https://github.com/org/my-repo.git' }]);
+
+    const payload = { name: 'Current Name', description: 'x'.repeat(501) };
+    const req = mockRequest('PUT', '/api/repositories/my-repo', payload);
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 400);
+    const parsed = JSON.parse(mock.body) as { error: string };
+    assert.match(parsed.error, /MAX_REPOSITORY_DESCRIPTION_LENGTH|500/);
 });
 
 test('PUT /api/repositories/:id: returns 400 when url field is an empty string', async () => {
@@ -517,6 +712,43 @@ test('DELETE /api/repositories/:id: the deleted repository is no longer listed',
 
     assert.strictEqual(mock.statusCode, 204);
     assert.deepEqual(manager.list().map((r) => r.Id), ['keep']);
+});
+
+test('DELETE /api/repositories/:id: routes through repositoryOrchestrator.deleteRepositoryGlobally() rather than manager.remove() directly', () => {
+    const { router, manager, repositoryOrchestrator } = buildSut();
+    manager.seed([{ Id: 'repo-to-delete', Name: 'To Delete', Url: 'https://github.com/org/del.git' }]);
+
+    const req = mockRequest('DELETE', '/api/repositories/repo-to-delete');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 204);
+    assert.deepEqual(repositoryOrchestrator.calls, ['repo-to-delete']);
+});
+
+test('DELETE /api/repositories/:id: does not call the orchestrator when the ID does not exist (404 short-circuits first)', () => {
+    const { router, repositoryOrchestrator } = buildSut();
+
+    const req = mockRequest('DELETE', '/api/repositories/does-not-exist');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 404);
+    assert.deepEqual(repositoryOrchestrator.calls, []);
+});
+
+test('DELETE /api/repositories/:id: returns 500 when the orchestrator throws', () => {
+    const { router, manager, repositoryOrchestrator } = buildSut();
+    manager.seed([{ Id: 'repo-a', Name: 'Repo A', Url: 'https://github.com/org/a.git' }]);
+    repositoryOrchestrator.shouldThrow = true;
+
+    const req = mockRequest('DELETE', '/api/repositories/repo-a');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 500);
+    const parsed = JSON.parse(mock.body) as { error: string };
+    assert.ok(typeof parsed.error === 'string');
 });
 
 // ---------------------------------------------------------------------------

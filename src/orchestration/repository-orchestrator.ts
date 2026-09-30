@@ -5,13 +5,11 @@ import type { ProjectManager } from '../models/project/project.manager.js';
 import type { RepositoryManager } from '../models/repository/repository.manager.js';
 import { cloneRepository } from '../git/git-clone.js';
 import { resolveCredential, injectCredentialToken, extractHost, stripEmbeddedCredentials } from '../git/git-credentials.js';
-import {
-    generateWorkspaceFile,
-    getWorkspaceFilePath,
-} from './vscode-workspace.js';
+import type { WorkspaceArtifactsOrchestrator } from './workspace-artifacts.js';
 import { CLONE_TIMEOUT_MS } from './orchestration.types.js';
 import type { AddRepositoryResult, WorkspaceCloneResult } from './orchestration.types.js';
 import type { ErrorLogManager } from '../error-log/error-log.manager.js';
+import { resolveRootRealPath, escapesRootViaRealpath } from '../utils/path-guard.js';
 
 /**
  * High-level orchestrator for repository lifecycle operations within projects.
@@ -33,12 +31,19 @@ import type { ErrorLogManager } from '../error-log/error-log.manager.js';
  *
  * All delete operations validate that computed clone paths remain under
  * `config.projectsFolder` before performing any filesystem removal.
+ * `removeRepositoryFromProject()` uses a two-layer guard (strict-descendant
+ * lexical containment, then a realpath symlink-escape check via
+ * `../utils/path-guard.js`) so a planted symlink cannot escape the lexical
+ * check alone; `addRepositoryToProject()` retains the lexical-only guard, as
+ * it only ever computes a fresh destination for `git clone` rather than
+ * resolving a path that could already contain an attacker-controlled symlink.
  */
 export class RepositoryOrchestrator {
     constructor(
         private readonly config: AppConfig,
         private readonly projectManager: ProjectManager,
         private readonly repositoryManager: RepositoryManager,
+        private readonly workspaceArtifacts: WorkspaceArtifactsOrchestrator,
         private readonly errorLogManager?: ErrorLogManager,
     ) {}
 
@@ -48,23 +53,6 @@ export class RepositoryOrchestrator {
 
     private repoPath(projectId: string, workspaceId: string, repoId: string): string {
         return path.join(this.config.projectsFolder, projectId, workspaceId, repoId);
-    }
-
-    private wsFilePath(projectId: string, workspaceId: string): string {
-        return getWorkspaceFilePath(this.config.projectsFolder, projectId, workspaceId);
-    }
-
-    private regenerateWorkspaceFile(
-        projectId: string,
-        workspaceId: string,
-        repositoryIds: string[],
-    ): void {
-        const repoPaths = repositoryIds.map((repoId) => ({
-            slug: repoId,
-            path: this.repoPath(projectId, workspaceId, repoId),
-        }));
-
-        generateWorkspaceFile(workspaceId, repoPaths, this.wsFilePath(projectId, workspaceId));
     }
 
     // -------------------------------------------------------------------------
@@ -201,10 +189,9 @@ export class RepositoryOrchestrator {
             }),
         );
 
-        // Regenerate all VS Code workspace files to include the new repository.
-        for (const workspaceId of Object.keys(project.Workspaces)) {
-            this.regenerateWorkspaceFile(projectId, workspaceId, project.Repositories);
-        }
+        // Regenerate the full artefact set for every workspace so it reflects
+        // the newly added repository.
+        this.workspaceArtifacts.regenerateProject(projectId);
 
         return { workspaceResults };
     }
@@ -215,10 +202,29 @@ export class RepositoryOrchestrator {
      * workspace files.
      *
      * Clone folder deletions are skipped silently when the folder does not exist.
-     * Each clone path is validated to be under `projectsFolder` before deletion.
+     * Each clone path is validated to be under `projectsFolder` before deletion,
+     * via a two-layer guard: a strict-descendant lexical check (which also
+     * rejects equality with `projectsFolder` itself — a malformed/persisted
+     * repository or workspace ID must never resolve to the projects root),
+     * followed by a realpath symlink-escape check that catches a planted
+     * symlink a lexical check alone cannot see through.
+     *
+     * When an `errorLogManager` is injected, a `Severity: 'audit'`,
+     * `Operation: 'unlink-repository'` entry is emitted unconditionally once
+     * the data and filesystem mutations succeed — regardless of whether the
+     * subsequent artefact regeneration succeeds. Regeneration is downstream
+     * reconciliation, not part of the audited event: a transient
+     * `regenerateProject()` failure is caught and logged as a
+     * `Severity: 'warning'`, `Source: 'workspace-index'` entry instead of
+     * suppressing the audit record of a deletion that genuinely happened. A
+     * guard failure (thrown before any mutation) still leaves no entry behind.
      *
      * @throws {Error} If the project does not exist.
-     * @throws {Error} If the repository is not listed in the project.
+     * @throws {Error} If the repository is not listed in the project. Checked
+     *   up front, before any clone folder is deleted, so an unlisted
+     *   repository can never cause a partial, unassociated deletion.
+     * @throws {Error} If any clone path fails the path-traversal guard (lexical
+     *   containment or realpath symlink-escape).
      */
     removeRepositoryFromProject(projectId: string, repositoryId: string): void {
         const project = this.projectManager.getById(projectId);
@@ -228,15 +234,37 @@ export class RepositoryOrchestrator {
             );
         }
 
+        if (!project.Repositories.includes(repositoryId)) {
+            throw new Error(
+                `Repository "${repositoryId}" is not listed in project "${projectId}".`
+            );
+        }
+
         const resolvedProjectsFolder = path.resolve(this.config.projectsFolder);
+        const realProjectsFolder = resolveRootRealPath(this.config.projectsFolder);
 
         // Delete clone folders from all workspaces.
         for (const workspaceId of Object.keys(project.Workspaces)) {
             const clonePath = this.repoPath(projectId, workspaceId, repositoryId);
             const resolvedClonePath = path.resolve(clonePath);
 
-            // Path-traversal guard.
+            // Path-traversal guard, layer 1: strict-descendant lexical check.
+            // Deliberately does NOT permit equality with resolvedProjectsFolder
+            // (unlike the shared isLexicallyContained() helper, whose
+            // equality-permitting contract suits the writer path but not this
+            // delete path).
             if (!resolvedClonePath.startsWith(resolvedProjectsFolder + path.sep)) {
+                throw new Error(
+                    `Security check failed: clone path "${resolvedClonePath}" is not under ` +
+                    `projectsFolder "${resolvedProjectsFolder}".`
+                );
+            }
+
+            // Path-traversal guard, layer 2: realpath symlink-escape check.
+            // Catches a planted symlink (including a broken one) at the clone
+            // path's leaf that resolves outside projectsFolder even though the
+            // lexical check above passed.
+            if (escapesRootViaRealpath(resolvedClonePath, realProjectsFolder)) {
                 throw new Error(
                     `Security check failed: clone path "${resolvedClonePath}" is not under ` +
                     `projectsFolder "${resolvedProjectsFolder}".`
@@ -248,19 +276,41 @@ export class RepositoryOrchestrator {
             }
         }
 
-        // Update project data (also validates that repositoryId is listed in the project).
+        // Update project data. The pre-loop check above already validated the
+        // association; this call re-validates it as defense in depth.
         this.projectManager.removeRepository(projectId, repositoryId);
 
-        // Re-read updated project so VS Code files reflect the current repo list.
-        const updatedProject = this.projectManager.getById(projectId)!;
+        // Audit trail — the audited event ("repository unlinked and clone
+        // folders removed") is already complete at this point, so the entry
+        // is emitted unconditionally from here on, regardless of whether the
+        // downstream artefact regeneration below succeeds. A guard failure or
+        // an unlisted repository, both handled above, still throw before this
+        // point and so still produce no entry.
+        this.errorLogManager?.append({
+            Severity: 'audit',
+            Source: 'repository-audit',
+            Operation: 'unlink-repository',
+            Context: { ProjectId: projectId, RepositoryId: repositoryId },
+            Message: `Repository "${repositoryId}" was unlinked from project "${projectId}" and its clone folders removed.`,
+        });
 
-        // Regenerate all VS Code workspace files without the removed repository.
-        for (const workspaceId of Object.keys(updatedProject.Workspaces)) {
-            this.regenerateWorkspaceFile(
-                projectId,
-                workspaceId,
-                updatedProject.Repositories,
-            );
+        // Regenerate the full artefact set for every workspace so it reflects
+        // the current (post-removal) repository list. This is best-effort
+        // downstream reconciliation, not part of the audited event above: a
+        // transient failure here must not erase the audit record of a
+        // deletion that genuinely happened, so it is caught and logged as a
+        // warning instead of propagating.
+        try {
+            this.workspaceArtifacts.regenerateProject(projectId);
+        } catch (error) {
+            this.errorLogManager?.append({
+                Severity: 'warning',
+                Source: 'workspace-index',
+                Operation: 'unlink-repository',
+                Context: { ProjectId: projectId, RepositoryId: repositoryId },
+                Message: `Failed to regenerate workspace artefacts for project "${projectId}" after ` +
+                    `unlinking repository "${repositoryId}": ${error instanceof Error ? error.message : String(error)}`,
+            });
         }
     }
 
@@ -271,6 +321,16 @@ export class RepositoryOrchestrator {
      *
      * Projects that do not have the repository clone on disk are handled
      * gracefully — the clone folder removal is a no-op when the path does not exist.
+     *
+     * When an `errorLogManager` is injected, each per-project cascade step
+     * emits its own `unlink-repository` audit entry via
+     * {@link removeRepositoryFromProject}, and — only after the global-store
+     * removal below also succeeds — a single summary `delete-repository-global`
+     * entry is emitted, with `Details` naming every affected project ID. If
+     * `repositoryManager.remove()` throws, this method throws too, no summary
+     * entry is written, and the per-project entries already emitted during the
+     * cascade are left in place (they describe cascade steps that did
+     * genuinely complete).
      *
      * @throws {Error} If the repository does not exist in the global store.
      */
@@ -283,15 +343,30 @@ export class RepositoryOrchestrator {
 
         // Remove the repository from every project that references it.
         const allProjects = this.projectManager.list();
+        const affectedProjectIds: string[] = [];
         for (const entry of allProjects) {
             const project = this.projectManager.getById(entry.Id);
             if (!project) continue;
             if (!project.Repositories.includes(repositoryId)) continue;
 
             this.removeRepositoryFromProject(entry.Id, repositoryId);
+            affectedProjectIds.push(entry.Id);
         }
 
         // Remove the repository from the global store.
         this.repositoryManager.remove(repositoryId);
+
+        // Audit trail — the summary entry is emitted only after the global
+        // removal above has succeeded, so a throw here (after the per-project
+        // cascade already completed) leaves no summary entry behind while the
+        // per-project entries already written remain intact.
+        this.errorLogManager?.append({
+            Severity: 'audit',
+            Source: 'repository-audit',
+            Operation: 'delete-repository-global',
+            Context: { RepositoryId: repositoryId },
+            Message: `Repository "${repositoryId}" was deleted globally, affecting ${affectedProjectIds.length} project(s).`,
+            Details: JSON.stringify(affectedProjectIds),
+        });
     }
 }

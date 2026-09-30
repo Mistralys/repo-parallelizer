@@ -21,8 +21,11 @@ import { registerWorkspaceRoutes } from '../../routes/workspaces.js';
 import { NotFoundError } from '../../../errors.js';
 import type { WorkspaceInfo } from '../../../models/workspace/workspace.types.js';
 import type { ProjectData } from '../../../models/project/project.types.js';
+import type { Repository } from '../../../models/repository/repository.types.js';
 import type { WorkspaceHealthReport } from '../../../orchestration/workspace-health.js';
+import { WorkspaceArtifactsOrchestrator } from '../../../orchestration/workspace-artifacts.js';
 import { mockRequest, mockResponse, type MockResponse } from '../helpers/mock-http.js';
+import { GENERATED_BEGIN_MARKER, GENERATED_END_MARKER, WORKSPACE_INDEX_FILE_NAMES } from '../../../orchestration/workspace-index.js';
 
 // ---------------------------------------------------------------------------
 // Temp-directory lifecycle
@@ -62,8 +65,17 @@ function makeTempDir(): string {
 class MockWorkspaceManager {
     private readonly data = new Map<string, Map<string, WorkspaceInfo>>();
 
+    constructor(private readonly pm: MockProjectManager) {}
+
     /**
-     * Seeds a workspace entry so the mock returns it from `getById`.
+     * Seeds a workspace entry so the mock returns it from `getById`. Also
+     * mirrors the entry into the corresponding `MockProjectManager` project's
+     * `Workspaces` map (when that project has already been seeded), since
+     * production's `WorkspaceManager` and `ProjectManager` share the same
+     * underlying store — `WorkspaceArtifactsOrchestrator.regenerateWorkspace()`
+     * reads `project.Workspaces[workspaceId]` directly and would otherwise see
+     * an empty map even though this mock's own `getById()` resolves the
+     * workspace.
      */
     seed(projectId: string, workspaceId: string): void {
         const now = new Date().toISOString();
@@ -78,6 +90,11 @@ class MockWorkspaceManager {
             DateModified: now,
             Notes: '',
         });
+
+        const project = this.pm.getById(projectId);
+        if (project) {
+            project.Workspaces[workspaceId] = { Description: '', DateCreated: now, DateModified: now, Notes: '' };
+        }
     }
 
     getById(projectId: string, workspaceId: string): WorkspaceInfo | undefined {
@@ -109,6 +126,22 @@ class MockProjectManager {
 }
 
 // ---------------------------------------------------------------------------
+// Mock RepositoryManager
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a minimal `Repository` for any ID it is asked about, so the real
+ * `WorkspaceArtifactsOrchestrator` used by `buildSut()` below can resolve
+ * every ID listed in a seeded project's `Repositories` array without a
+ * dedicated per-test repository fixture.
+ */
+class MockRepositoryManager {
+    getById(id: string): Repository {
+        return { Id: id, Name: id, Url: `https://example.com/${id}.git` };
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test builder
 // ---------------------------------------------------------------------------
 
@@ -118,8 +151,9 @@ function buildSut(projectsFolder: string): {
     pm: MockProjectManager;
 } {
     const router = new Router();
-    const wm = new MockWorkspaceManager();
     const pm = new MockProjectManager();
+    const wm = new MockWorkspaceManager(pm);
+    const repoManager = new MockRepositoryManager();
     const stubOrchestrator = {} as never;
     const appConfig = { projectsFolder } as never;
     // Minimal ErrorLogManager stub — list() returns empty so no credential-missing
@@ -131,8 +165,31 @@ function buildSut(projectsFolder: string): {
         clear: () => {},
         sources: () => [],
     } as never;
-    registerWorkspaceRoutes(router, wm as never, stubOrchestrator, appConfig, pm as never, stubErrorLogManager);
+    // A real WorkspaceArtifactsOrchestrator (not a stub) — the
+    // regenerate-workspace-file route now delegates to it directly, and these
+    // tests assert on the actual on-disk `.code-workspace` file it produces.
+    const workspaceArtifactsOrchestrator = new WorkspaceArtifactsOrchestrator(
+        appConfig,
+        pm as never,
+        repoManager as never,
+    );
+    registerWorkspaceRoutes(router, wm as never, stubOrchestrator, appConfig, pm as never, stubErrorLogManager, workspaceArtifactsOrchestrator);
     return { router, wm, pm };
+}
+
+/**
+ * Writes all three generated index files (marker-managed) into the workspace
+ * folder, so the health endpoint sees a fully "healthy" index-file set.
+ */
+function createManagedIndexFiles(projectsFolder: string, projectId: string, workspaceId: string): void {
+    const wsFolder = path.join(projectsFolder, projectId, workspaceId);
+    fs.mkdirSync(wsFolder, { recursive: true });
+    for (const name of ['README.md', 'AGENTS.md', 'CLAUDE.md']) {
+        fs.writeFileSync(
+            path.join(wsFolder, name),
+            `${GENERATED_BEGIN_MARKER}\ncontent\n${GENERATED_END_MARKER}\n`,
+        );
+    }
 }
 
 function makeProject(id: string, repositories: string[] = []): ProjectData {
@@ -218,6 +275,9 @@ test('GET /health: returns 200 healthy report when workspace file and all repos 
     const wsFilePath = path.join(projectsFolder, 'proj-a', 'proj-a-DEV.code-workspace');
     fs.writeFileSync(wsFilePath, JSON.stringify({ folders: [], settings: {} }));
 
+    // All three generated index files present and marker-managed.
+    createManagedIndexFiles(projectsFolder, 'proj-a', 'DEV');
+
     const req = mockRequest('GET', '/api/projects/proj-a/workspaces/DEV/health');
     const mock = mockResponse();
     router.handle(req, mock.res);
@@ -226,6 +286,61 @@ test('GET /health: returns 200 healthy report when workspace file and all repos 
     const report = JSON.parse(mock.body) as WorkspaceHealthReport;
     assert.strictEqual(report.healthy, true);
     assert.deepStrictEqual(report.issues, []);
+});
+
+test('GET /health: returns workspace-index-missing issue when index files are absent from an initialised workspace', () => {
+    const projectsFolder = makeTempDir();
+    const { router, wm, pm } = buildSut(projectsFolder);
+    pm.seed(makeProject('proj-a', ['repo-x']));
+    wm.seed('proj-a', 'DEV');
+
+    const wsFolder = path.join(projectsFolder, 'proj-a', 'DEV');
+    fs.mkdirSync(path.join(wsFolder, 'repo-x', '.git'), { recursive: true });
+    fs.writeFileSync(
+        path.join(projectsFolder, 'proj-a', 'proj-a-DEV.code-workspace'),
+        JSON.stringify({ folders: [], settings: {} }),
+    );
+    // Index files intentionally omitted.
+
+    const req = mockRequest('GET', '/api/projects/proj-a/workspaces/DEV/health');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const report = JSON.parse(mock.body) as WorkspaceHealthReport;
+    assert.strictEqual(report.healthy, false);
+    const issue = report.issues.find((i) => i.type === 'workspace-index-missing');
+    assert.ok(issue, 'workspace-index-missing issue should be present');
+    assert.strictEqual(issue.fixAction, 'regenerate-workspace-file');
+});
+
+test('GET /health: returns workspace-index-unmanaged issue for a hand-authored index file', () => {
+    const projectsFolder = makeTempDir();
+    const { router, wm, pm } = buildSut(projectsFolder);
+    pm.seed(makeProject('proj-a', ['repo-x']));
+    wm.seed('proj-a', 'DEV');
+
+    const wsFolder = path.join(projectsFolder, 'proj-a', 'DEV');
+    fs.mkdirSync(path.join(wsFolder, 'repo-x', '.git'), { recursive: true });
+    fs.writeFileSync(
+        path.join(projectsFolder, 'proj-a', 'proj-a-DEV.code-workspace'),
+        JSON.stringify({ folders: [], settings: {} }),
+    );
+    fs.writeFileSync(path.join(wsFolder, 'README.md'), `${GENERATED_BEGIN_MARKER}\ncontent\n${GENERATED_END_MARKER}\n`);
+    fs.writeFileSync(path.join(wsFolder, 'AGENTS.md'), `${GENERATED_BEGIN_MARKER}\ncontent\n${GENERATED_END_MARKER}\n`);
+    // CLAUDE.md is hand-authored — no generated marker.
+    fs.writeFileSync(path.join(wsFolder, 'CLAUDE.md'), '# Hand-written notes.\n');
+
+    const req = mockRequest('GET', '/api/projects/proj-a/workspaces/DEV/health');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 200);
+    const report = JSON.parse(mock.body) as WorkspaceHealthReport;
+    assert.strictEqual(report.healthy, false);
+    const issue = report.issues.find((i) => i.type === 'workspace-index-unmanaged');
+    assert.ok(issue, 'workspace-index-unmanaged issue should be present');
+    assert.strictEqual(issue.fixAction, 'none');
 });
 
 test('GET /health: returns 200 with issues when workspace file is missing and repos are not cloned', () => {
@@ -237,6 +352,8 @@ test('GET /health: returns 200 with issues when workspace file is missing and re
     // Create the workspace folder but omit the .code-workspace file and .git directories.
     const wsFolder = path.join(projectsFolder, 'proj-a', 'DEV');
     fs.mkdirSync(wsFolder, { recursive: true });
+    // Index files present so this test stays focused on workspace-file / clone status.
+    createManagedIndexFiles(projectsFolder, 'proj-a', 'DEV');
 
     const req = mockRequest('GET', '/api/projects/proj-a/workspaces/DEV/health');
     const mock = mockResponse();
@@ -273,6 +390,8 @@ test('GET /health: returns 200 with only missing-workspace-file issue when repos
     fs.mkdirSync(wsFolder, { recursive: true });
     fs.mkdirSync(path.join(wsFolder, 'repo-x', '.git'), { recursive: true });
     // No .code-workspace file.
+    // Index files present so this test stays focused on the workspace-file check.
+    createManagedIndexFiles(projectsFolder, 'proj-a', 'DEV');
 
     const req = mockRequest('GET', '/api/projects/proj-a/workspaces/DEV/health');
     const mock = mockResponse();
@@ -376,6 +495,18 @@ test('POST /regenerate-workspace-file: returns 200 and writes .code-workspace fi
         wsFile.folders.some((f) => f.path === path.join(wsFolder, 'repo-y')),
         'repo-y folder path must be inside the workspace directory',
     );
+
+    // Verify every generated index file was also (re)written to disk with its
+    // managed-content marker present — not just the .code-workspace file.
+    for (const fileName of WORKSPACE_INDEX_FILE_NAMES) {
+        const indexFilePath = path.join(wsFolder, fileName);
+        assert.ok(fs.existsSync(indexFilePath), `${fileName} must exist after regeneration`);
+        const content = fs.readFileSync(indexFilePath, 'utf8');
+        assert.ok(
+            content.includes(GENERATED_BEGIN_MARKER),
+            `${fileName} must contain the generated-content begin marker`,
+        );
+    }
 });
 
 test('POST /regenerate-workspace-file: preserves existing .code-workspace settings section', () => {

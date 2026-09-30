@@ -6,11 +6,7 @@ import type { WorkspaceManager } from '../models/workspace/workspace.manager.js'
 import type { RepositoryManager } from '../models/repository/repository.manager.js';
 import { cloneRepository } from '../git/git-clone.js';
 import { resolveCredential, injectCredentialToken, extractHost, stripEmbeddedCredentials } from '../git/git-credentials.js';
-import {
-    generateWorkspaceFile,
-    removeWorkspaceFile,
-    getWorkspaceFilePath,
-} from './vscode-workspace.js';
+import type { WorkspaceArtifactsOrchestrator } from './workspace-artifacts.js';
 import { STABLE_WORKSPACE_ID } from '../models/workspace/workspace.types.js';
 import { isValidWorkspaceId } from '../utils/slug.js';
 import { CLONE_TIMEOUT_MS } from './orchestration.types.js';
@@ -44,6 +40,7 @@ export class WorkspaceOrchestrator {
         private readonly projectManager: ProjectManager,
         private readonly workspaceManager: WorkspaceManager,
         private readonly repositoryManager: RepositoryManager,
+        private readonly workspaceArtifacts: WorkspaceArtifactsOrchestrator,
         private readonly errorLogManager?: ErrorLogManager,
     ) {}
 
@@ -57,10 +54,6 @@ export class WorkspaceOrchestrator {
 
     private repoPath(projectId: string, workspaceId: string, repoId: string): string {
         return path.join(this.config.projectsFolder, projectId, workspaceId, repoId);
-    }
-
-    private wsFilePath(projectId: string, workspaceId: string): string {
-        return getWorkspaceFilePath(this.config.projectsFolder, projectId, workspaceId);
     }
 
     // -------------------------------------------------------------------------
@@ -212,16 +205,7 @@ export class WorkspaceOrchestrator {
             }),
         );
 
-        const repoPaths = project.Repositories.map((repoId) => ({
-            slug: repoId,
-            path: this.repoPath(projectId, workspaceId, repoId),
-        }));
-
-        generateWorkspaceFile(
-            workspaceId,
-            repoPaths,
-            this.wsFilePath(projectId, workspaceId),
-        );
+        this.workspaceArtifacts.regenerateWorkspace(projectId, workspaceId);
 
         return { results: repoResults };
     }
@@ -261,7 +245,7 @@ export class WorkspaceOrchestrator {
             fs.rmSync(wsFolder, { recursive: true, force: true });
         }
 
-        removeWorkspaceFile(this.wsFilePath(projectId, workspaceId));
+        this.workspaceArtifacts.removeWorkspace(projectId, workspaceId);
         this.workspaceManager.remove(projectId, workspaceId);
     }
 
@@ -346,18 +330,16 @@ export class WorkspaceOrchestrator {
             fs.renameSync(oldWsFolder, newWsFolder);
         }
 
-        // Replace the old VS Code .code-workspace file with an updated one at
-        // the new path. Folder entries reference the new workspace directory.
-        const oldFilePath = this.wsFilePath(projectId, oldId);
-        const newFilePath = this.wsFilePath(projectId, newId);
-
-        const repoPaths = project.Repositories.map((repoId) => ({
-            slug: repoId,
-            path: this.repoPath(projectId, newId, repoId),
-        }));
-
-        generateWorkspaceFile(newId, repoPaths, newFilePath);
-        removeWorkspaceFile(oldFilePath);
+        // Regenerate the full artefact set (`.code-workspace` + index files)
+        // under the new workspace ID, then remove the old artefact set. The
+        // pre-rename `ProjectWorkspace` entry is passed explicitly because
+        // `project.Workspaces[newId]` does not exist until
+        // `workspaceManager.rename()` runs below — see
+        // `RegenerateWorkspaceOverrides.workspaceMeta`.
+        this.workspaceArtifacts.regenerateWorkspace(projectId, newId, {
+            workspaceMeta: project.Workspaces[oldId],
+        });
+        this.workspaceArtifacts.removeWorkspace(projectId, oldId);
 
         // Update the workspace data entry (also validates newId format/uniqueness).
         this.workspaceManager.rename(projectId, oldId, newId);

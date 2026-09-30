@@ -3,7 +3,9 @@
  *
  * Renders the full detail page for a single project:
  *   - Project metadata (ID, name/description with inline description edit).
- *   - Repositories section: list with per-repo Remove, plus "Add Repository" picker.
+ *   - Repositories section: list with per-repo Remove (deletes the repo's cloned
+ *     folders from disk across this project's workspaces; the global repository
+ *     record is retained), plus "Add Repository" picker.
  *   - Workspaces section: list with links, per-workspace Delete (STABLE disabled),
  *     and "Add Workspace" form.
  *   - Rename Project action (changes project ID).
@@ -211,7 +213,9 @@ function buildMetaSection(project) {
  * Build the Repositories section for a project.
  *
  * Lists repos currently in the project (cross-referenced with global repo list
- * for name/URL). Provides a Remove button per repo and an "Add Repository"
+ * for name/URL). Provides a Remove button per repo — which permanently deletes
+ * the repository's cloned folders from disk in every workspace of this project
+ * while retaining the global repository record — and an "Add Repository"
  * picker that excludes already-added repos.
  *
  * @param {string}   projectId       - Current project ID.
@@ -285,7 +289,7 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
                 try {
                     await showConfirm(
                         'Remove Repository',
-                        `Remove "${label}" from this project? The repository itself is not deleted.`,
+                        `Remove "${label}" from this project? The repository's cloned folders in every workspace of this project will be permanently deleted from disk. The global repository record itself is retained and can be re-added later.`,
                     );
                 } catch {
                     return;

@@ -387,17 +387,68 @@ test('api.config.credentials.remove(id) throws when response is not ok', async (
 // ---------------------------------------------------------------------------
 
 test('api.repositories.credentialOptions(id) sends GET /api/repositories/:id/credential-options', async () => {
-    const expected = [
-        { credentialId: 'cred-1', label: 'My Token', host: 'github.com', auto: true },
-    ];
-    nextResponse = { status: 200, body: expected, contentType: 'application/json' };
+    nextResponse = {
+        status: 200,
+        body: {
+            credentials: [
+                { id: 'cred-1', label: 'My Token', host: 'github.com', token: '***' },
+                { id: 'cred-2', label: 'Other Token', host: 'github.com', token: '***' },
+            ],
+            autoSelected: 'cred-1',
+        },
+        contentType: 'application/json',
+    };
 
     const result = await api.repositories.credentialOptions('repo-abc');
 
     assert.equal(calls.length, 1, 'exactly one fetch call expected');
     assert.equal(calls[0].method, 'GET');
     assert.equal(calls[0].url, '/api/repositories/repo-abc/credential-options');
-    assert.deepEqual(result, expected);
+    assert.deepEqual(result, [
+        { credentialId: 'cred-1', label: 'My Token', host: 'github.com', auto: true },
+        { credentialId: 'cred-2', label: 'Other Token', host: 'github.com', auto: false },
+    ]);
+});
+
+test('api.repositories.credentialOptions(id) marks no option as auto when autoSelected is absent', async () => {
+    nextResponse = {
+        status: 200,
+        body: {
+            credentials: [
+                { id: 'cred-1', label: 'One', host: 'github.com', token: '***' },
+                { id: 'cred-2', label: 'Two', host: 'github.com', token: '***' },
+            ],
+        },
+        contentType: 'application/json',
+    };
+
+    const result = await api.repositories.credentialOptions('repo-abc');
+
+    assert.deepEqual(result, [
+        { credentialId: 'cred-1', label: 'One', host: 'github.com', auto: false },
+        { credentialId: 'cred-2', label: 'Two', host: 'github.com', auto: false },
+    ]);
+});
+
+test('api.repositories.credentialOptions(id) marks no option as auto when autoSelected names an ID absent from the returned credentials', async () => {
+    nextResponse = {
+        status: 200,
+        body: {
+            credentials: [
+                { id: 'cred-1', label: 'One', host: 'github.com', token: '***' },
+                { id: 'cred-2', label: 'Two', host: 'github.com', token: '***' },
+            ],
+            autoSelected: 'cred-does-not-exist',
+        },
+        contentType: 'application/json',
+    };
+
+    const result = await api.repositories.credentialOptions('repo-abc');
+
+    assert.deepEqual(result, [
+        { credentialId: 'cred-1', label: 'One', host: 'github.com', auto: false },
+        { credentialId: 'cred-2', label: 'Two', host: 'github.com', auto: false },
+    ]);
 });
 
 test('api.repositories.credentialOptions(id) URL-encodes the repository ID', async () => {

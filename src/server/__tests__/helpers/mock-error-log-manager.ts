@@ -17,6 +17,7 @@
  * **Consumers**
  * - `src/server/__tests__/routes/config.test.ts`
  * - `src/server/__tests__/routes/repositories.test.ts`
+ * - `src/server/__tests__/routes/projects.test.ts`
  */
 import type { ErrorLogManager } from '../../../error-log/error-log.manager.js';
 import type { ErrorLogEntry } from '../../../error-log/error-log.types.js';

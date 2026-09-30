@@ -2,7 +2,7 @@
  * Repositories View — Repo Parallelizer GUI.
  *
  * Renders a full CRUD management page for all registered repositories:
- *   - Table listing all repositories (ID, Name, URL).
+ *   - Table listing all repositories (ID, Name, URL, Description, Credential).
  *   - "+ Add Repository" button opening the create/edit modal in create mode.
  *   - Edit button per row opening the same modal in edit mode.
  *   - Delete per row with a confirmation dialog.
@@ -32,7 +32,7 @@ function buildTableHead() {
     const thead = document.createElement('thead');
     const tr    = document.createElement('tr');
 
-    ['ID', 'Name', 'URL', 'Credential', 'Actions'].forEach((label) => {
+    ['ID', 'Name', 'URL', 'Description', 'Credential', 'Actions'].forEach((label) => {
         const th = document.createElement('th');
         th.textContent = label;
         tr.appendChild(th);
@@ -40,6 +40,26 @@ function buildTableHead() {
 
     thead.appendChild(tr);
     return thead;
+}
+
+// ---------------------------------------------------------------------------
+// Description truncation
+// ---------------------------------------------------------------------------
+
+/** Maximum number of characters shown inline in the Description column before truncating. */
+const DESCRIPTION_TRUNCATE_LENGTH = 60;
+
+/**
+ * Truncate `text` to `DESCRIPTION_TRUNCATE_LENGTH` characters, appending an
+ * ellipsis when truncated. The full, untruncated text is expected to be set
+ * separately as a `title` attribute so it remains available on hover.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function truncateDescription(text) {
+    if (text.length <= DESCRIPTION_TRUNCATE_LENGTH) return text;
+    return `${text.slice(0, DESCRIPTION_TRUNCATE_LENGTH).trimEnd()}…`;
 }
 
 /**
@@ -50,7 +70,7 @@ function buildTableHead() {
  * create/edit modal in edit mode, pre-filled with the row's current data.
  * Clicking Delete shows a confirmation dialog and calls the API on confirm.
  *
- * @param {{ id: string, name: string, url: string }} repo
+ * @param {{ id: string, name: string, url: string, description: string }} repo
  * @param {function(): void} onChanged - Callback to refresh the table after a change (edit save or delete).
  * @returns {HTMLTableRowElement}
  */
@@ -87,6 +107,17 @@ function buildRepoRow(repo, onChanged) {
     urlLink.className = 'repo-url-link';
     urlCell.appendChild(urlLink);
     tr.appendChild(urlCell);
+
+    // ---- Description cell (truncated, full text on hover) ----
+    const descriptionCell = document.createElement('td');
+    descriptionCell.className = 'repo-description-cell';
+    if (repo.description) {
+        descriptionCell.textContent = truncateDescription(repo.description);
+        descriptionCell.title = repo.description;
+    } else {
+        descriptionCell.textContent = '—';
+    }
+    tr.appendChild(descriptionCell);
 
     // ---- Credential status cell ----
     const credentialCell = document.createElement('td');

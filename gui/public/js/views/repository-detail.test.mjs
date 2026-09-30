@@ -218,6 +218,37 @@ test('AC2 — header shows ID hint when name differs from ID', async () => {
     }
 });
 
+// ---------------------------------------------------------------------------
+// Description section — WP-006
+// ---------------------------------------------------------------------------
+
+test('Description — no description paragraph is rendered when the repository has none', async () => {
+    const container = await renderAndWait();
+    try {
+        const descEl = container.querySelector('.project-meta-description');
+        assert.strictEqual(descEl, null, 'no description element should be rendered when absent');
+    } finally {
+        cleanupContainers();
+    }
+});
+
+test('Description — renders the description under the header when present', async () => {
+    mockRepoResponse = { Id: REPO_ID, Name: REPO_NAME, Url: REPO_URL, Description: 'A useful repository.' };
+    const container = await renderAndWait();
+    try {
+        const descEl = container.querySelector('.project-meta-description');
+        assert.ok(descEl, 'a description element should be rendered when present');
+        assert.strictEqual(descEl.textContent, 'A useful repository.');
+
+        const header = container.querySelector('.repository-detail-header');
+        assert.ok(header, 'header element should exist');
+        assert.ok(header.contains(descEl), 'description should be rendered inside the header');
+    } finally {
+        mockRepoResponse = { Id: REPO_ID, Name: REPO_NAME, Url: REPO_URL };
+        cleanupContainers();
+    }
+});
+
 test('AC3 — table contains columns: Project, Workspace, Branch, Status, Actions', async () => {
     const container = await renderAndWait();
     try {

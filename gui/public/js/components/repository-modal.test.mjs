@@ -159,6 +159,10 @@ function getCredentialSelect() {
     return getForm().querySelector('[name="credentialId"]');
 }
 
+function getDescriptionTextarea() {
+    return getForm().querySelector('[name="description"]');
+}
+
 function getSubmitBtn() {
     return Array.from(document.querySelectorAll('.modal-actions button'))
         .find((btn) => btn.type === 'submit');
@@ -218,6 +222,8 @@ test('AC2: create mode — submit with no credential selected calls create() onl
     assert.equal(createCalls.length, 1);
     assert.deepEqual(createCalls[0], { url: 'https://github.com/org/new-repo.git', name: 'New Repo' });
     assert.equal(updateCredentialCalls.length, 0);
+    // NOTE: description is omitted from the create payload when blank —
+    // see the dedicated "Description field" test block below.
     assert.equal(repo.id, 'new-repo');
 });
 
@@ -280,7 +286,7 @@ test('AC3: edit mode — submit calls update(repo.id, { name, url }) and skips u
     assert.equal(updateCalls.length, 1);
     assert.deepEqual(updateCalls[0], {
         id: EXISTING_REPO.id,
-        data: { name: 'Renamed', url: 'https://github.com/org/my-repo-renamed.git' },
+        data: { name: 'Renamed', url: 'https://github.com/org/my-repo-renamed.git', description: '' },
     });
     assert.equal(updateCredentialCalls.length, 0, 'unchanged selection should not call updateCredential()');
 });
@@ -565,6 +571,102 @@ test('AC7: a rejected updateCredential() after a successful create() still resol
     const toastEl = document.querySelector('#toast-container .toast-error');
     assert.ok(toastEl, 'an error toast should be shown for the credential failure');
     assert.match(toastEl.textContent, /Credential save failed/);
+});
+
+// ---------------------------------------------------------------------------
+// Description field — WP-006
+// ---------------------------------------------------------------------------
+
+test('Description field: create mode renders an empty textarea', async () => {
+    const promise = showRepositoryModal({ mode: 'create' });
+
+    assert.ok(getDescriptionTextarea(), 'a description textarea should be rendered');
+    assert.equal(getDescriptionTextarea().tagName, 'TEXTAREA');
+    assert.equal(getDescriptionTextarea().value, '');
+
+    dispatchClick(getCancelBtn());
+    await promise.catch(() => {});
+});
+
+test('Description field: edit mode pre-fills the textarea from repo.description', async () => {
+    const repoWithDescription = { ...EXISTING_REPO, description: 'A useful repository.' };
+    const promise = showRepositoryModal({ mode: 'edit', repo: repoWithDescription });
+
+    assert.equal(getDescriptionTextarea().value, 'A useful repository.');
+
+    dispatchClick(getCancelBtn());
+    await promise.catch(() => {});
+});
+
+test('Description field: edit mode leaves the textarea empty when repo.description is absent', async () => {
+    const promise = showRepositoryModal({ mode: 'edit', repo: EXISTING_REPO });
+
+    assert.equal(getDescriptionTextarea().value, '');
+
+    dispatchClick(getCancelBtn());
+    await promise.catch(() => {});
+});
+
+test('Description field: create mode includes a non-blank description in the create() payload', async () => {
+    const promise = showRepositoryModal({ mode: 'create' });
+
+    getUrlInput().value = 'https://github.com/org/new-repo.git';
+    getDescriptionTextarea().value = 'New repo description.';
+    submitForm();
+    await promise;
+
+    assert.equal(createCalls.length, 1);
+    assert.equal(createCalls[0].description, 'New repo description.');
+});
+
+test('Description field: create mode omits description from the payload when blank', async () => {
+    const promise = showRepositoryModal({ mode: 'create' });
+
+    getUrlInput().value = 'https://github.com/org/new-repo.git';
+    submitForm();
+    await promise;
+
+    assert.equal(createCalls.length, 1);
+    assert.ok(!('description' in createCalls[0]), 'blank description should be omitted, not sent as an empty string');
+});
+
+test('Description field: edit mode includes the (possibly cleared) description in the update() payload', async () => {
+    const repoWithDescription = { ...EXISTING_REPO, description: 'Old description.' };
+    const promise = showRepositoryModal({ mode: 'edit', repo: repoWithDescription });
+
+    getDescriptionTextarea().value = 'Updated description.';
+    submitForm();
+    await promise;
+
+    assert.equal(updateCalls.length, 1);
+    assert.equal(updateCalls[0].data.description, 'Updated description.');
+});
+
+test('Description field: edit mode sends an empty description when the field is cleared', async () => {
+    const repoWithDescription = { ...EXISTING_REPO, description: 'Old description.' };
+    const promise = showRepositoryModal({ mode: 'edit', repo: repoWithDescription });
+
+    getDescriptionTextarea().value = '';
+    submitForm();
+    await promise;
+
+    assert.equal(updateCalls.length, 1);
+    assert.equal(updateCalls[0].data.description, '');
+});
+
+test('Description field: the URL-change debounced credential re-fetch still works with the description field present', async () => {
+    const promise = showRepositoryModal({ mode: 'create' });
+
+    getDescriptionTextarea().value = 'Unrelated description edit.';
+    getUrlInput().value = 'https://github.com/org/typed-url.git';
+    dispatchInput(getUrlInput());
+
+    await wait(500);
+    assert.equal(credentialOptionsCalls.length, 1);
+    assert.equal(credentialOptionsCalls[0], 'https://github.com/org/typed-url.git');
+
+    dispatchClick(getCancelBtn());
+    await promise.catch(() => {});
 });
 
 // ---------------------------------------------------------------------------

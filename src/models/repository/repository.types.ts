@@ -36,6 +36,14 @@ export interface Repository {
      * When absent, the tool falls back to auto-selecting a credential by host match.
      */
     CredentialId?: string;
+
+    /**
+     * Optional, user-entered, short human-readable description of the
+     * repository. Trimmed and capped at `MAX_REPOSITORY_DESCRIPTION_LENGTH`
+     * (see `config.constants.ts`) by `RepositoryManager.add()`/`.update()`.
+     * Absent when never set, or after being cleared via an empty string.
+     */
+    Description?: string;
 }
 
 /**

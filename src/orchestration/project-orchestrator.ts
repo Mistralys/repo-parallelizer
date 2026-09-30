@@ -3,12 +3,8 @@ import * as path from 'node:path';
 import type { AppConfig } from '../config/config.types.js';
 import type { ProjectManager } from '../models/project/project.manager.js';
 import { STABLE_WORKSPACE_ID } from '../models/workspace/workspace.types.js';
-import {
-    generateWorkspaceFile,
-    removeWorkspaceFile,
-    getWorkspaceFilePath,
-} from './vscode-workspace.js';
 import type { WorkspaceOrchestrator } from './workspace-orchestrator.js';
+import type { WorkspaceArtifactsOrchestrator } from './workspace-artifacts.js';
 import type { OrchestrationResult } from './orchestration.types.js';
 
 /**
@@ -40,6 +36,7 @@ export class ProjectOrchestrator {
         private readonly config: AppConfig,
         private readonly projectManager: ProjectManager,
         private readonly workspaceOrchestrator: WorkspaceOrchestrator,
+        private readonly workspaceArtifacts: WorkspaceArtifactsOrchestrator,
     ) {}
 
     // -------------------------------------------------------------------------
@@ -48,10 +45,6 @@ export class ProjectOrchestrator {
 
     private projectFolder(projectId: string): string {
         return path.join(this.config.projectsFolder, projectId);
-    }
-
-    private wsFilePath(projectId: string, workspaceId: string): string {
-        return getWorkspaceFilePath(this.config.projectsFolder, projectId, workspaceId);
     }
 
     // -------------------------------------------------------------------------
@@ -124,9 +117,10 @@ export class ProjectOrchestrator {
             fs.rmSync(projectFolder, { recursive: true, force: true });
         }
 
-        // Remove the VS Code workspace file for each workspace in the project.
+        // Remove the full artefact set (VS Code workspace file + generated
+        // index files) for each workspace in the project.
         for (const workspaceId of Object.keys(project.Workspaces)) {
-            removeWorkspaceFile(this.wsFilePath(projectId, workspaceId));
+            this.workspaceArtifacts.removeWorkspace(projectId, workspaceId);
         }
 
         // Remove the project data entry and update the project index.
@@ -179,19 +173,14 @@ export class ProjectOrchestrator {
             fs.renameSync(oldProjectFolder, newProjectFolder);
         }
 
-        // For each workspace: remove the stale VS Code workspace file and generate
-        // a new one that reflects the new project ID and updated folder paths.
+        // For each workspace: regenerate the full artefact set under the new
+        // project ID (the project data entry and the on-disk folder have
+        // already been renamed above, so the choke-point resolves the new
+        // paths correctly), then remove the stale artefact set at the old
+        // project path.
         for (const workspaceId of Object.keys(renamedProject.Workspaces)) {
-            const oldFilePath = this.wsFilePath(oldId, workspaceId);
-            const newFilePath = this.wsFilePath(newId, workspaceId);
-
-            const repoPaths = renamedProject.Repositories.map((repoId) => ({
-                slug: repoId,
-                path: path.join(newProjectFolder, workspaceId, repoId),
-            }));
-
-            generateWorkspaceFile(workspaceId, repoPaths, newFilePath);
-            removeWorkspaceFile(oldFilePath);
+            this.workspaceArtifacts.regenerateWorkspace(newId, workspaceId);
+            this.workspaceArtifacts.removeWorkspace(oldId, workspaceId);
         }
     }
 }

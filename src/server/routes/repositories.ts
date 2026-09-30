@@ -1,12 +1,51 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Router } from '../router.js';
 import type { RepositoryManager } from '../../models/repository/repository.manager.js';
+import type { WorkspaceArtifactsOrchestrator } from '../../orchestration/workspace-artifacts.js';
+import type { RepositoryOrchestrator } from '../../orchestration/repository-orchestrator.js';
 import { NotFoundError } from '../../errors.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
 import type { Repository } from '../../models/repository/repository.types.js';
 import type { AppConfig, GitCredentialEntry } from '../../config/config.types.js';
 import type { ErrorLogManager } from '../../error-log/error-log.manager.js';
 import { extractHost, hostsEqual } from '../../git/git-credentials.js';
+import { MAX_REPOSITORY_DESCRIPTION_LENGTH } from '../../config/config.constants.js';
+
+/**
+ * Validates a candidate `description` field extracted from a request body.
+ *
+ * `undefined` is a valid "not provided" value and is accepted as-is. Any other
+ * non-string value, or a string whose trimmed length exceeds
+ * `MAX_REPOSITORY_DESCRIPTION_LENGTH`, is rejected with a `400` naming the
+ * limit. The manager itself trims and re-validates the length again, but
+ * validating here lets the route answer with a precise 400 message before any
+ * manager call, mirroring the `url`/`name` validation already in these
+ * handlers.
+ *
+ * @param res         - The outgoing HTTP response (used to send the 400 error).
+ * @param description - The raw `description` value from the parsed request body.
+ * @returns `true` when `description` is valid (including `undefined`), or
+ *          `false` when a 400 has already been written to `res`.
+ */
+function validateDescription(res: ServerResponse, description: unknown): boolean {
+    if (description === undefined) return true;
+
+    if (typeof description !== 'string') {
+        sendError(res, 400, 'Field description, when provided, must be a string.');
+        return false;
+    }
+
+    if (description.trim().length > MAX_REPOSITORY_DESCRIPTION_LENGTH) {
+        sendError(
+            res,
+            400,
+            `Field description exceeds the maximum length of ${MAX_REPOSITORY_DESCRIPTION_LENGTH} characters.`,
+        );
+        return false;
+    }
+
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // Route registration
@@ -37,8 +76,50 @@ export function registerRepositoryRoutes(
     router: Router,
     repoManager: RepositoryManager,
     appConfig: AppConfig,
+    /**
+     * Choke-point orchestrator for the per-workspace artefact set
+     * (`.code-workspace` + generated index files).
+     *
+     * Consulted directly by `PUT /:id`, which calls `regenerateForRepository()`
+     * after a successful update so an edited description is reflected without
+     * a manual regenerate step — a failure there is logged to
+     * `errorLogManager` at `Severity: 'warning'` and does not affect the
+     * handler's own response (see `logArtifactWarning()` below).
+     * `DELETE /:id` reaches the choke-point indirectly through
+     * `repositoryOrchestrator` instead.
+     */
+    workspaceArtifactsOrchestrator: WorkspaceArtifactsOrchestrator,
+    /**
+     * Orchestrator for repository lifecycle operations across projects.
+     * `DELETE /:id` calls `deleteRepositoryGlobally()` on it so a repository
+     * deletion also removes its clone folders from every referencing project
+     * and regenerates each affected workspace's artefact set.
+     */
+    repositoryOrchestrator: RepositoryOrchestrator,
     errorLogManager?: ErrorLogManager,
 ): void {
+    /**
+     * Records a `Severity: 'warning'` entry when the artefact choke-point call
+     * fails after a `PUT /:id` update has already succeeded. The handler's own
+     * response is unaffected — the artefact set going briefly stale is
+     * preferable to surfacing a 5xx for an edit that otherwise completed
+     * correctly. Mirrors `logArtifactWarning()` in `routes/projects.ts` and
+     * `routes/workspaces.ts`.
+     *
+     * @param repositoryId - The repository ID involved in the operation.
+     * @param err          - The error thrown by the artefact-choke-point call.
+     */
+    function logArtifactWarning(repositoryId: string, err: unknown): void {
+        const message = err instanceof Error ? err.message : String(err);
+        errorLogManager?.append({
+            Severity: 'warning',
+            Source: 'workspace-index',
+            Operation: 'update-repository',
+            Context: { RepositoryId: repositoryId },
+            Message: `Failed to update workspace artefacts after "update-repository": ${message}`,
+        });
+    }
+
     /**
      * Look up a repository by ID.
      *
@@ -188,10 +269,11 @@ export function registerRepositoryRoutes(
             return;
         }
 
-        const { url, name, id } = body as {
+        const { url, name, id, description } = body as {
             url?: unknown;
             name?: unknown;
             id?: unknown;
+            description?: unknown;
         };
 
         if (typeof url !== 'string' || url.trim() === '') {
@@ -199,9 +281,12 @@ export function registerRepositoryRoutes(
             return;
         }
 
-        const params: { url: string; name?: string; id?: string } = { url: url.trim() };
+        if (!validateDescription(res, description)) return;
+
+        const params: { url: string; name?: string; id?: string; description?: string } = { url: url.trim() };
         if (typeof name === 'string') params.name = name;
         if (typeof id === 'string') params.id = id;
+        if (typeof description === 'string') params.description = description;
 
         try {
             const repo = repoManager.add(params);
@@ -240,7 +325,7 @@ export function registerRepositoryRoutes(
             return;
         }
 
-        const { name, url } = body as { name?: unknown; url?: unknown };
+        const { name, url, description } = body as { name?: unknown; url?: unknown; description?: unknown };
 
         if (typeof name !== 'string' || name.trim() === '') {
             sendError(res, 400, 'Missing required field: name (non-empty string).');
@@ -252,8 +337,11 @@ export function registerRepositoryRoutes(
             return;
         }
 
-        const updateParams: { name: string; url?: string } = { name: name.trim() };
+        if (!validateDescription(res, description)) return;
+
+        const updateParams: { name: string; url?: string; description?: string } = { name: name.trim() };
         if (typeof url === 'string') updateParams.url = url;
+        if (typeof description === 'string') updateParams.description = description;
 
         try {
             let updated = repoManager.update(id, updateParams);
@@ -280,6 +368,15 @@ export function registerRepositoryRoutes(
                 }
             }
 
+            // Regenerate the artefact set for every workspace of every
+            // project referencing this repository, so an edited description
+            // is reflected without a manual regenerate step.
+            try {
+                workspaceArtifactsOrchestrator.regenerateForRepository(id);
+            } catch (err) {
+                logArtifactWarning(id, err);
+            }
+
             sendJson(res, 200, updated);
         } catch (err) {
             // update() throws NotFoundError if the ID was removed
@@ -296,6 +393,15 @@ export function registerRepositoryRoutes(
 
     // ------------------------------------------------------------------
     // DELETE /api/repositories/:id — delete
+    //
+    //   Routes through `RepositoryOrchestrator.deleteRepositoryGlobally()`
+    //   rather than `repoManager.remove()` directly, so the deletion also
+    //   removes the repository's clone folders from every referencing project
+    //   and regenerates each affected workspace's artefact set. The existence
+    //   check is performed here (via `resolveRepository`) rather than relying
+    //   on `deleteRepositoryGlobally()`'s own not-found throw, because that
+    //   throw is a plain `Error` (not a `NotFoundError`) and would otherwise
+    //   be misclassified as a 500 below.
     // ------------------------------------------------------------------
     router.delete('/api/repositories/:id', (
         _req: IncomingMessage,
@@ -304,14 +410,12 @@ export function registerRepositoryRoutes(
     ): void => {
         const id = params['id'];
 
+        if (resolveRepository(res, id) === undefined) return;
+
         try {
-            repoManager.remove(id);
-        } catch (err) {
-            if (err instanceof NotFoundError) {
-                sendError(res, 404, `Repository with ID "${id}" not found.`);
-            } else {
-                sendError(res, 500, 'Internal server error.');
-            }
+            repositoryOrchestrator.deleteRepositoryGlobally(id);
+        } catch {
+            sendError(res, 500, 'Internal server error.');
             return;
         }
 

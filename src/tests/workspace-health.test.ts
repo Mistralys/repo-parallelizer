@@ -4,6 +4,8 @@ import * as fs from 'node:fs';
 import * as os from 'os';
 import * as path from 'node:path';
 import { checkWorkspaceHealth } from '../orchestration/workspace-health.js';
+import { GENERATED_BEGIN_MARKER, GENERATED_END_MARKER } from '../orchestration/workspace-index.js';
+import { getToolRoot } from '../utils/paths.js';
 import type { ErrorLogManager } from '../error-log/error-log.manager.js';
 import type { ErrorLogEntry, ErrorLogListOptions, ErrorLogListResult } from '../error-log/error-log.types.js';
 
@@ -78,6 +80,24 @@ function createRepoDotGit(
     fs.mkdirSync(gitDir, { recursive: true });
 }
 
+/**
+ * Writes all three generated index files (marker-managed) into the workspace
+ * folder, so `checkWorkspaceHealth()` sees a fully "healthy" index-file set.
+ * Used by tests whose focus is a different check (workspace file / clone
+ * status / credentials) so the new index-file check does not add unexpected
+ * `workspace-index-missing` issues to their assertions.
+ */
+function createManagedIndexFiles(projectsFolder: string, projectId: string, workspaceId: string): void {
+    const wsFolder = path.join(projectsFolder, projectId, workspaceId);
+    fs.mkdirSync(wsFolder, { recursive: true });
+    for (const name of ['README.md', 'AGENTS.md', 'CLAUDE.md']) {
+        fs.writeFileSync(
+            path.join(wsFolder, name),
+            `${GENERATED_BEGIN_MARKER}\ncontent\n${GENERATED_END_MARKER}\n`,
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -92,6 +112,7 @@ test('returns healthy when workspace file exists and all repos are cloned', () =
     for (const r of repos) {
         createRepoDotGit(base, pid, wid, r);
     }
+    createManagedIndexFiles(base, pid, wid);
 
     const report = checkWorkspaceHealth(pid, wid, base, repos);
 
@@ -107,6 +128,7 @@ test('returns workspace-file-missing issue when .code-workspace does not exist',
 
     // Only create the repo — omit the workspace file.
     createRepoDotGit(base, pid, wid, repos[0]);
+    createManagedIndexFiles(base, pid, wid);
 
     const report = checkWorkspaceHealth(pid, wid, base, repos);
 
@@ -154,6 +176,7 @@ test('reports issues for each uncloned repo individually', () => {
     createWsFile(base, pid, wid);
     // Only clone repo-a.
     createRepoDotGit(base, pid, wid, 'repo-a');
+    createManagedIndexFiles(base, pid, wid);
 
     const report = checkWorkspaceHealth(pid, wid, base, repos);
 
@@ -226,6 +249,7 @@ test('.git file (not directory) does not satisfy the cloned check', () => {
     const repoDir = path.join(base, pid, wid, repoId);
     fs.mkdirSync(repoDir, { recursive: true });
     fs.writeFileSync(path.join(repoDir, '.git'), 'gitdir: ../../.git/worktrees/shallow');
+    createManagedIndexFiles(base, pid, wid);
 
     // checkWorkspaceHealth uses fs.existsSync on `.git` path which returns true
     // whether it's a file or directory — so this should be reported as cloned.
@@ -279,6 +303,7 @@ test('omits credential-missing issue when no credentials entries exist for the w
 
     createWsFile(base, pid, wid);
     createRepoDotGit(base, pid, wid, 'repo-a');
+    createManagedIndexFiles(base, pid, wid);
 
     const errorLogManager = makeMockErrorLogManager([]);
 
@@ -295,6 +320,7 @@ test('omits credential-missing issues for entries scoped to a different workspac
 
     createWsFile(base, pid, wid);
     createRepoDotGit(base, pid, wid, 'repo-a');
+    createManagedIndexFiles(base, pid, wid);
 
     // Entry is for a different workspace.
     const credEntry: ErrorLogEntry = {
@@ -347,6 +373,7 @@ test('omits credential-missing issues when errorLogManager is not provided', () 
 
     createWsFile(base, pid, wid);
     createRepoDotGit(base, pid, wid, 'repo-a');
+    createManagedIndexFiles(base, pid, wid);
 
     // No errorLogManager passed — credential check is skipped.
     const report = checkWorkspaceHealth(pid, wid, base, ['repo-a']);
@@ -366,6 +393,7 @@ test('suppresses credential-missing issue when most recent credentials entry is 
 
     createWsFile(base, pid, wid);
     createRepoDotGit(base, pid, wid, 'repo-a');
+    createManagedIndexFiles(base, pid, wid);
 
     // Older error entry first (lower Id), newer info entry second (higher Id).
     // list() returns entries newest-first, so the info entry is seen first.
@@ -445,6 +473,7 @@ test('suppresses credential-missing when info entry is the only credentials entr
 
     createWsFile(base, pid, wid);
     createRepoDotGit(base, pid, wid, 'repo-a');
+    createManagedIndexFiles(base, pid, wid);
 
     const infoEntry: ErrorLogEntry = {
         Id: 1,
@@ -461,4 +490,99 @@ test('suppresses credential-missing when info entry is the only credentials entr
 
     assert.strictEqual(report.healthy, true);
     assert.ok(!report.issues.some((i) => i.type === 'credential-missing'));
+});
+
+// ---------------------------------------------------------------------------
+// Generated index-file issues (WP-08)
+// ---------------------------------------------------------------------------
+
+test('returns workspace-index-missing issue when the workspace folder exists but no index files are present', () => {
+    const base = makeTempDir();
+    const pid = 'proj';
+    const wid = 'DEV';
+
+    createWsFile(base, pid, wid);
+    createRepoDotGit(base, pid, wid, 'repo-a');
+    // Index files intentionally omitted.
+
+    const report = checkWorkspaceHealth(pid, wid, base, ['repo-a']);
+
+    assert.strictEqual(report.healthy, false);
+    const issue = report.issues.find((i) => i.type === 'workspace-index-missing');
+    assert.ok(issue, 'workspace-index-missing issue should be present');
+    assert.strictEqual(issue.severity, 'warning');
+    assert.strictEqual(issue.fixAction, 'regenerate-workspace-file');
+    assert.ok(issue.message.includes('README.md'));
+    assert.ok(issue.message.includes('AGENTS.md'));
+    assert.ok(issue.message.includes('CLAUDE.md'));
+});
+
+test('does not report workspace-index-missing when the workspace folder does not exist on disk', () => {
+    const base = makeTempDir();
+    const pid = 'proj';
+    const wid = 'DEV';
+
+    // Project directory exists (from createWsFile), but the workspace
+    // subfolder itself is never created.
+    createWsFile(base, pid, wid);
+
+    const report = checkWorkspaceHealth(pid, wid, base, []);
+
+    assert.strictEqual(report.healthy, true);
+    assert.ok(!report.issues.some((i) => i.type.startsWith('workspace-index-')));
+});
+
+test('returns workspace-index-unmanaged issue for a hand-authored index file, without also reporting it missing', () => {
+    const base = makeTempDir();
+    const pid = 'proj';
+    const wid = 'DEV';
+
+    createWsFile(base, pid, wid);
+    createRepoDotGit(base, pid, wid, 'repo-a');
+
+    const wsFolder = path.join(base, pid, wid);
+    // Two files are managed (contain the generated marker)...
+    fs.writeFileSync(path.join(wsFolder, 'README.md'), `${GENERATED_BEGIN_MARKER}\ncontent\n${GENERATED_END_MARKER}\n`);
+    fs.writeFileSync(path.join(wsFolder, 'AGENTS.md'), `${GENERATED_BEGIN_MARKER}\ncontent\n${GENERATED_END_MARKER}\n`);
+    // ...but CLAUDE.md is hand-authored (no marker).
+    fs.writeFileSync(path.join(wsFolder, 'CLAUDE.md'), '# My own notes, not generated by paralizer.\n');
+
+    const report = checkWorkspaceHealth(pid, wid, base, ['repo-a']);
+
+    assert.strictEqual(report.healthy, false);
+    assert.ok(!report.issues.some((i) => i.type === 'workspace-index-missing'), 'no file is missing — all three exist');
+
+    const issue = report.issues.find((i) => i.type === 'workspace-index-unmanaged');
+    assert.ok(issue, 'workspace-index-unmanaged issue should be present');
+    assert.strictEqual(issue.severity, 'warning');
+    assert.strictEqual(issue.fixAction, 'none');
+    assert.ok(issue.message.includes('CLAUDE.md'));
+    assert.ok(!issue.message.includes('README.md'));
+});
+
+test('checkWorkspaceHealth remains side-effect free with respect to index files', () => {
+    const base = makeTempDir();
+    const pid = 'proj';
+    const wid = 'DEV';
+
+    createWsFile(base, pid, wid);
+    createRepoDotGit(base, pid, wid, 'repo-a');
+    // No index files created — the check must not create, fix, or otherwise
+    // write anything as a side effect of reporting them missing.
+
+    checkWorkspaceHealth(pid, wid, base, ['repo-a']);
+    checkWorkspaceHealth(pid, wid, base, ['repo-a']);
+
+    const wsFolder = path.join(base, pid, wid);
+    for (const name of ['README.md', 'AGENTS.md', 'CLAUDE.md']) {
+        assert.ok(!fs.existsSync(path.join(wsFolder, name)), `${name} should not be created by a health check`);
+    }
+});
+
+test('source: workspace-health.ts does not import GENERATED_BEGIN_MARKER or hardcode the marker string', () => {
+    const sourcePath = path.join(getToolRoot(), 'src', 'orchestration', 'workspace-health.ts');
+    const source = fs.readFileSync(sourcePath, 'utf8');
+
+    assert.ok(!source.includes('GENERATED_BEGIN_MARKER'), 'workspace-health.ts must not import or reference GENERATED_BEGIN_MARKER');
+    assert.ok(!source.includes('paralizer:generated:begin'), 'workspace-health.ts must not hardcode the marker string');
 });

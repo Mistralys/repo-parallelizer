@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getWorkspaceFilePath } from './vscode-workspace.js';
+import { checkIndexFileStatus } from './workspace-index.js';
 import type { ErrorLogManager } from '../error-log/error-log.manager.js';
 
 export interface WorkspaceHealthIssue {
@@ -23,7 +24,15 @@ export interface WorkspaceHealthReport {
  * 1. Whether the VS Code .code-workspace file exists on disk.
  * 2. Whether each repository directory contains a `.git` entry
  *    (i.e. has been successfully cloned).
- * 3. (Optional) Whether the error log contains recent credential-missing entries
+ * 3. Whether the three generated index files (`README.md`, `AGENTS.md`,
+ *    `CLAUDE.md`) are present and marker-managed, via the read-only
+ *    {@link checkIndexFileStatus} probe. This function never inspects an
+ *    index file's content itself, and never imports the generated-marker
+ *    constants — {@link checkIndexFileStatus} is the single source of truth
+ *    for marker detection (shared with the writer and remover in
+ *    `workspace-index.ts`), so this check cannot drift out of sync with what
+ *    the writer considers managed vs. hand-authored.
+ * 4. (Optional) Whether the error log contains recent credential-missing entries
  *    for repositories in this workspace. Only performed when `errorLogManager`
  *    is provided.
  *
@@ -91,7 +100,32 @@ export function checkWorkspaceHealth(
         }
     }
 
-    // Check 3: (Optional) Credential-missing errors from the most recent credential operation.
+    // Check 3: Generated index-file status (README.md / AGENTS.md / CLAUDE.md).
+    // checkIndexFileStatus() already returns empty arrays when the workspace
+    // folder does not exist, so no separate folder-existence branch is needed
+    // here — an uninitialised workspace naturally reports no index issues.
+    const indexStatus = checkIndexFileStatus(projectsFolder, projectId, workspaceId);
+    if (indexStatus.missing.length > 0) {
+        issues.push({
+            type: 'workspace-index-missing',
+            severity: 'warning',
+            message: `Generated index file(s) missing: ${indexStatus.missing.join(', ')}.`,
+            fixAction: 'regenerate-workspace-file',
+        });
+    }
+    if (indexStatus.unmanaged.length > 0) {
+        issues.push({
+            type: 'workspace-index-unmanaged',
+            severity: 'warning',
+            message: `Index file(s) are hand-authored and not managed by paralizer: ${indexStatus.unmanaged.join(', ')}.`,
+            // No automated fix is offered for a hand-authored file — regenerating
+            // would either be a silent no-op (the writer already skips it) or,
+            // if forced, would clobber content the user wrote deliberately.
+            fixAction: 'none',
+        });
+    }
+
+    // Check 4: (Optional) Credential-missing errors from the most recent credential operation.
     // Query all credential entries (both 'error' and 'info') for this workspace
     // and inspect the most recent entry per repository. A 'credential-missing'
     // health issue is only surfaced when the most recent entry has Severity: 'error'.

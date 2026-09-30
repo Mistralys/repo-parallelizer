@@ -5,13 +5,114 @@ import { registerProjectRoutes } from '../../routes/projects.js';
 import { NotFoundError } from '../../../errors.js';
 import type { ProjectData, ProjectIndexEntry } from '../../../models/project/project.types.js';
 import { mockRequest, mockResponse, type MockResponse } from '../helpers/mock-http.js';
+import { makeMockErrorLogManager } from '../helpers/mock-error-log-manager.js';
+
+// ---------------------------------------------------------------------------
+// Mock WorkspaceArtifactsOrchestrator
+// ---------------------------------------------------------------------------
+
+/**
+ * Records every call made to the artefact choke-point so tests can assert on
+ * which method was invoked with which arguments, and can optionally be
+ * configured (`shouldThrow`) to exercise the AC-20 contract-preservation path
+ * — a failure inside the choke-point must not affect the handler's own
+ * response, beyond appending a `Severity: 'warning'` entry to the error log.
+ */
+class MockWorkspaceArtifacts {
+    calls: { method: string; args: unknown[] }[] = [];
+    shouldThrow = false;
+
+    private record(method: string, args: unknown[]): void {
+        this.calls.push({ method, args });
+        if (this.shouldThrow) {
+            throw new Error(`Simulated ${method} failure.`);
+        }
+    }
+
+    regenerateWorkspace(projectId: string, workspaceId: string): void {
+        this.record('regenerateWorkspace', [projectId, workspaceId]);
+    }
+
+    removeWorkspace(projectId: string, workspaceId: string): void {
+        this.record('removeWorkspace', [projectId, workspaceId]);
+    }
+
+    regenerateProject(projectId: string): void {
+        this.record('regenerateProject', [projectId]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fake RepositoryOrchestrator
+// ---------------------------------------------------------------------------
+
+/**
+ * Records every call to `removeRepositoryFromProject()` and, unless configured
+ * to simulate a path-guard rejection via `shouldThrowPathGuard`, mirrors the
+ * real `RepositoryOrchestrator` method's externally-observable side effects
+ * against the injected fakes: mutating the project's repository list via
+ * `pm.removeRepository()`, unconditionally appending the `unlink-repository`
+ * audit entry, then best-effort regenerating the artefact set (a throwing
+ * choke-point here logs a `Severity: 'warning'` entry instead of propagating).
+ *
+ * This lets the route-level tests assert delegation (call arguments) while
+ * still exercising the route's own 404-before-call and 500-after-throw
+ * branches without duplicating the orchestrator's own unit tests.
+ */
+class FakeRepositoryOrchestrator {
+    calls: { method: string; args: unknown[] }[] = [];
+    shouldThrowPathGuard = false;
+
+    constructor(
+        private readonly pm: MockProjectManager,
+        private readonly artifacts: MockWorkspaceArtifacts,
+        private readonly errorLog: ReturnType<typeof makeMockErrorLogManager>,
+    ) {}
+
+    removeRepositoryFromProject(projectId: string, repositoryId: string): void {
+        this.calls.push({ method: 'removeRepositoryFromProject', args: [projectId, repositoryId] });
+
+        if (this.shouldThrowPathGuard) {
+            throw new Error(
+                `Security check failed: clone path is not under projectsFolder "${projectId}".`,
+            );
+        }
+
+        this.pm.removeRepository(projectId, repositoryId);
+
+        this.errorLog.append({
+            Severity: 'audit',
+            Source: 'repository-audit',
+            Operation: 'unlink-repository',
+            Context: { ProjectId: projectId, RepositoryId: repositoryId },
+            Message: `Repository "${repositoryId}" was unlinked from project "${projectId}" and its clone folders removed.`,
+        });
+
+        try {
+            this.artifacts.regenerateProject(projectId);
+        } catch (err) {
+            this.errorLog.append({
+                Severity: 'warning',
+                Source: 'workspace-index',
+                Operation: 'unlink-repository',
+                Context: { ProjectId: projectId, RepositoryId: repositoryId },
+                Message: `Failed to regenerate workspace artefacts for project "${projectId}" after ` +
+                    `unlinking repository "${repositoryId}": ${err instanceof Error ? err.message : String(err)}`,
+            });
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Mock ProjectManager
 // ---------------------------------------------------------------------------
 
-function makeProject(id: string, name: string, repoIds: string[] = []): ProjectData {
+function makeProject(id: string, name: string, repoIds: string[] = [], workspaceIds: string[] = ['STABLE']): ProjectData {
     const now = new Date().toISOString();
+    const workspaces: ProjectData['Workspaces'] = {};
+    for (const workspaceId of workspaceIds) {
+        workspaces[workspaceId] = { Description: `${workspaceId} workspace`, DateCreated: now, DateModified: now };
+    }
     return {
         Id: id,
         Name: name,
@@ -19,7 +120,7 @@ function makeProject(id: string, name: string, repoIds: string[] = []): ProjectD
         DateCreated: now,
         DateModified: now,
         Repositories: [...repoIds],
-        Workspaces: { STABLE: { Description: 'Stable workspace', DateCreated: now, DateModified: now } },
+        Workspaces: workspaces,
         SchemaVersion: 1,
     };
 }
@@ -115,11 +216,20 @@ class MockProjectManager {
     }
 }
 
-function buildSut(): { router: Router; pm: MockProjectManager } {
+function buildSut(): {
+    router: Router;
+    pm: MockProjectManager;
+    artifacts: MockWorkspaceArtifacts;
+    errorLog: ReturnType<typeof makeMockErrorLogManager>;
+    repositoryOrchestrator: FakeRepositoryOrchestrator;
+} {
     const router = new Router();
     const pm = new MockProjectManager();
-    registerProjectRoutes(router, pm as never);
-    return { router, pm };
+    const artifacts = new MockWorkspaceArtifacts();
+    const errorLog = makeMockErrorLogManager();
+    const repositoryOrchestrator = new FakeRepositoryOrchestrator(pm, artifacts, errorLog);
+    registerProjectRoutes(router, pm as never, artifacts as never, repositoryOrchestrator as never, errorLog);
+    return { router, pm, artifacts, errorLog, repositoryOrchestrator };
 }
 
 /** Waits two process ticks so async route handlers can resolve. */
@@ -266,6 +376,41 @@ test('PUT /api/projects/:id: returns 200 with updated project on valid name chan
     assert.strictEqual(updated.Name, 'New Name');
 });
 
+test('PUT /api/projects/:id: regenerates the artefact set for every workspace on success', async () => {
+    const { router, pm, artifacts } = buildSut();
+    pm.seed([makeProject('my-proj', 'Old Name')]);
+
+    const req = mockRequest('PUT', '/api/projects/my-proj', { name: 'New Name' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.deepEqual(
+        artifacts.calls.map((c) => c.method),
+        ['regenerateProject'],
+    );
+    assert.deepEqual(artifacts.calls[0].args, ['my-proj']);
+});
+
+test('PUT /api/projects/:id: a throwing choke-point does not change the 200 response, but logs a warning', async () => {
+    const { router, pm, artifacts, errorLog } = buildSut();
+    pm.seed([makeProject('my-proj', 'Old Name')]);
+    artifacts.shouldThrow = true;
+
+    const req = mockRequest('PUT', '/api/projects/my-proj', { name: 'New Name' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as ProjectData;
+    assert.strictEqual(updated.Name, 'New Name');
+    assert.strictEqual(errorLog.appendedEntries.length, 1);
+    assert.strictEqual(errorLog.appendedEntries[0].Severity, 'warning');
+    assert.strictEqual(errorLog.appendedEntries[0].Source, 'workspace-index');
+});
+
 test('PUT /api/projects/:id: returns 404 when project does not exist', async () => {
     const { router } = buildSut();
     const req = mockRequest('PUT', '/api/projects/ghost', { name: 'Ghost' });
@@ -330,6 +475,42 @@ test('PUT /api/projects/:id/rename: returns 400 when newId is missing', async ()
     assert.strictEqual(mock.statusCode, 400);
 });
 
+test('PUT /api/projects/:id/rename: regenerates artefacts under the new ID and removes them under the old ID', async () => {
+    const { router, pm, artifacts } = buildSut();
+    pm.seed([makeProject('old-id', 'My Project')]);
+
+    const req = mockRequest('PUT', '/api/projects/old-id/rename', { newId: 'new-id' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.deepEqual(
+        artifacts.calls.map((c) => c.method),
+        ['regenerateWorkspace', 'removeWorkspace'],
+    );
+    assert.deepEqual(artifacts.calls[0].args, ['new-id', 'STABLE']);
+    assert.deepEqual(artifacts.calls[1].args, ['old-id', 'STABLE']);
+});
+
+test('PUT /api/projects/:id/rename: AC-20 — a throwing choke-point does not change the 200 response, but logs a warning', async () => {
+    const { router, pm, artifacts, errorLog } = buildSut();
+    pm.seed([makeProject('old-id', 'My Project')]);
+    artifacts.shouldThrow = true;
+
+    const req = mockRequest('PUT', '/api/projects/old-id/rename', { newId: 'new-id' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const renamed = JSON.parse(mock.body) as ProjectData;
+    assert.strictEqual(renamed.Id, 'new-id');
+    assert.strictEqual(errorLog.appendedEntries.length, 1);
+    assert.strictEqual(errorLog.appendedEntries[0].Severity, 'warning');
+    assert.strictEqual(errorLog.appendedEntries[0].Source, 'workspace-index');
+});
+
 // ---------------------------------------------------------------------------
 // DELETE /api/projects/:id — delete
 // ---------------------------------------------------------------------------
@@ -354,6 +535,36 @@ test('DELETE /api/projects/:id: returns 404 when project does not exist', () => 
     assert.strictEqual(mock.statusCode, 404);
     const parsed = JSON.parse(mock.body) as { error: string };
     assert.ok(typeof parsed.error === 'string');
+});
+
+test('DELETE /api/projects/:id: removes the artefact set for every workspace of the deleted project', () => {
+    const { router, pm, artifacts } = buildSut();
+    pm.seed([makeProject('to-delete', 'To Delete', [], ['STABLE', 'DEV'])]);
+
+    const req = mockRequest('DELETE', '/api/projects/to-delete');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 204);
+    assert.deepEqual(artifacts.calls, [
+        { method: 'removeWorkspace', args: ['to-delete', 'STABLE'] },
+        { method: 'removeWorkspace', args: ['to-delete', 'DEV'] },
+    ]);
+});
+
+test('DELETE /api/projects/:id: AC-20 — a throwing choke-point does not change the 204 response, but logs a warning', () => {
+    const { router, pm, artifacts, errorLog } = buildSut();
+    pm.seed([makeProject('to-delete', 'To Delete')]);
+    artifacts.shouldThrow = true;
+
+    const req = mockRequest('DELETE', '/api/projects/to-delete');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 204);
+    assert.strictEqual(errorLog.appendedEntries.length, 1);
+    assert.strictEqual(errorLog.appendedEntries[0].Severity, 'warning');
+    assert.strictEqual(errorLog.appendedEntries[0].Source, 'workspace-index');
 });
 
 // ---------------------------------------------------------------------------
@@ -398,12 +609,43 @@ test('POST /api/projects/:id/repositories: returns 400 when repositoryId is miss
     assert.strictEqual(mock.statusCode, 400);
 });
 
+test('POST /api/projects/:id/repositories: regenerates the project\'s artefact set', async () => {
+    const { router, pm, artifacts } = buildSut();
+    pm.seed([makeProject('my-proj', 'My Project')]);
+
+    const req = mockRequest('POST', '/api/projects/my-proj/repositories', { repositoryId: 'repo-a' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.deepEqual(artifacts.calls, [{ method: 'regenerateProject', args: ['my-proj'] }]);
+});
+
+test('POST /api/projects/:id/repositories: AC-20 — a throwing choke-point does not change the 200 response, but logs a warning', async () => {
+    const { router, pm, artifacts, errorLog } = buildSut();
+    pm.seed([makeProject('my-proj', 'My Project')]);
+    artifacts.shouldThrow = true;
+
+    const req = mockRequest('POST', '/api/projects/my-proj/repositories', { repositoryId: 'repo-a' });
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    const updated = JSON.parse(mock.body) as ProjectData;
+    assert.ok(updated.Repositories.includes('repo-a'));
+    assert.strictEqual(errorLog.appendedEntries.length, 1);
+    assert.strictEqual(errorLog.appendedEntries[0].Severity, 'warning');
+    assert.strictEqual(errorLog.appendedEntries[0].Source, 'workspace-index');
+});
+
 // ---------------------------------------------------------------------------
 // DELETE /api/projects/:id/repositories/:repoId — unlink a repo
 // ---------------------------------------------------------------------------
 
-test('DELETE /api/projects/:id/repositories/:repoId: returns 204 on success', () => {
-    const { router, pm } = buildSut();
+test('DELETE /api/projects/:id/repositories/:repoId: returns 204 on success and delegates to the orchestrator', () => {
+    const { router, pm, repositoryOrchestrator } = buildSut();
     pm.seed([makeProject('my-proj', 'My Project', ['repo-a', 'repo-b'])]);
 
     const req = mockRequest('DELETE', '/api/projects/my-proj/repositories/repo-a');
@@ -412,10 +654,42 @@ test('DELETE /api/projects/:id/repositories/:repoId: returns 204 on success', ()
 
     assert.strictEqual(mock.statusCode, 204);
     assert.deepEqual(pm.getById('my-proj')?.Repositories, ['repo-b']);
+    assert.deepEqual(repositoryOrchestrator.calls, [
+        { method: 'removeRepositoryFromProject', args: ['my-proj', 'repo-a'] },
+    ]);
 });
 
-test('DELETE /api/projects/:id/repositories/:repoId: returns 404 when project does not exist', () => {
-    const { router } = buildSut();
+test('DELETE /api/projects/:id/repositories/:repoId: emits an unlink-repository audit entry on success', () => {
+    const { router, pm, errorLog } = buildSut();
+    pm.seed([makeProject('my-proj', 'My Project', ['repo-a', 'repo-b'])]);
+
+    const req = mockRequest('DELETE', '/api/projects/my-proj/repositories/repo-a');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 204);
+    const auditEntry = errorLog.appendedEntries.find((e) => e.Operation === 'unlink-repository' && e.Severity === 'audit');
+    assert.ok(auditEntry, 'expected an audit-severity unlink-repository entry');
+    assert.deepEqual(auditEntry?.Context, { ProjectId: 'my-proj', RepositoryId: 'repo-a' });
+});
+
+test('DELETE /api/projects/:id/repositories/:repoId: unlinks from every workspace of a multi-workspace project', () => {
+    const { router, pm, repositoryOrchestrator } = buildSut();
+    pm.seed([makeProject('my-proj', 'My Project', ['repo-a', 'repo-b'], ['STABLE', 'DEV'])]);
+
+    const req = mockRequest('DELETE', '/api/projects/my-proj/repositories/repo-a');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 204);
+    assert.deepEqual(pm.getById('my-proj')?.Repositories, ['repo-b']);
+    assert.deepEqual(repositoryOrchestrator.calls, [
+        { method: 'removeRepositoryFromProject', args: ['my-proj', 'repo-a'] },
+    ]);
+});
+
+test('DELETE /api/projects/:id/repositories/:repoId: returns 404 when project does not exist and does not call the orchestrator', () => {
+    const { router, repositoryOrchestrator } = buildSut();
     const req = mockRequest('DELETE', '/api/projects/ghost/repositories/repo-a');
     const mock = mockResponse();
     router.handle(req, mock.res);
@@ -423,10 +697,11 @@ test('DELETE /api/projects/:id/repositories/:repoId: returns 404 when project do
     assert.strictEqual(mock.statusCode, 404);
     const parsed = JSON.parse(mock.body) as { error: string };
     assert.ok(typeof parsed.error === 'string');
+    assert.deepEqual(repositoryOrchestrator.calls, []);
 });
 
-test('DELETE /api/projects/:id/repositories/:repoId: returns 404 when repo is not linked', () => {
-    const { router, pm } = buildSut();
+test('DELETE /api/projects/:id/repositories/:repoId: returns 404 when repo is not linked and does not call the orchestrator', () => {
+    const { router, pm, repositoryOrchestrator } = buildSut();
     pm.seed([makeProject('my-proj', 'My Project', ['repo-b'])]);
 
     const req = mockRequest('DELETE', '/api/projects/my-proj/repositories/repo-a');
@@ -434,4 +709,49 @@ test('DELETE /api/projects/:id/repositories/:repoId: returns 404 when repo is no
     router.handle(req, mock.res);
 
     assert.strictEqual(mock.statusCode, 404);
+    assert.deepEqual(repositoryOrchestrator.calls, []);
+    assert.deepEqual(pm.getById('my-proj')?.Repositories, ['repo-b']);
+});
+
+test('DELETE /api/projects/:id/repositories/:repoId: returns 500 when the orchestrator rejects the clone path', () => {
+    const { router, pm, repositoryOrchestrator } = buildSut();
+    pm.seed([makeProject('my-proj', 'My Project', ['repo-a', 'repo-b'])]);
+    repositoryOrchestrator.shouldThrowPathGuard = true;
+
+    const req = mockRequest('DELETE', '/api/projects/my-proj/repositories/repo-a');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 500);
+    // No filesystem/data mutation performed by the (fake) orchestrator when it throws.
+    assert.deepEqual(pm.getById('my-proj')?.Repositories, ['repo-a', 'repo-b']);
+});
+
+test('DELETE /api/projects/:id/repositories/:repoId: regenerates the project\'s artefact set', () => {
+    const { router, pm, artifacts } = buildSut();
+    pm.seed([makeProject('my-proj', 'My Project', ['repo-a', 'repo-b'])]);
+
+    const req = mockRequest('DELETE', '/api/projects/my-proj/repositories/repo-a');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 204);
+    assert.deepEqual(artifacts.calls, [{ method: 'regenerateProject', args: ['my-proj'] }]);
+});
+
+test('DELETE /api/projects/:id/repositories/:repoId: returns 204 when artefact regeneration fails after the mutation succeeded, and logs a warning', () => {
+    const { router, pm, artifacts, errorLog } = buildSut();
+    pm.seed([makeProject('my-proj', 'My Project', ['repo-a', 'repo-b'])]);
+    artifacts.shouldThrow = true;
+
+    const req = mockRequest('DELETE', '/api/projects/my-proj/repositories/repo-a');
+    const mock = mockResponse();
+    router.handle(req, mock.res);
+
+    assert.strictEqual(mock.statusCode, 204);
+    assert.deepEqual(pm.getById('my-proj')?.Repositories, ['repo-b']);
+    const warningEntry = errorLog.appendedEntries.find((e) => e.Severity === 'warning');
+    assert.ok(warningEntry, 'expected a warning entry for the failed regeneration');
+    assert.strictEqual(warningEntry?.Source, 'workspace-index');
+    assert.strictEqual(warningEntry?.Operation, 'unlink-repository');
 });

@@ -9,6 +9,7 @@ import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import { WorkspaceOrchestrator } from '../orchestration/workspace-orchestrator.js';
+import { WorkspaceArtifactsOrchestrator } from '../orchestration/workspace-artifacts.js';
 import { RepositoryOrchestrator } from '../orchestration/repository-orchestrator.js';
 import { ErrorLogManager } from '../error-log/error-log.manager.js';
 import type { AppConfig } from '../config/config.types.js';
@@ -68,8 +69,9 @@ async function makeFixture(base: string): Promise<TestFixture> {
     const repoManager = new RepositoryManager(config);
     const projectManager = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
-    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
-    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
+    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts);
 
     repoManager.add({ url: originRepoPath, id: 'repo-a' });
     repoManager.add({ url: origin2RepoPath, id: 'repo-b' });
@@ -120,6 +122,17 @@ test('addRepositoryToProject updates VS Code workspace file to include new repo'
     assert.ok(repoPaths.includes(expectedRepoB), 'VS Code workspace file should include repo-b path');
 });
 
+test('addRepositoryToProject updates the repository table in every affected workspace index', async () => {
+    const { config, orchestrator, projectId } = await makeFixture(makeTempDir());
+    await orchestrator.addRepositoryToProject(projectId, 'repo-b');
+
+    const readme = fs.readFileSync(
+        path.join(config.projectsFolder, projectId, 'STABLE', 'README.md'),
+        'utf8',
+    );
+    assert.ok(readme.includes('repo-b'), 'README repository table should include the newly added repo-b');
+});
+
 test('addRepositoryToProject updates project data to include new repo', async () => {
     const { orchestrator, projectManager, projectId } = await makeFixture(makeTempDir());
     await orchestrator.addRepositoryToProject(projectId, 'repo-b');
@@ -146,8 +159,9 @@ test('addRepositoryToProject captures failure for unreachable repo without abort
     const repoManager = new RepositoryManager(config);
     const projectManager = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
-    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
-    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
+    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts);
 
     repoManager.add({ url: originRepoPath, id: 'repo-a' });
     repoManager.add({ url: '/nonexistent/bad-repo', id: 'bad-repo' });
@@ -191,8 +205,9 @@ test('addRepositoryToProject rejects a clone path that resolves outside projects
     const repoManager = new RepositoryManager(config);
     const projectManager = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
-    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
-    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
+    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts);
 
     // Seed one legitimate repo so the project can be created.
     repoManager.add({ url: originRepoPath, id: 'repo-a' });
@@ -276,6 +291,33 @@ test('removeRepositoryFromProject updates VS Code workspace files to exclude the
     assert.ok(repoPaths.includes(remainingPath), 'VS Code workspace file should still include repo-b path');
 });
 
+test('removeRepositoryFromProject updates the repository table in every affected workspace index', async () => {
+    const base = makeTempDir();
+    const { config, orchestrator, workspaceManager, workspaceOrchestrator, projectId } = await makeFixture(base);
+    await orchestrator.addRepositoryToProject(projectId, 'repo-b');
+
+    // Add a second (DEV) workspace so the assertion covers "every affected
+    // workspace index", not just the fixture's default STABLE workspace.
+    workspaceManager.create(projectId, 'DEV');
+    await workspaceOrchestrator.createWorkspace(projectId, 'DEV');
+
+    orchestrator.removeRepositoryFromProject(projectId, 'repo-a');
+
+    const stableReadme = fs.readFileSync(
+        path.join(config.projectsFolder, projectId, 'STABLE', 'README.md'),
+        'utf8',
+    );
+    assert.ok(!stableReadme.includes('| repo-a |'), 'STABLE README repository table should no longer list repo-a');
+    assert.ok(stableReadme.includes('repo-b'), 'STABLE README repository table should still list repo-b');
+
+    const devReadme = fs.readFileSync(
+        path.join(config.projectsFolder, projectId, 'DEV', 'README.md'),
+        'utf8',
+    );
+    assert.ok(!devReadme.includes('| repo-a |'), 'DEV README repository table should no longer list repo-a');
+    assert.ok(devReadme.includes('repo-b'), 'DEV README repository table should still list repo-b');
+});
+
 test('removeRepositoryFromProject updates project data to exclude the repo', async () => {
     const { orchestrator, projectManager, projectId } = await makeFixture(makeTempDir());
     orchestrator.removeRepositoryFromProject(projectId, 'repo-a');
@@ -291,7 +333,8 @@ test('removeRepositoryFromProject succeeds when clone folder does not exist on d
 
     const repoManager = new RepositoryManager(config);
     const projectManager = new ProjectManager(config, repoManager);
-    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts);
 
     repoManager.add({ url: originRepoPath, id: 'repo-a' });
     // Create project data without cloning
@@ -311,6 +354,231 @@ test('removeRepositoryFromProject throws when project does not exist', async () 
         () => orchestrator.removeRepositoryFromProject('nonexistent-project', 'repo-a'),
         /does not exist/,
     );
+});
+
+test('removeRepositoryFromProject throws and deletes no clone folder when the repository is not listed in the project', async () => {
+    const { config, orchestrator, projectId } = await makeFixture(makeTempDir());
+
+    const cloneDir = path.join(config.projectsFolder, projectId, 'STABLE', 'repo-b');
+    assert.ok(!fs.existsSync(cloneDir), 'precondition: repo-b was never cloned into this project');
+
+    // repo-b exists globally but was never added to this project.
+    assert.throws(
+        () => orchestrator.removeRepositoryFromProject(projectId, 'repo-b'),
+        /is not listed in project/,
+    );
+
+    // The pre-loop association check must fire before any deletion is attempted,
+    // and the existing repo-a clone folder must be left untouched.
+    assert.ok(!fs.existsSync(cloneDir), 'no clone folder should have been created or touched for repo-b');
+    const repoAClone = path.join(config.projectsFolder, projectId, 'STABLE', 'repo-a');
+    assert.ok(fs.existsSync(repoAClone), 'the unrelated repo-a clone folder must remain untouched');
+});
+
+// ─── removeRepositoryFromProject: realpath symlink-escape guard ──────────────
+
+test('removeRepositoryFromProject rejects a broken leaf symlink resolving outside projectsFolder, without deleting it', async () => {
+    const { config, orchestrator, projectId } = await makeFixture(makeTempDir());
+
+    const clonePath = path.join(config.projectsFolder, projectId, 'STABLE', 'repo-a');
+    assert.ok(fs.existsSync(clonePath), 'precondition: repo-a clone should exist as a real directory');
+
+    // Replace the real clone directory with a broken symlink pointing outside projectsFolder.
+    fs.rmSync(clonePath, { recursive: true, force: true });
+    const outsideTarget = path.join(tmpRoot, 'escape-target-does-not-exist');
+    fs.symlinkSync(outsideTarget, clonePath);
+
+    assert.throws(
+        () => orchestrator.removeRepositoryFromProject(projectId, 'repo-a'),
+        /Security check failed/,
+    );
+
+    // The planted symlink itself must remain untouched — no fs.rmSync() call.
+    const stat = fs.lstatSync(clonePath);
+    assert.ok(stat.isSymbolicLink(), 'the planted symlink should not have been removed by the guard failure');
+});
+
+test('removeRepositoryFromProject rejects a malformed repository ID that resolves the clone path to projectsFolder itself', async () => {
+    const { config, projectManager, orchestrator, projectId } = await makeFixture(makeTempDir());
+
+    // Simulate a malformed, hand-edited/persisted repository ID that is
+    // already listed in the project's data — bypassing the public-API
+    // validators, since addRepository() would itself reject an ID that
+    // doesn't exist in the global repository store. This ensures the
+    // pre-loop association check passes through to the path-traversal guard
+    // below, which is what this test actually exercises.
+    const projectFilePath = path.join(config.storageFolder, 'projects', `${projectId}.json`);
+    const projectData = JSON.parse(fs.readFileSync(projectFilePath, 'utf8'));
+    projectData.Repositories.push('../..');
+    writeJsonFile(projectFilePath, projectData);
+    assert.ok(projectManager.getById(projectId)!.Repositories.includes('../..'), 'sanity check: malformed ID is listed');
+
+    // repoPath() computes projectsFolder/projectId/workspaceId/repositoryId.
+    // With workspaceId 'STABLE' and repositoryId '../..', the two '..' segments
+    // cancel 'STABLE' and projectId exactly, resolving the clone path to
+    // projectsFolder itself — which the guard must reject before any fs.rmSync().
+    await assert.rejects(
+        async () => orchestrator.removeRepositoryFromProject(projectId, '../..'),
+        /Security check failed/,
+    );
+
+    // projectsFolder itself must still exist — it was never a deletion target.
+    assert.ok(fs.existsSync(config.projectsFolder), 'projectsFolder must not have been removed');
+});
+
+test('removeRepositoryFromProject still deletes a legitimate clone when projectsFolder itself sits behind a symlink', async () => {
+    const base = makeTempDir();
+    const realProjectsFolder = path.join(base, 'real-projects');
+    const symlinkedProjectsFolder = path.join(base, 'symlinked-projects');
+    fs.mkdirSync(realProjectsFolder, { recursive: true });
+    fs.symlinkSync(realProjectsFolder, symlinkedProjectsFolder);
+
+    const config = makeTestConfig(base, { projectsFolder: symlinkedProjectsFolder });
+    initializeStorage(config);
+
+    const repoManager = new RepositoryManager(config);
+    const projectManager = new ProjectManager(config, repoManager);
+    const workspaceManager = new WorkspaceManager(projectManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
+    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts);
+
+    repoManager.add({ url: originRepoPath, id: 'repo-a' });
+    projectManager.create('Symlinked Root Project', ['repo-a'], undefined, 'symlinked-root-project');
+    await workspaceOrchestrator.createWorkspace('symlinked-root-project', 'STABLE');
+
+    const clonePath = path.join(symlinkedProjectsFolder, 'symlinked-root-project', 'STABLE', 'repo-a');
+    assert.ok(fs.existsSync(clonePath), 'precondition: repo-a clone should exist via the symlinked root');
+
+    assert.doesNotThrow(() => orchestrator.removeRepositoryFromProject('symlinked-root-project', 'repo-a'));
+    assert.ok(!fs.existsSync(clonePath), 'repo-a clone should be removed even though projectsFolder is a symlink');
+});
+
+// ─── removeRepositoryFromProject: audit trail ────────────────────────────────
+
+test('removeRepositoryFromProject emits an audit entry only after both mutations succeed', async () => {
+    const base = makeTempDir();
+    const config = makeTestConfig(base);
+    initializeStorage(config);
+
+    const repoManager = new RepositoryManager(config);
+    const projectManager = new ProjectManager(config, repoManager);
+    const workspaceManager = new WorkspaceManager(projectManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
+    const errorLogManager = new ErrorLogManager(config);
+    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts, errorLogManager);
+
+    repoManager.add({ url: originRepoPath, id: 'repo-a' });
+    projectManager.create('Audit Project', ['repo-a'], undefined, 'audit-project');
+    await workspaceOrchestrator.createWorkspace('audit-project', 'STABLE');
+
+    orchestrator.removeRepositoryFromProject('audit-project', 'repo-a');
+
+    const { entries } = errorLogManager.list({ source: 'repository-audit' });
+    const auditEntry = entries.find((e) => e.Operation === 'unlink-repository');
+    assert.ok(auditEntry !== undefined, 'expected an unlink-repository audit entry');
+    assert.strictEqual(auditEntry.Severity, 'audit');
+    assert.strictEqual(auditEntry.Context.ProjectId, 'audit-project');
+    assert.strictEqual(auditEntry.Context.RepositoryId, 'repo-a');
+});
+
+test('removeRepositoryFromProject suppresses the audit entry when the path guard rejects the clone path', async () => {
+    const base = makeTempDir();
+    const config = makeTestConfig(base);
+    initializeStorage(config);
+
+    const repoManager = new RepositoryManager(config);
+    const projectManager = new ProjectManager(config, repoManager);
+    const workspaceManager = new WorkspaceManager(projectManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
+    const errorLogManager = new ErrorLogManager(config);
+    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts, errorLogManager);
+
+    repoManager.add({ url: originRepoPath, id: 'repo-a' });
+    projectManager.create('Guard Fail Project', ['repo-a'], undefined, 'guard-fail-project');
+    await workspaceOrchestrator.createWorkspace('guard-fail-project', 'STABLE');
+
+    // Simulate a malformed, hand-edited/persisted repository ID that is
+    // already listed in the project's data, so the pre-loop association
+    // check passes through to the path-traversal guard this test exercises.
+    const projectFilePath = path.join(config.storageFolder, 'projects', 'guard-fail-project.json');
+    const projectData = JSON.parse(fs.readFileSync(projectFilePath, 'utf8'));
+    projectData.Repositories.push('../..');
+    writeJsonFile(projectFilePath, projectData);
+
+    assert.throws(
+        () => orchestrator.removeRepositoryFromProject('guard-fail-project', '../..'),
+        /Security check failed/,
+    );
+
+    const { entries } = errorLogManager.list({ source: 'repository-audit' });
+    assert.strictEqual(
+        entries.find((e) => e.Operation === 'unlink-repository'),
+        undefined,
+        'a rejected clone path must not produce an audit entry',
+    );
+});
+
+test('removeRepositoryFromProject still emits the audit entry, plus a warning entry, when the artefact regenerator throws', async () => {
+    const base = makeTempDir();
+    const config = makeTestConfig(base);
+    initializeStorage(config);
+
+    const repoManager = new RepositoryManager(config);
+    const projectManager = new ProjectManager(config, repoManager);
+    const workspaceManager = new WorkspaceManager(projectManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
+    const errorLogManager = new ErrorLogManager(config);
+    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts, errorLogManager);
+
+    repoManager.add({ url: originRepoPath, id: 'repo-a' });
+    projectManager.create('Regen Fail Project', ['repo-a'], undefined, 'regen-fail-project');
+    await workspaceOrchestrator.createWorkspace('regen-fail-project', 'STABLE');
+
+    // Make the artefact regenerator throw, simulating a failure after the
+    // data and filesystem mutations have already completed.
+    workspaceArtifacts.regenerateProject = () => {
+        throw new Error('simulated artefact regeneration failure');
+    };
+
+    // The audited event (unlink + clone-folder removal) already completed
+    // before regeneration runs, so a throwing regenerator must not propagate.
+    assert.doesNotThrow(
+        () => orchestrator.removeRepositoryFromProject('regen-fail-project', 'repo-a'),
+    );
+
+    const auditEntries = errorLogManager.list({ source: 'repository-audit' }).entries;
+    const auditEntry = auditEntries.find((e) => e.Operation === 'unlink-repository');
+    assert.ok(
+        auditEntry !== undefined,
+        'a throwing artefact regenerator must not suppress the unlink-repository audit entry',
+    );
+    assert.strictEqual(auditEntry.Severity, 'audit');
+
+    const warningEntries = errorLogManager.list({ source: 'workspace-index' }).entries;
+    const warningEntry = warningEntries.find((e) => e.Operation === 'unlink-repository');
+    assert.ok(
+        warningEntry !== undefined,
+        'a throwing artefact regenerator must produce a workspace-index warning entry',
+    );
+    assert.strictEqual(warningEntry.Severity, 'warning');
+    assert.ok(
+        warningEntry.Message.includes('simulated artefact regeneration failure'),
+        'the warning entry should describe the underlying regeneration failure',
+    );
+});
+
+test('removeRepositoryFromProject does not throw and writes no audit entry when errorLogManager is not injected', async () => {
+    const { config, orchestrator, projectId } = await makeFixture(makeTempDir());
+
+    const clonePath = path.join(config.projectsFolder, projectId, 'STABLE', 'repo-a');
+    assert.ok(fs.existsSync(clonePath), 'precondition: repo-a clone should exist');
+
+    assert.doesNotThrow(() => orchestrator.removeRepositoryFromProject(projectId, 'repo-a'));
+    assert.ok(!fs.existsSync(clonePath), 'repo-a clone should still be removed');
 });
 
 // ─── deleteRepositoryGlobally ─────────────────────────────────────────────────
@@ -338,6 +606,23 @@ test('deleteRepositoryGlobally removes clones from all projects that reference i
     assert.ok(!fs.existsSync(clonePath), 'repo-b clone should be removed after global delete');
 });
 
+test('deleteRepositoryGlobally updates the repository table in every affected workspace index', async () => {
+    const base = makeTempDir();
+    const { config, orchestrator, projectId } = await makeFixture(base);
+
+    // Add repo-b to the project (alongside the fixture's repo-a) and clone it.
+    await orchestrator.addRepositoryToProject(projectId, 'repo-b');
+    const readmePath = path.join(config.projectsFolder, projectId, 'STABLE', 'README.md');
+    const beforeDelete = fs.readFileSync(readmePath, 'utf-8');
+    assert.ok(beforeDelete.includes('repo-b'), 'precondition: README should list repo-b before deletion');
+
+    orchestrator.deleteRepositoryGlobally('repo-b');
+
+    const afterDelete = fs.readFileSync(readmePath, 'utf-8');
+    assert.ok(!afterDelete.includes('| repo-b |'), 'README repository table should no longer list repo-b');
+    assert.ok(afterDelete.includes('repo-a'), 'README repository table should still list repo-a');
+});
+
 test('deleteRepositoryGlobally cascades to all projects that reference the repo', async () => {
     const base = makeTempDir();
     const config = makeTestConfig(base);
@@ -346,8 +631,9 @@ test('deleteRepositoryGlobally cascades to all projects that reference the repo'
     const repoManager = new RepositoryManager(config);
     const projectManager = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
-    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
-    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
+    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts);
 
     repoManager.add({ url: originRepoPath, id: 'repo-a' });
     repoManager.add({ url: origin2RepoPath, id: 'repo-b' });
@@ -364,6 +650,13 @@ test('deleteRepositoryGlobally cascades to all projects that reference the repo'
     assert.ok(fs.existsSync(cloneOne), 'precondition: proj-one repo-b clone should exist');
     assert.ok(fs.existsSync(cloneTwo), 'precondition: proj-two repo-b clone should exist');
 
+    const readmeOnePath = path.join(config.projectsFolder, 'proj-one', 'STABLE', 'README.md');
+    const readmeTwoPath = path.join(config.projectsFolder, 'proj-two', 'STABLE', 'README.md');
+    const readmeOneBefore = fs.readFileSync(readmeOnePath, 'utf8');
+    const readmeTwoBefore = fs.readFileSync(readmeTwoPath, 'utf8');
+    assert.ok(readmeOneBefore.includes('repo-b'), 'precondition: proj-one README should list repo-b');
+    assert.ok(readmeTwoBefore.includes('repo-b'), 'precondition: proj-two README should list repo-b');
+
     orchestrator.deleteRepositoryGlobally('repo-b');
 
     assert.ok(!fs.existsSync(cloneOne), 'repo-b clone should be removed from proj-one');
@@ -377,6 +670,13 @@ test('deleteRepositoryGlobally cascades to all projects that reference the repo'
         'repo-b should not be in proj-two data',
     );
     assert.strictEqual(repoManager.getById('repo-b'), undefined, 'repo-b should be removed from global store');
+
+    const readmeOneAfter = fs.readFileSync(readmeOnePath, 'utf8');
+    const readmeTwoAfter = fs.readFileSync(readmeTwoPath, 'utf8');
+    assert.ok(!readmeOneAfter.includes('| repo-b |'), 'proj-one README repository table should no longer list repo-b');
+    assert.ok(!readmeTwoAfter.includes('| repo-b |'), 'proj-two README repository table should no longer list repo-b');
+    assert.ok(readmeOneAfter.includes('repo-a'), 'proj-one README repository table should still list repo-a');
+    assert.ok(readmeTwoAfter.includes('repo-a'), 'proj-two README repository table should still list repo-a');
 });
 
 test('deleteRepositoryGlobally succeeds when no projects reference the repo', async () => {
@@ -396,6 +696,91 @@ test('deleteRepositoryGlobally throws when repository does not exist globally', 
     );
 });
 
+// ─── deleteRepositoryGlobally: audit trail ────────────────────────────────────
+
+test('deleteRepositoryGlobally emits per-project unlink entries and a summary entry naming every affected project', async () => {
+    const base = makeTempDir();
+    const config = makeTestConfig(base);
+    initializeStorage(config);
+
+    const repoManager = new RepositoryManager(config);
+    const projectManager = new ProjectManager(config, repoManager);
+    const workspaceManager = new WorkspaceManager(projectManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
+    const errorLogManager = new ErrorLogManager(config);
+    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts, errorLogManager);
+
+    repoManager.add({ url: originRepoPath, id: 'repo-a' });
+    repoManager.add({ url: origin2RepoPath, id: 'repo-b-audit' });
+    projectManager.create('Audit Global One', ['repo-a', 'repo-b-audit'], undefined, 'audit-global-one');
+    projectManager.create('Audit Global Two', ['repo-a', 'repo-b-audit'], undefined, 'audit-global-two');
+    await workspaceOrchestrator.createWorkspace('audit-global-one', 'STABLE');
+    await workspaceOrchestrator.createWorkspace('audit-global-two', 'STABLE');
+
+    orchestrator.deleteRepositoryGlobally('repo-b-audit');
+
+    const { entries } = errorLogManager.list({ source: 'repository-audit' });
+    const unlinkEntries = entries.filter((e) => e.Operation === 'unlink-repository');
+    assert.strictEqual(unlinkEntries.length, 2, 'expected one unlink-repository entry per affected project');
+    const auditedProjectIds = unlinkEntries.map((e) => e.Context.ProjectId).sort();
+    assert.deepStrictEqual(auditedProjectIds, ['audit-global-one', 'audit-global-two']);
+
+    const summaryEntry = entries.find((e) => e.Operation === 'delete-repository-global');
+    assert.ok(summaryEntry !== undefined, 'expected a delete-repository-global summary entry');
+    assert.strictEqual(summaryEntry.Severity, 'audit');
+    assert.strictEqual(summaryEntry.Context.RepositoryId, 'repo-b-audit');
+    const detailedProjectIds: string[] = JSON.parse(summaryEntry.Details ?? '[]');
+    assert.deepStrictEqual(detailedProjectIds.sort(), ['audit-global-one', 'audit-global-two']);
+});
+
+test('deleteRepositoryGlobally suppresses the summary entry (but keeps completed per-project entries) when repositoryManager.remove() throws', async () => {
+    const base = makeTempDir();
+    const config = makeTestConfig(base);
+    initializeStorage(config);
+
+    const repoManager = new RepositoryManager(config);
+    const projectManager = new ProjectManager(config, repoManager);
+    const workspaceManager = new WorkspaceManager(projectManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
+    const errorLogManager = new ErrorLogManager(config);
+    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts, errorLogManager);
+
+    repoManager.add({ url: originRepoPath, id: 'repo-a' });
+    repoManager.add({ url: origin2RepoPath, id: 'repo-b-fail' });
+    projectManager.create('Remove Fail Project', ['repo-a', 'repo-b-fail'], undefined, 'remove-fail-project');
+    await workspaceOrchestrator.createWorkspace('remove-fail-project', 'STABLE');
+
+    // Simulate a failure in the global-store removal step, which runs after
+    // the per-project cascade has already completed.
+    repoManager.remove = () => {
+        throw new Error('simulated global-store removal failure');
+    };
+
+    assert.throws(
+        () => orchestrator.deleteRepositoryGlobally('repo-b-fail'),
+        /simulated global-store removal failure/,
+    );
+
+    const { entries } = errorLogManager.list({ source: 'repository-audit' });
+    assert.ok(
+        entries.some((e) => e.Operation === 'unlink-repository' && e.Context.ProjectId === 'remove-fail-project'),
+        'the per-project unlink entry completed before the failure must remain',
+    );
+    assert.strictEqual(
+        entries.find((e) => e.Operation === 'delete-repository-global'),
+        undefined,
+        'no summary entry should be written when repositoryManager.remove() throws',
+    );
+});
+
+test('deleteRepositoryGlobally does not throw and writes no audit entries when errorLogManager is not injected', async () => {
+    const { orchestrator, repoManager } = await makeFixture(makeTempDir());
+    assert.doesNotThrow(() => orchestrator.deleteRepositoryGlobally('repo-b'));
+    assert.strictEqual(repoManager.getById('repo-b'), undefined, 'repo-b should still be removed from global store');
+});
+
 // ─── Credential injection (addRepositoryToProject) ────────────────────────────
 
 test('addRepositoryToProject passes token-injected URL to cloneRepository when credentials match', async () => {
@@ -410,7 +795,8 @@ test('addRepositoryToProject passes token-injected URL to cloneRepository when c
 
     const repoManager    = new RepositoryManager(config);
     const projectManager = new ProjectManager(config, repoManager);
-    const orchestrator   = new RepositoryOrchestrator(config, projectManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const orchestrator   = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts);
 
     repoManager.add({ url: 'https://private.example/org/priv-repo.git', id: 'priv-repo' });
     // Create project WITHOUT priv-repo so addRepositoryToProject can add it (that is its purpose).
@@ -446,7 +832,8 @@ test('addRepositoryToProject returns credential-missing error when no credential
 
     const repoManager    = new RepositoryManager(config);
     const projectManager = new ProjectManager(config, repoManager);
-    const orchestrator   = new RepositoryOrchestrator(config, projectManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const orchestrator   = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts);
 
     repoManager.add({ url: 'https://private.example/org/priv-repo.git', id: 'priv-repo-ro-nocr', name: 'Priv Repo' });
     // Create a project with a STABLE workspace so addRepositoryToProject has a workspace to iterate over.
@@ -481,7 +868,8 @@ test('addRepositoryToProject returns credential-missing error when multiple cred
 
     const repoManager    = new RepositoryManager(config);
     const projectManager = new ProjectManager(config, repoManager);
-    const orchestrator   = new RepositoryOrchestrator(config, projectManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const orchestrator   = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts);
 
     // Repo has no CredentialId — auto-selection fails (ambiguous).
     repoManager.add({ url: 'https://private.example/org/priv-repo.git', id: 'priv-repo-ro-amb', name: 'Priv Repo' });
@@ -515,7 +903,8 @@ test('addRepositoryToProject passes SSH URL unchanged to cloneRepository when gi
 
     const repoManager    = new RepositoryManager(config);
     const projectManager = new ProjectManager(config, repoManager);
-    const orchestrator   = new RepositoryOrchestrator(config, projectManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const orchestrator   = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts);
 
     const sshUrl = 'git@github.com:org/ssh-repo.git';
     repoManager.add({ url: sshUrl, id: 'ssh-repo', name: 'SSH Repo' });
@@ -565,9 +954,10 @@ test('addRepositoryToProject logs credential-missing error via ErrorLogManager w
     const repoManager     = new RepositoryManager(config);
     const projectManager  = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
-    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
     const errorLogManager = new ErrorLogManager(config);
-    const orchestrator    = new RepositoryOrchestrator(config, projectManager, repoManager, errorLogManager);
+    const orchestrator    = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts, errorLogManager);
 
     // Seed a local (clonable) repo so the project has a workspace to iterate over.
     repoManager.add({ url: originRepoPath, id: 'repo-a-log' });
@@ -613,9 +1003,10 @@ test('addRepositoryToProject writes a credentials/info log entry after successfu
     const repoManager     = new RepositoryManager(config);
     const projectManager  = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
-    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
     const errorLogManager = new ErrorLogManager(config);
-    const orchestrator    = new RepositoryOrchestrator(config, projectManager, repoManager, errorLogManager);
+    const orchestrator    = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts, errorLogManager);
 
     // Seed project with a clonable repo so the STABLE workspace exists on disk.
     repoManager.add({ url: originRepoPath, id: 'repo-a-success-log' });
@@ -659,9 +1050,10 @@ test('addRepositoryToProject does NOT write a credentials/info log entry for SSH
     const repoManager     = new RepositoryManager(config);
     const projectManager  = new ProjectManager(config, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
-    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager);
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const workspaceOrchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, workspaceArtifacts);
     const errorLogManager = new ErrorLogManager(config);
-    const orchestrator    = new RepositoryOrchestrator(config, projectManager, repoManager, errorLogManager);
+    const orchestrator    = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts, errorLogManager);
 
     // Seed project with a clonable repo so the STABLE workspace exists on disk.
     repoManager.add({ url: originRepoPath, id: 'repo-a-ssh-nolog' });

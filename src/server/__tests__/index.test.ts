@@ -262,6 +262,22 @@ test('Integration: static request + API request + stopServer', async () => {
         const data = JSON.parse(apiResp.text) as unknown[];
         assert.ok(Array.isArray(data), 'GET /api/repositories should return an array');
 
+        // --- Version endpoint request ---
+        const versionResp = await httpGet(freePort, '/api/version');
+        assert.strictEqual(versionResp.status, 200, 'Version route should return 200');
+        assert.ok(
+            (versionResp.headers['content-type'] ?? '').includes('application/json'),
+            'Version route should return application/json',
+        );
+        const versionData = JSON.parse(versionResp.text) as { appVersion?: unknown; guiVersion?: unknown };
+        assert.strictEqual(typeof versionData.appVersion, 'string', 'appVersion should be a string');
+        assert.strictEqual(typeof versionData.guiVersion, 'string', 'guiVersion should be a string');
+        assert.deepStrictEqual(
+            Object.keys(versionData).sort(),
+            ['appVersion', 'guiVersion'],
+            'GET /api/version response shape should be unchanged: { appVersion, guiVersion }',
+        );
+
         // --- Stop ---
         await assert.doesNotReject(stopServer(), 'stopServer should resolve cleanly');
     } finally {
