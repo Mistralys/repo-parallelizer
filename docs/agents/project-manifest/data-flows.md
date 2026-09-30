@@ -50,7 +50,7 @@ User → POST /api/projects/:id/repositories { repositoryId }
   └→ Return updated ProjectData record
 ```
 
-> **No clone or workspace regeneration here:** `POST .../repositories` only appends the repository ID to the project's data record. Cloning and workspace-file regeneration are performed by `RepositoryOrchestrator.addRepositoryToProject()`, which is invoked by a separate orchestration path (not by this REST endpoint).  
+> **No clone or workspace regeneration here:** `POST .../repositories` only appends the repository ID to the project's data record. Cloning and artefact-set regeneration (`.code-workspace` plus the three generated index files, via `WorkspaceArtifactsOrchestrator.regenerateProject()`) are performed by `RepositoryOrchestrator.addRepositoryToProject()`, which is invoked by a separate orchestration path (not by this REST endpoint) and is not yet wired into any live route as of this WP.  
 > To clone the newly-added repository into existing workspaces after adding it, use the workspace setup endpoint for each workspace.
 
 ## 5. Create a Workspace
@@ -61,7 +61,7 @@ User → POST /api/projects/:id/workspaces { workspaceId, description? }
   └→ Return persisted WorkspaceInfo record
 ```
 
-> **Filesystem setup is separate:** `POST /api/projects/:id/workspaces` only persists the workspace record. Call `POST /api/projects/:id/workspaces/:wid/setup` to clone repositories and generate the `.code-workspace` file on disk. That endpoint invokes `WorkspaceOrchestrator.createWorkspace()`, which runs the clones and generates the file.
+> **Filesystem setup is separate:** `POST /api/projects/:id/workspaces` only persists the workspace record. Call `POST /api/projects/:id/workspaces/:wid/setup` to clone repositories and generate the on-disk artefact set. That endpoint invokes `WorkspaceOrchestrator.createWorkspace()`, which runs the clones and then calls the injected `WorkspaceArtifactsOrchestrator.regenerateWorkspace()` — producing the `.code-workspace` file and the three generated index files (`README.md`, `AGENTS.md`, `CLAUDE.md`) together, rather than the `.code-workspace` file alone.
 
 ## 6. Branch Switch (Multi-Repository)
 
@@ -183,12 +183,18 @@ toast UI.
        ├── {project-id}-STABLE.code-workspace    # VS Code workspace file
        ├── {project-id}-DEV.code-workspace       # (per workspace)
        └── STABLE/
+            ├── README.md                         # Generated index (marker-fenced — see api-surface.md)
+            ├── AGENTS.md                         # Generated index + agent-directives block
+            ├── CLAUDE.md                         # Generated "@AGENTS.md" pointer
             ├── {repo-slug}/                      # Git clone
             └── ...
        └── DEV/
+            ├── README.md / AGENTS.md / CLAUDE.md # Same three generated files (per workspace)
             ├── {repo-slug}/                      # Git clone
             └── ...
 ```
+
+> **Generated index files:** as of `WorkspaceOrchestrator.createWorkspace()`'s migration onto `WorkspaceArtifactsOrchestrator` (the production-reachable path via `POST .../setup`), the three files above are written alongside the `.code-workspace` file for every workspace whose folder exists on disk. They are absent for a workspace that has not yet been set up. See the Orchestration section of `api-surface.md` (`workspace-index.ts`, `workspace-artifacts.ts`) for the rendering/merge/write-guard contract, and §12 below for how their status feeds into the health check.
 
 ---
 
@@ -210,7 +216,15 @@ User → GET /api/projects/:id/workspaces/:wid/health
                    fs.existsSync(path.join(projectsFolder, projectId, wid, repoId, '.git'))
                    └→ absent → issue { type: 'repository-not-cloned', severity: 'warning',
                                         fixAction: 'setup-workspace', repositoryId }
-              └→ Check 3 (when errorLogManager provided):
+              └→ Check 3: checkIndexFileStatus(projectsFolder, projectId, workspaceId)
+                   (read-only probe from workspace-index.ts — see §5/Orchestration docs;
+                    already returns empty arrays for an uninitialized workspace)
+                   ├→ missing.length > 0    → issue { type: 'workspace-index-missing',
+                   │                                   severity: 'warning',
+                   │                                   fixAction: 'regenerate-workspace-file' }
+                   └→ unmanaged.length > 0  → issue { type: 'workspace-index-unmanaged',
+                                                       severity: 'warning', fixAction: 'none' }
+              └→ Check 4 (when errorLogManager provided):
                    errorLogManager.list({ source: 'credentials' })
                    └→ Filter to entries scoped to this workspace (matching ProjectId + WorkspaceId)
                    └→ De-duplicate by RepositoryId, keeping only the most recent entry per repo
@@ -227,7 +241,7 @@ User → GET /api/projects/:id/workspaces/:wid/health
 
 **GUI integration:**
 - `project-detail.js`: health fetched in parallel with status for all initialized workspaces via `Promise.allSettled`. Failing fetches degrade gracefully (health cell left empty).
-- `workspace-detail.js`: health report fetched on initial load and every poll cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix action buttons. A `credential-missing` issue renders a **"Configure"** button (`fixAction: 'configure-credential'`) that navigates to `#/repositories` (the repositories list — the affected repository ID is not preserved in the navigation).
+- `workspace-detail.js`: health report fetched on initial load and every poll cycle. Unhealthy workspaces render a `.health-alert` card with per-issue rows and fix action buttons. A `workspace-file-missing` or `workspace-index-missing` issue renders a **"Regenerate Files"** button (`fixAction: 'regenerate-workspace-file'`, relabelled from "Regenerate File" — the button calls `POST .../regenerate-workspace-file`, which regenerates the full artefact set: `.code-workspace` plus all three generated index files). A `workspace-index-unmanaged` issue (`fixAction: 'none'`) renders as a message row with no button. A `credential-missing` issue renders a **"Configure"** button (`fixAction: 'configure-credential'`) that navigates to `#/repositories` (the repositories list — the affected repository ID is not preserved in the navigation).
 
 ---
 
@@ -239,13 +253,13 @@ User → POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file
   └→ workspaceManager.getById(projectId, wid)   # 404 if workspace unknown
   └→ fs.existsSync(workspaceFolder)?
        └→ absent → sendError 400 "Workspace folder does not exist. Run setup first."
-  └→ Build repoPaths: project.Repositories.map(repoId → { slug: repoId, path: ... })
-  └→ getWorkspaceFilePath(projectsFolder, projectId, workspaceId) → wsFilePath
-  └→ generateWorkspaceFile(workspaceId, repoPaths, wsFilePath)   # writes .code-workspace
+  └→ workspaceArtifactsOrchestrator.regenerateWorkspace(projectId, workspaceId)
+       ├→ generateWorkspaceFile(...)            # writes .code-workspace (unconditional)
+       └→ writeWorkspaceIndexFiles(...)          # writes/merges README.md, AGENTS.md, CLAUDE.md
   └→ sendJson 200 { success: true }
 ```
 
-**No git operations are performed.** This endpoint only writes the `.code-workspace` JSON file. All repository clones remain untouched. Use `POST .../setup` to clone missing repositories.
+**No git operations are performed.** This endpoint regenerates the `.code-workspace` file and the three generated index files via the `WorkspaceArtifactsOrchestrator` choke-point (see `api-surface.md`) — it performs no cloning. All repository clones remain untouched. Use `POST .../setup` to clone missing repositories.
 
 ---
 
@@ -287,3 +301,51 @@ This entry serves as a **badge-suppression signal** for `checkWorkspaceHealth()`
 ```
 
 **SSH clones are excluded:** when `resolveCredential()` returns `null` (e.g. SSH URL, no matching credential), no credentials log entry is written for that repository. The badge-suppression mechanism only applies to repositories that have undergone at least one credential-based clone attempt.
+
+---
+
+## 15. Global Repository Deletion Cascade
+
+```
+User → DELETE /api/repositories/:id
+  └→ repositoryManager.getById(id)?              # 404 if unknown, checked by the route
+  └→ RepositoryOrchestrator.deleteRepositoryGlobally(repositoryId)
+       ├→ repositoryManager.getById(repositoryId)?          # 404 if unknown (orchestrator's own check)
+       ├→ resolveRootRealPath(projectsFolder)                # resolved once, reused per project
+       ├→ projectManager.list() → for each project referencing repositoryId:
+       │      └→ removeRepositoryFromProject(projectId, repositoryId)
+       │             ├→ project.Repositories.includes(repositoryId)?
+       │             │      → throws "is not listed in project" on violation, before any delete
+       │             ├→ per workspace: guard clone path, then delete
+       │             │      ├→ layer 1: strict-descendant lexical check
+       │             │      │      (rejects equality with projectsFolder — unlike the
+       │             │      │      equality-permitting isLexicallyContained() used by
+       │             │      │      the writer path — so a malformed ID can never
+       │             │      │      resolve to the projects root)
+       │             │      │      → throws "Security check failed" on violation, no delete
+       │             │      ├→ layer 2: escapesRootViaRealpath() symlink-escape check
+       │             │      │      → throws "Security check failed" on violation, no delete
+       │             │      └→ fs.rmSync(clonePath, { recursive: true, force: true })  # if it passed both layers and exists
+       │             ├→ projectManager.removeRepository(projectId, repositoryId)
+       │             ├→ errorLogManager?.append({ Severity: 'audit', Source: 'repository-audit',
+       │             │       Operation: 'unlink-repository', Context: { ProjectId, RepositoryId } })
+       │             │       # emitted unconditionally once the two mutations above succeed —
+       │             │       # regardless of the regeneration step's outcome below
+       │             ├→ try: workspaceArtifacts.regenerateProject(projectId)
+       │             │   catch: errorLogManager?.append({ Severity: 'warning', Source: 'workspace-index',
+       │             │       Operation: 'unlink-repository', Context: { ProjectId, RepositoryId } })
+       │             │       # logged and swallowed — does not propagate, does not erase the audit entry above
+       │             affectedProjectIds.push(projectId)      # recorded by the caller loop
+       ├→ repositoryManager.remove(repositoryId)              # drop the global store entry
+       └→ errorLogManager?.append({ Severity: 'audit', Source: 'repository-audit',
+              Operation: 'delete-repository-global', Context: { RepositoryId },
+              Details: JSON.stringify(affectedProjectIds) })
+              # emitted ONLY after repositoryManager.remove() succeeds
+  └→ sendNoContent 204
+```
+
+**Completion boundaries:** the association check and the two path-traversal guard layers all throw *before* any mutation, so a guard failure or an unlisted repository leaves no `unlink-repository` entry behind (an incomplete project never gets a misleading "success" audit line). Once `projectManager.removeRepository()` succeeds, the audited event is complete and its `unlink-repository` entry is emitted **unconditionally** — a subsequent failure in `workspaceArtifacts.regenerateProject()` (best-effort downstream reconciliation) is caught and logged as a separate `Severity: 'warning'` entry instead of propagating, so it can no longer erase the audit record of a deletion that genuinely happened. If `repositoryManager.remove()` throws after the per-project cascade has already completed, `deleteRepositoryGlobally()` propagates the throw and writes no `delete-repository-global` summary entry — but the `unlink-repository` entries already emitted during the cascade are **not rolled back**, since they describe cascade steps that genuinely did complete.
+
+**Two distinct roots, same pattern as the write-guard chain (§13's sibling note in `api-surface.md`):** the lexical check compares against `path.resolve(projectsFolder)`; the realpath check compares against a separately-resolved `resolveRootRealPath(projectsFolder)`. Both checks and the shared symlink-resolution logic live in `src/utils/path-guard.ts` (see `api-surface.md`), the same module consumed by `workspace-index.ts`'s write-guard chain (§13).
+
+**Now shared with the project-level unlink route:** the project-level "unlink one repository from one project" route (`DELETE /api/projects/:id/repositories/:repoId`) now delegates directly to this same `removeRepositoryFromProject()` method (see `rest-api.md`'s **Repository Unlink Delegation** note), so it produces the identical clone-folder deletion, data-record update, and `unlink-repository` audit entry described above — it is no longer a separate, unaudited mutation path.

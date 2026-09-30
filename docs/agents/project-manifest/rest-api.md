@@ -10,9 +10,9 @@ All endpoints are served by the built-in HTTP server on `serverPort` (default `4
 |---|---|---|---|---|
 | `GET` | `/api/repositories` | 200 | — | List all repositories. |
 | `GET` | `/api/repositories/:id` | 200 | 404 | Get a single repository by ID. |
-| `POST` | `/api/repositories` | 201 | 400 | Register a new repository. Body: `{ url, name?, id? }`. |
-| `PUT` | `/api/repositories/:id` | 200 | 400, 404 | Update repository metadata. Body: `{ name, url? }`. |
-| `DELETE` | `/api/repositories/:id` | 204 | 404 | Delete a repository. |
+| `POST` | `/api/repositories` | 201 | 400 | Register a new repository. Body: `{ url, name?, id?, description? }`. |
+| `PUT` | `/api/repositories/:id` | 200 | 400, 404 | Update repository metadata. Body: `{ name, url?, description? }`. Best-effort regenerates every referencing project's workspace artefact sets so an edited description/URL is reflected without a manual regenerate step (see **Artefact Reconciliation** above). |
+| `DELETE` | `/api/repositories/:id` | 204 | 404, 500 | Delete a repository globally via `RepositoryOrchestrator.deleteRepositoryGlobally()`: removes the repository from every project that references it, deletes its clone folders on disk, and regenerates each affected workspace's `.code-workspace`/index-file artefact set. 404 when the ID does not exist (checked by the route before calling the orchestrator). 500 on any other orchestrator failure. |
 | `PUT` | `/api/repositories/:id/credential` | 200 | 400, 404 | Assign or clear a git credential for a repository. Body: `{ credentialId: string \| null }`. |
 | `GET` | `/api/repositories/:id/credential-options` | 200 | 404 | List credentials compatible with the repository's host, with tokens masked. |
 | `POST` | `/api/repositories/:id/refresh-timestamp` | 200 | 404 | Persist the repository's manual refresh timestamp to the current UTC time and return the updated `Repository` object. Used by the repository-detail view's Refresh button. |
@@ -28,11 +28,13 @@ Updates a repository's `Name` and, optionally, its `Url`.
 |---|---|---|---|
 | `name` | `string` | **Yes** | New display name. Must be a non-empty string after trimming. |
 | `url` | `string` | No | New remote URL. When provided, must be a non-empty string after trimming. Embedded credentials are stripped before storage, mirroring `POST /api/repositories`. The repository `Id` is never affected by a URL change. |
+| `description` | `string` | No | New description. When provided, must be a string no longer than `MAX_REPOSITORY_DESCRIPTION_LENGTH` (500) characters after trimming — validated at the route via a shared `validateDescription()` helper before `RepositoryManager` re-validates and trims it. Supplying an empty or whitespace-only string clears the stored `Description` field entirely. Omitting `description` leaves the existing value untouched. |
 
 **400 cases:**
 - `name` is missing, not a string, or empty after trimming.
 - `url` is present but not a string, or empty after trimming.
 - `url` (after credential-stripping) duplicates another repository's URL — the manager's error message is returned verbatim, e.g. `A repository with URL "https://github.com/org/repo.git" already exists (ID: "repo").`.
+- `description` is present but not a string, or exceeds `MAX_REPOSITORY_DESCRIPTION_LENGTH` characters after trimming — e.g. `Field description exceeds the maximum length of 500 characters.`.
 
 **404:** repository not found.
 
@@ -144,11 +146,19 @@ Returns the subset of configured git credentials whose `host` matches the hostna
 | `GET` | `/api/projects` | 200 | — | List all projects (index entries). |
 | `GET` | `/api/projects/:id` | 200 | 404 | Get full project data by ID. Response includes an optional `LastActivity?: string` field (ISO 8601) when the project has recorded git activity via the polling layer; absent on projects that have never been polled. |
 | `POST` | `/api/projects` | 201 | 400 | Create a new project. Body: `{ name, repositoryIds, description?, id? }`. |
-| `PUT` | `/api/projects/:id` | 200 | 400, 404 | Update project metadata. Body: `{ Name?, Description? }`. 400 when body is not a valid JSON object or contains no recognized updatable fields. |
-| `PUT` | `/api/projects/:id/rename` | 200 | 400, 404 | Rename project (change ID). Body: `{ newId }`. |
-| `DELETE` | `/api/projects/:id` | 204 | 404 | Delete project data record. Does not remove workspace folders or `.code-workspace` files from disk. |
-| `POST` | `/api/projects/:id/repositories` | 200 | 400, 404 | Add repository to project. Body: `{ repositoryId }`. |
-| `DELETE` | `/api/projects/:id/repositories/:repoId` | 204 | 404 | Remove repository from project. |
+| `PUT` | `/api/projects/:id` | 200 | 400, 404 | Update project metadata. Body: `{ Name?, Description? }`. 400 when body is not a valid JSON object or contains no recognized updatable fields. Best-effort regenerates every workspace's artefact set (see **Artefact Reconciliation** above). |
+| `PUT` | `/api/projects/:id/rename` | 200 | 400, 404 | Rename project (change ID). Body: `{ newId }`. Regenerates every workspace's `.code-workspace`/index-file artefact set under the new project ID and removes it under the old one (best-effort — see **Artefact reconciliation** below). |
+| `DELETE` | `/api/projects/:id` | 204 | 404 | Delete project data record. Does not remove workspace folders or clone directories from disk. Best-effort removes each workspace's `.code-workspace`/index-file artefact set (see **Artefact reconciliation** below). |
+| `POST` | `/api/projects/:id/repositories` | 200 | 400, 404 | Add repository to project. Body: `{ repositoryId }`. Best-effort regenerates every workspace's artefact set so the new repository appears in each generated index (see **Artefact reconciliation** below). |
+| `DELETE` | `/api/projects/:id/repositories/:repoId` | 204 | 404, 500 | Unlink a repository from one project via `RepositoryOrchestrator.removeRepositoryFromProject()` (see **Repository unlink delegation** below) — deletes the repository's clone folder from every workspace under a two-layer path-traversal guard, updates the project's data record, and emits an `unlink-repository` audit entry, before best-effort regenerating every workspace's artefact set so the removed repository disappears from each generated index (see **Artefact reconciliation** below). 404 for an unknown project or a repository not listed on the project (checked before the orchestrator is called, no mutation in either case); 500 if the orchestrator's path guard rejects a clone path. |
+
+### Repository Unlink Delegation (`DELETE /api/projects/:id/repositories/:repoId`)
+
+Unlike the other lifecycle routes in this table, this route does not call `WorkspaceArtifactsOrchestrator` directly — it delegates the entire mutation to `RepositoryOrchestrator.removeRepositoryFromProject()` (see `api-surface.md`), which performs the clone-folder deletion, data-record update, and audit-entry emission itself, then calls `WorkspaceArtifactsOrchestrator.regenerateProject()` internally as its own best-effort step. The route only checks project existence and repository-project association before delegating (returning 404 without ever calling the orchestrator when either fails), and maps any other orchestrator throw (e.g. a path-guard rejection) to a generic 500. This closes the audit-trail/clone-deletion gap that previously existed on this path — see `data-flows.md`'s **Global Repository Deletion Cascade** for the shared `removeRepositoryFromProject()` behavior, which now also backs the global `DELETE /api/repositories/:id` cascade.
+
+### Artefact Reconciliation (Lifecycle & Metadata-Edit Routes)
+
+The project/workspace lifecycle routes above (rename/delete a project, link a repository, and the workspace rename/delete routes below), the three metadata-edit `PUT` routes (`PUT /api/repositories/:id`, `PUT /api/projects/:id`, `PUT /api/projects/:id/workspaces/:wid`), and `PUT /api/repositories/:id`'s repository-level fan-out each call the `WorkspaceArtifactsOrchestrator` choke-point (see `api-surface.md`) once their primary data-layer mutation succeeds, so the `.code-workspace` file and the three generated index files stay consistent with what the API just did — an edited description or note is reflected without a manual regenerate step. This call is **best-effort and never changes the route's response**: on failure it appends an `ErrorLogManager` entry with `Severity: 'warning'`, `Source: 'workspace-index'`, and the handler still returns its normal success status/body. None of these routes gain clone-folder deletion, on-disk folder renaming, or cloning — only `.code-workspace`/index-file reconciliation. (The repository-unlink route above is the one exception: it delegates to `RepositoryOrchestrator`, which does perform clone-folder deletion — see **Repository Unlink Delegation** above.) A stale or missing artefact left behind by a failed reconciliation call surfaces later as a `workspace-file-missing`/`workspace-index-missing` health issue (see **Health Issue Types** below), fixable via `POST .../regenerate-workspace-file`.
 
 ---
 
@@ -159,11 +169,11 @@ Returns the subset of configured git credentials whose `host` matches the hostna
 | `GET` | `/api/projects/:id/workspaces` | 200 | 404 | List workspaces in a project. Response includes `Initialized` boolean and `FolderPath` string. |
 | `GET` | `/api/projects/:id/workspaces/:wid` | 200 | 404 | Get a single workspace. Response includes `Initialized` boolean and `FolderPath` string. |
 | `POST` | `/api/projects/:id/workspaces` | 201 | 400, 404 | Create workspace. Body: `{ workspaceId, description? }`. |
-| `PUT` | `/api/projects/:id/workspaces/:wid` | 200 | 400, 404 | Update workspace description and/or notes. Body: `{ description?, notes? }` — at least one field required. 400 if neither field is present or body is not a valid JSON object. Response includes a `Notes` field on the returned `WorkspaceInfo`. |
-| `PUT` | `/api/projects/:id/workspaces/:wid/rename` | 200 | 400, 404 | Rename workspace. Body: `{ newId }`. |
-| `DELETE` | `/api/projects/:id/workspaces/:wid` | 204 | 400, 404 | Delete workspace. 400 when attempting to delete the STABLE workspace. 404 when the project or workspace is not found. |
+| `PUT` | `/api/projects/:id/workspaces/:wid` | 200 | 400, 404 | Update workspace description and/or notes. Body: `{ description?, notes? }` — at least one field required. 400 if neither field is present or body is not a valid JSON object. Response includes a `Notes` field on the returned `WorkspaceInfo`. Best-effort regenerates the workspace's artefact set (see **Artefact Reconciliation** above). |
+| `PUT` | `/api/projects/:id/workspaces/:wid/rename` | 200 | 400, 404 | Rename workspace. Body: `{ newId }`. Regenerates the artefact set under the new workspace ID and removes it under the old one (best-effort — see **Artefact Reconciliation** above). |
+| `DELETE` | `/api/projects/:id/workspaces/:wid` | 204 | 400, 404 | Delete workspace. 400 when attempting to delete the STABLE workspace (checked before any artefact reconciliation runs). 404 when the project or workspace is not found. Best-effort removes the workspace's `.code-workspace`/index-file artefact set (see **Artefact Reconciliation** above); does not remove clone directories. |
 | `POST` | `/api/projects/:id/workspaces/:wid/setup` | 200 | 404, 500 | Initialize workspace on disk (clone repos, generate .code-workspace file). 404 when the project or workspace is not found. 500 on orchestrator failure. |
-| `POST` | `/api/projects/:id/workspaces/:wid/regenerate-workspace-file` | 200 | 400, 404, 500 | Regenerate the `.code-workspace` file from the current repository list without cloning. Workspace folder must already exist on disk (400 if absent). Body: none. Response: `{ success: true }`. |
+| `POST` | `/api/projects/:id/workspaces/:wid/regenerate-workspace-file` | 200 | 400, 404, 500 | Regenerate the workspace's full artefact set — the `.code-workspace` file and the three generated index files (`README.md`, `AGENTS.md`, `CLAUDE.md`) — from the current repository list, without cloning. Calls `WorkspaceArtifactsOrchestrator.regenerateWorkspace()` (see `api-surface.md`). Workspace folder must already exist on disk (400 if absent). Body: none. Response: `{ success: true }`. The path is unchanged from its original `.code-workspace`-only behaviour, to preserve the existing `api.js` client method and health `fixAction` contract. |
 | `GET` | `/api/projects/:id/workspaces/:wid/health` | 200 | 404 | Fetch the health report for a workspace. Returns `{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }`. Uninitialized workspaces return `{ healthy: true, issues: [] }`. 404 if project or workspace ID is unknown. See **Health Issue Types** below. |
 
 ### Health Issue Types
@@ -184,6 +194,8 @@ Known issue types:
 |---|---|---|
 | `workspace-file-missing` | `regenerate-workspace-file` | The `.code-workspace` file for the workspace is absent on disk. |
 | `repository-not-cloned` | `setup-workspace` | A repository directory has no `.git` entry (not yet cloned). Includes `repositoryId`. |
+| `workspace-index-missing` | `regenerate-workspace-file` | One or more of the three generated index files (`README.md`, `AGENTS.md`, `CLAUDE.md`) is absent on disk. Reported only when the workspace folder exists; message lists the missing file names. |
+| `workspace-index-unmanaged` | `none` | One or more generated index files exist but are hand-authored (no generated-marker fence found), so the tool will never overwrite them. No automated fix is offered — the GUI renders this as a message with no fix button. Message lists the unmanaged file names. |
 | `credential-missing` | `configure-credential` | The most recent setup run for this workspace failed because no credential is configured for the repository's host. Includes `repositoryId`. The error is sourced from error log entries with `Source: 'credentials'` scoped to this workspace. |
 
 ---

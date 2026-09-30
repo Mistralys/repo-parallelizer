@@ -251,6 +251,7 @@ interface Repository {
     credentialsStripped?: boolean; // transient — set by add(), not persisted
     LastRefreshedAt?: string;      // ISO 8601 — written by touchRefreshTimestamp(); absent until first manual refresh
     CredentialId?: string;         // references GitCredentialEntry.id; absent = auto-select by host match
+    Description?: string;          // optional, user-entered; trimmed and capped at MAX_REPOSITORY_DESCRIPTION_LENGTH; absent when never set or cleared
 }
 
 interface RepositoryStore extends BaseStore {
@@ -258,7 +259,7 @@ interface RepositoryStore extends BaseStore {
 }
 ```
 
-> **Schema version note:** `CredentialId` is an optional field addition. Per the `BaseStore` versioning policy (see `storage.types.ts`), adding an optional field is backward-compatible — existing `repositories.json` files that lack the field remain valid. No `SCHEMA_VERSION` bump is required.
+> **Schema version note:** `CredentialId` and `Description` are optional field additions. Per the `BaseStore` versioning policy (see `storage.types.ts`), adding an optional field is backward-compatible — existing `repositories.json` files that lack the field remain valid. No `SCHEMA_VERSION` bump is required.
 
 #### Manager (`repository.manager.ts`)
 
@@ -269,13 +270,15 @@ class RepositoryManager {
     list(): Repository[]
     getById(id: string): Repository | undefined
     exists(id: string): boolean
-    add(params: { url: string; name?: string; id?: string }): Repository
-    update(id: string, params: { name: string; url?: string }): Repository
+    add(params: { url: string; name?: string; id?: string; description?: string }): Repository
+    update(id: string, params: { name: string; url?: string; description?: string }): Repository
     remove(id: string): void
     updateCredential(id: string, credentialId: string | null): Repository
     touchRefreshTimestamp(id: string): Repository
 }
 ```
+
+> **`Description` handling in `add()`/`.update()`:** `params.description` is trimmed via a shared private `normalizeDescription()` helper and validated against `MAX_REPOSITORY_DESCRIPTION_LENGTH` (500, `config.constants.ts`), throwing a plain `Error` naming the limit when exceeded. In `add()`, the field is set on the new record only when the trimmed value is non-empty; omitting `description` leaves it unset. In `update()`, supplying `description` trims and stores it when non-empty, but supplying an empty or whitespace-only string **removes** the `Description` key from the record entirely (not persisted as `""`); omitting `description` leaves the existing stored value untouched. Wired through the REST layer (`POST`/`PUT /api/repositories(/:id)`, see `rest-api.md`) with a route-level `validateDescription()` pre-check, and surfaced in the GUI's repository modal, list, and detail views (`normaliseRepo()`, `showRepositoryModal`, `repositories.js`, `repository-detail.js` — see `gui-frontend.md`).
 
 > **`updateCredential()`:** Associates or removes a named credential on a repository. Pass a `credentialId` string to pin the repository to a specific `GitCredentialEntry`; pass `null` to clear the association and revert to host-based auto-selection at runtime. When `null` is passed, the `CredentialId` key is removed entirely from `repositories.json` (not set to `undefined`) so the JSON remains clean. Throws `NotFoundError` if the repository ID does not exist. See `Repository.CredentialId` for the auto-selection fallback behaviour.
 
@@ -418,7 +421,7 @@ interface BranchSwitchResult {
 
 ```typescript
 class ProjectOrchestrator {
-    constructor(config: AppConfig, projectManager: ProjectManager, workspaceOrchestrator: WorkspaceOrchestrator)
+    constructor(config: AppConfig, projectManager: ProjectManager, workspaceOrchestrator: WorkspaceOrchestrator, workspaceArtifacts: WorkspaceArtifactsOrchestrator)
 
     createProject(name: string, repositoryIds: string[], description?: string, id?: string): Promise<OrchestrationResult>
     deleteProject(projectId: string): void
@@ -430,7 +433,7 @@ class ProjectOrchestrator {
 
 ```typescript
 class RepositoryOrchestrator {
-    constructor(config: AppConfig, projectManager: ProjectManager, repositoryManager: RepositoryManager)
+    constructor(config: AppConfig, projectManager: ProjectManager, repositoryManager: RepositoryManager, workspaceArtifacts: WorkspaceArtifactsOrchestrator, errorLogManager?: ErrorLogManager)
 
     addRepositoryToProject(projectId: string, repositoryId: string): Promise<AddRepositoryResult>
     removeRepositoryFromProject(projectId: string, repositoryId: string): void
@@ -438,17 +441,25 @@ class RepositoryOrchestrator {
 }
 ```
 
+> **`removeRepositoryFromProject()`'s association precondition:** before any clone folder is touched, the method checks `project.Repositories.includes(repositoryId)` and throws `Repository "X" is not listed in project "Y".` if it fails — hoisted above the per-workspace delete loop so an unlisted repository ID can never cause a partial, unassociated deletion. `projectManager.removeRepository()` further down re-validates the same association as defense in depth.
+
+> **`removeRepositoryFromProject()`'s two-layer delete guard:** each clone path is validated before `fs.rmSync()` by a strict-descendant lexical check (rejects equality with `projectsFolder` itself — unlike the equality-permitting `isLexicallyContained()` in `Path Guard`, below, used by the writer path — so a malformed/persisted ID can never resolve to the projects root), followed by `escapesRootViaRealpath()` (from `Path Guard`, below) against a `projectsFolder` real path resolved once via `resolveRootRealPath()`. Either violation throws a plain `Error` with the pre-existing `"Security check failed"` message; a legitimate clone folder is still deleted when `projectsFolder` itself sits behind a symlink, since the realpath root is resolved the same way on both sides of the comparison.
+
+> **Audit trail and the regeneration-failure boundary:** when `errorLogManager` is injected, `removeRepositoryFromProject()` emits a `Severity: 'audit'`, `Source: 'repository-audit'`, `Operation: 'unlink-repository'` entry (`Context: { ProjectId, RepositoryId }`) as soon as `projectManager.removeRepository()` succeeds — the audited event ("repository unlinked and clone folders removed") is complete at that point, so the entry is emitted **unconditionally** from there on, regardless of whether the downstream `workspaceArtifacts.regenerateProject()` call succeeds. That call runs afterward inside a `try/catch`: on failure it appends a separate `Severity: 'warning'`, `Source: 'workspace-index'`, `Operation: 'unlink-repository'` entry describing the failure and execution continues, rather than propagating and erasing the audit record of a deletion that genuinely happened. A guard failure or an unlisted repository, both checked earlier, still throw before any mutation and so still produce no entry at all. `deleteRepositoryGlobally()` collects the affected project IDs during its cascade loop and, only after `repositoryManager.remove()` also succeeds, emits one summary `Operation: 'delete-repository-global'` entry with `Details` carrying the JSON-serialized affected-project-ID list; if `repositoryManager.remove()` throws, this summary entry is never written, but the per-project `unlink-repository` entries already emitted during the cascade are left in place. All entry types are no-ops when `errorLogManager` is not injected. See `data-flows.md`'s **Global Repository Deletion Cascade** for the full ordering.
+
 ### WorkspaceOrchestrator (`workspace-orchestrator.ts`)
 
 ```typescript
 class WorkspaceOrchestrator {
-    constructor(config: AppConfig, projectManager: ProjectManager, workspaceManager: WorkspaceManager, repositoryManager: RepositoryManager)
+    constructor(config: AppConfig, projectManager: ProjectManager, workspaceManager: WorkspaceManager, repositoryManager: RepositoryManager, workspaceArtifacts: WorkspaceArtifactsOrchestrator, errorLogManager?: ErrorLogManager)
 
     createWorkspace(projectId: string, workspaceId: string): Promise<OrchestrationResult>
     deleteWorkspace(projectId: string, workspaceId: string): void
     renameWorkspace(projectId: string, oldId: string, newId: string): void
 }
 ```
+
+> **`workspaceArtifacts` (`WorkspaceArtifactsOrchestrator`) injection:** All three orchestrators above now delegate every `.code-workspace`/generated-index-file read-modify-write to the injected `WorkspaceArtifactsOrchestrator` (see `workspace-artifacts.ts`, below) instead of calling `generateWorkspaceFile()`/`removeWorkspaceFile()` directly — `RepositoryOrchestrator`'s former private `regenerateWorkspaceFile()` helper has been deleted in favour of `workspaceArtifacts.regenerateProject(projectId)`. `WorkspaceOrchestrator.renameWorkspace()` regenerates the new-ID artefact set via `regenerateWorkspace(projectId, newId, { workspaceMeta: project.Workspaces[oldId] })` (see `RegenerateWorkspaceOverrides.workspaceMeta`) before removing the old ID's artefacts. **Production reachability is asymmetric:** `WorkspaceOrchestrator` and `RepositoryOrchestrator` are both instantiated in `src/server/index.ts` — `WorkspaceOrchestrator` reachable via `POST .../setup`, `RepositoryOrchestrator` reachable via `DELETE /api/repositories/:id` (which calls `deleteRepositoryGlobally()`, see `rest-api.md`). `ProjectOrchestrator` (the class) remains uninstantiated in `index.ts`; the live project-lifecycle routes call `WorkspaceArtifactsOrchestrator` directly instead (see the Artefact Reconciliation note in `rest-api.md`).
 
 ### BranchOrchestrator (`branch-orchestrator.ts`)
 
@@ -470,6 +481,112 @@ function generateWorkspaceFile(workspaceId: string, repoPaths: { slug: string; p
 function removeWorkspaceFile(filePath: string): void
 function migrateWorkspaceFiles(projectsFolder: string, projectSlugs: string[]): void  // Startup migration utility — renames legacy workspace files; called by startServer() on boot
 ```
+
+### Path Guard (`path-guard.ts`)
+
+Shared filesystem path-containment and symlink-escape guard helpers, extracted from `workspace-index.ts`'s write-guard chain (allowlist → realpath symlink-escape → shape) so the same, carefully hardened logic can be reused by a second consumer without duplicating a security-sensitive fix. Pure functions, no class state — mirrors the module shape of `vscode-workspace.ts`/`workspace-index.ts`.
+
+```typescript
+function isLexicallyContained(resolvedTarget: string, resolvedRoot: string): boolean
+function bestEffortRealpath(targetPath: string, depth?: number): string
+const MAX_SYMLINK_RESOLUTION_DEPTH = 40  // upper bound on symlink chain length bestEffortRealpath() will follow
+function resolveRootRealPath(projectsFolder: string): string
+function escapesRootViaRealpath(targetPath: string, resolvedRoot: string): boolean
+function isDirectoryShaped(targetPath: string): boolean
+```
+
+> **`isLexicallyContained()`:** purely string-based (`resolvedTarget === resolvedRoot || resolvedTarget.startsWith(resolvedRoot + path.sep)`) — does not touch the filesystem, and therefore cannot see through a planted symlink. **Its equality-permitting contract suits a writer whose target may legitimately equal the root, but is wrong for a delete guard** — `RepositoryOrchestrator.removeRepositoryFromProject()` (below) deliberately does not call this helper for its lexical layer, instead keeping a bespoke strict-descendant check that rejects equality with `projectsFolder`, so a malformed persisted ID can never resolve to the projects root.
+
+> **`bestEffortRealpath()`:** resolves a target's real path without requiring the final path component to exist, so it also resolves a *broken* symlink. `lstat`s the exact target path first — before ever asking whether it "exists" — so a symlink at the target's own leaf position is always followed explicitly, whether or not it is broken (closes a gap where `fs.existsSync()`-based ancestor walks treat a broken symlink as simply absent and silently skip over it). Follows an arbitrary symlink chain up to `MAX_SYMLINK_RESOLUTION_DEPTH` levels, then throws — callers via `escapesRootViaRealpath()` treat that as an escape.
+
+> **`resolveRootRealPath()`:** resolves a root folder's own real path for use as the comparison root in `escapesRootViaRealpath()`. Falls back to a lexical `path.resolve()` if the root itself cannot be realpath'd (e.g. it does not exist yet) — keeps the helper crash-free even though this case should not arise in practice.
+
+> **`escapesRootViaRealpath()`:** resolves `targetPath` via `bestEffortRealpath()` and reports whether the result escapes `resolvedRoot`; an unresolvable target (symlink cycle, permission error) is treated conservatively as an escape (`true`). Catches the one class of escape a lexical check alone cannot see: a symlink planted under an otherwise lexically-valid path that points outside the intended root.
+
+> **`isDirectoryShaped()`:** rejects a target that already exists on disk as a directory. Applied by the write-guard chain in `writeWorkspaceIndexFiles()` (below); deliberately **not** applied by `removeRepositoryFromProject()`'s delete guard, since the delete target (a clone folder) is expected to be a directory.
+
+> **Two distinct roots, one recurring pattern:** every consumer of this module keeps the lexical-check root (`path.resolve(root)`) and the realpath-check root (`resolveRootRealPath(root)`) as two separate values rather than unifying them — unifying them would falsely reject every legitimate write/delete whenever the configured root itself sits behind a symlink (e.g. macOS's `/tmp` → `/private/tmp`). Consumers: `workspace-index.ts`'s `writeWorkspaceIndexFiles()` guard chain (below), and `repository-orchestrator.ts`'s `removeRepositoryFromProject()` clone-folder deletion guard (see `RepositoryOrchestrator`, above).
+
+### Workspace Index Files (`workspace-index.ts`)
+
+Stateless module that renders, merges, writes, removes, and status-probes the three generated per-workspace files — `README.md`, `AGENTS.md`, `CLAUDE.md`. Never reads `ProjectManager`/`RepositoryManager` itself; callers (the artefact choke-point in `workspace-artifacts.ts`) resolve a `WorkspaceIndexContext` from the data layer first. Mirrors `vscode-workspace.ts`'s shape: pure functions, explicit path arguments, no class state.
+
+```typescript
+const WORKSPACE_INDEX_FILE_NAMES: readonly string[] // ['README.md', 'AGENTS.md', 'CLAUDE.md']
+const GENERATED_BEGIN_MARKER = '<!-- paralizer:generated:begin -->'
+const GENERATED_END_MARKER = '<!-- paralizer:generated:end -->'
+
+interface WorkspaceIndexRepositoryRow {
+    id: string;
+    name: string;
+    description: string;  // empty string when none is set
+    url: string;
+}
+
+interface WorkspaceIndexContext {
+    projectsFolder: string;
+    projectId: string;
+    projectName: string;
+    projectDescription: string;   // empty string when none is set
+    workspaceId: string;
+    workspaceDescription: string; // empty string when none is set
+    workspaceNotes: string;       // empty string when none are set
+    repositories: WorkspaceIndexRepositoryRow[]; // project.Repositories order
+    guiUrl: string;                // built from config.serverPort
+    toolVersion: string;           // from getToolVersion()
+    generatedAt: string;           // ISO 8601
+}
+
+function escapeMarkdownCell(value: string): string
+function renderWorkspaceReadme(ctx: WorkspaceIndexContext): string
+function renderWorkspaceAgents(ctx: WorkspaceIndexContext): string
+function renderClaudePointer(): string
+function mergeGeneratedContent(existing: string | null, generatedBody: string): { content: string; skipped: boolean }
+function writeWorkspaceIndexFiles(ctx: WorkspaceIndexContext): { written: string[]; skipped: string[] }
+function removeWorkspaceIndexFiles(projectsFolder: string, projectId: string, workspaceId: string): void
+function checkIndexFileStatus(projectsFolder: string, projectId: string, workspaceId: string): { missing: string[]; unmanaged: string[] }
+```
+
+> **The marker fence:** every generated file has its regenerated region wrapped in `GENERATED_BEGIN_MARKER`/`GENERATED_END_MARKER` HTML comments. `mergeGeneratedContent()` replaces only the text between the markers on regeneration, preserving hand-added prose before/after the fence verbatim. When a file exists but contains no begin marker, it is treated as fully hand-authored: `mergeGeneratedContent()` returns it unchanged with `skipped: true`, and both `writeWorkspaceIndexFiles()` and `removeWorkspaceIndexFiles()` leave it untouched. All three behaviours (merge, write-skip, remove-skip) and the read-only `checkIndexFileStatus()` probe share one private predicate, `hasBeginMarker()`, so "managed" vs. "unmanaged" is defined exactly once in the module.
+
+> **`escapeMarkdownCell()`:** escapes `|`, collapses CR/LF to a single space, and trims. Applied to every user-supplied string embedded in the generated body — `projectDescription`, `workspaceDescription`, `workspaceNotes`, and each repository row's `name`/`description`/`url` (`id` is not escaped, since `RepositoryManager` already restricts it to kebab-case). This exists because none of `Repository.Url`, `.Description`, or workspace `notes`/`description` are validated against `|`/newline by their respective managers — only `escapeMarkdownCell()` prevents a value containing either from corrupting the generated Markdown table or, for `url` specifically, being stored as raw unescaped content in a file designed to be committed to shared git repos (closed as a Medium-severity finding during this WP's security audit).
+
+> **`writeWorkspaceIndexFiles()` write guards:** for each target file, runs — in order, before any read or write — a lexical containment check (`isLexicallyContained()`, `path.resolve`-based, no filesystem access), a realpath symlink-escape check (`escapesRootViaRealpath()`, built on `bestEffortRealpath()`, which `lstat`s the exact target path first so it also catches a *broken* symlink planted at the target's leaf position — a case a naive `fs.existsSync()`-based ancestor walk misses), and a directory-shape check (`isDirectoryShaped()`). All five guard functions now live in the shared `src/utils/path-guard.ts` module (see `Path Guard`, below) rather than being defined locally in this file — `repository-orchestrator.ts`'s delete-path guard reuses the same realpath/root-resolution helpers. A target that fails any guard, or that exists without the begin marker, is reported in `skipped` and never throws. **No `mkdir`:** the function is a complete no-op when the workspace folder does not exist — that absence is a meaningful signal elsewhere in the system (an uninitialised workspace is reported healthy; `POST …/regenerate-workspace-file` returns 400 when absent), so fabricating the folder here would misrepresent an uninitialised workspace as set up.
+
+> **Two distinct roots in the guard chain:** the lexical check compares a lexically-resolved target against `path.resolve(projectsFolder)`; the realpath check compares a realpath'd target against a separately realpath'd `projectsFolder` (via `resolveRootRealPath()`). Unifying them into one resolved root causes every legitimate write to be falsely rejected whenever the configured root itself sits behind a symlink (e.g. macOS's `/tmp` → `/private/tmp`) — the same pattern reused by `RepositoryOrchestrator.removeRepositoryFromProject()`'s delete guard (see `Path Guard`, below, and `RepositoryOrchestrator`, above).
+
+> **`checkIndexFileStatus()`:** read-only, no writes, no `mkdir`; returns both arrays empty when the workspace folder is absent. Consumed by `checkWorkspaceHealth()` (`workspace-health.ts`, below). Classifies each of the three files as missing (absent array entry), present-managed (absent from both arrays), or present-unmanaged (in `unmanaged`) — guaranteed consistent with what the writer/remover would do to the same file, since all three share `hasBeginMarker()`.
+
+### Workspace Artifacts Orchestrator (`workspace-artifacts.ts`)
+
+Single choke-point for the "per-workspace artefact set": the `.code-workspace` file (via `vscode-workspace.ts`) plus the three generated index files (via `workspace-index.ts`, above). Every caller needing to create, refresh, or remove a workspace's on-disk artefacts should go through this orchestrator rather than calling `generateWorkspaceFile()`/`writeWorkspaceIndexFiles()` directly, so a future third artefact only needs wiring in one place.
+
+```typescript
+interface RegenerateWorkspaceOverrides {
+    workspaceMeta?: ProjectWorkspace;  // see note below
+}
+
+class WorkspaceArtifactsOrchestrator {
+    constructor(config: AppConfig, projectManager: ProjectManager, repositoryManager: RepositoryManager)
+
+    regenerateWorkspace(projectId: string, workspaceId: string, overrides?: RegenerateWorkspaceOverrides): void
+    regenerateProject(projectId: string): void
+    regenerateForRepository(repositoryId: string): void
+    removeWorkspace(projectId: string, workspaceId: string): void
+}
+```
+
+> **`.code-workspace` vs. index-file initialisation asymmetry:** `regenerateWorkspace()` preserves `generateWorkspaceFile()`'s existing unconditional-write behaviour (it writes, and `mkdir -p`s its parent, even for a workspace whose own folder does not exist yet), but `writeWorkspaceIndexFiles()` is a deliberate no-op in that same case (see `workspace-index.ts` above). Calling `regenerateWorkspace()` on an uninitialised workspace therefore still produces a `.code-workspace` file while silently skipping the three index files.
+
+> **Repository resolution:** `regenerateWorkspace()` resolves `project.Repositories` against the live `RepositoryManager` store, silently skipping any ID no longer present (a repository can be deleted globally while still transiently listed on a project) — the deleted repository is omitted from both the `.code-workspace` folder list and the index-file repository table, never throwing.
+
+> **`overrides.workspaceMeta`:** `WorkspaceOrchestrator.renameWorkspace()` moves the workspace folder on disk and regenerates the artefact set for the *new* workspace ID before `WorkspaceManager.rename()` updates `project.Workspaces` — at that point `project.Workspaces[newId]` does not exist yet. Passing the pre-rename `ProjectWorkspace` entry via `overrides.workspaceMeta` lets `regenerateWorkspace()` render the new artefacts without requiring the rename orchestration to reorder its own filesystem-before-metadata-validation flow. When omitted, `regenerateWorkspace()` throws if `workspaceId` is not present in `project.Workspaces`.
+
+> **`regenerateProject()`/`regenerateForRepository()`:** the former iterates every `project.Workspaces` entry; the latter enumerates all projects via `ProjectManager.list()` + `getById()`, regenerating (via `regenerateProject()`) each project that lists the given repository ID and skipping the rest.
+
+> **`removeWorkspace()`:** calls both `removeWorkspaceFile()` and `removeWorkspaceIndexFiles()`, each already tolerant of a missing target — no folder-existence check is needed here.
+
+> **Migrated onto by all three orchestrators:** `WorkspaceOrchestrator`, `ProjectOrchestrator`, and `RepositoryOrchestrator` (above) now construct-inject this orchestrator and call it exclusively for artefact generation/removal; `repository-orchestrator.ts`'s former private `regenerateWorkspaceFile()` helper has been deleted. A source-level guard test (`workspace-artifacts-chokepoint.test.ts`) asserts no module outside this file imports `generateWorkspaceFile`/`removeWorkspaceFile`/`writeWorkspaceIndexFiles`/`removeWorkspaceIndexFiles`, and its `TEMPORARY_EXCEPTIONS` allowlist — the mechanism for recording a file that still needs migrating onto this choke-point during an intentionally-incomplete migration — is currently empty by design: `src/server/routes/workspaces.ts`'s former `regenerate-workspace-file` route handler, the allowlist's one-time entry, has since been migrated onto `workspaceArtifacts.regenerateWorkspace()` and no longer imports any guarded identifier, so the stale entry was removed. Any future entry must satisfy two conditions — the named file must exist, and it must still reference a guarded module (`workspace-index.js` or `vscode-workspace.js`) via `referencesGuardedModule()` — both now mechanically enforced by the guard test's assertion (previously an existence-only check that could not detect a stale entry). `referencesGuardedModule()` catches every import shape (named, namespace, default, side-effect, dynamic `import()`, `require()`), not just static named imports, closing the import-shape bypasses the prior identifier-inside-named-import-clause detection missed; see the Choke-Point Guard Tests entry in `constraints.md` for the identifier-vs-specifier gating rationale. `WorkspaceArtifactsOrchestrator` itself is instantiated exactly once, in `src/server/index.ts`, and injected into `WorkspaceOrchestrator`, `registerWorkspaceRoutes()`, `registerRepositoryRoutes()`, and (as of a later WP) `registerProjectRoutes()` directly — see that registrar's updated signature above. `ProjectOrchestrator` (the class) still accepts `workspaceArtifacts` via constructor but is not itself instantiated in `index.ts`; the live project-lifecycle *routes* instead call `WorkspaceArtifactsOrchestrator` directly rather than through the `ProjectOrchestrator` class (see the Artefact Reconciliation note in `rest-api.md`'s Projects/Workspaces sections for the six lifecycle routes now wired this way).
 
 ### Workspace Health (`workspace-health.ts`)
 
@@ -496,7 +613,9 @@ function checkWorkspaceHealth(
 ): WorkspaceHealthReport
 ```
 
-> **Credential-missing check:** When `errorLogManager` is supplied, `checkWorkspaceHealth` performs an additional Check 3: it queries all `Source: 'credentials'` log entries scoped to the workspace and inspects the most recent entry per repository. A `credential-missing` health issue is surfaced only when the most recent entry has `Severity: 'error'`. A `Severity: 'info'` entry — written by `WorkspaceOrchestrator.createWorkspace()` or `RepositoryOrchestrator.addRepositoryToProject()` after a successful credential-based clone — suppresses the stale error badge without deleting history. SSH clones (`credential === null`) do not produce a credentials log entry and are not evaluated by this check.
+> **Generated index-file check (Check 3):** `checkWorkspaceHealth()` calls `checkIndexFileStatus()` (from `workspace-index.ts`, above) exactly once, side-effect free, and folds its result into up to two issues: `workspace-index-missing` (`severity: 'warning'`, `fixAction: 'regenerate-workspace-file'`) when any of the three generated files is absent, and `workspace-index-unmanaged` (`severity: 'warning'`, `fixAction: 'none'`) when any is present but hand-authored (no begin marker) — no automated fix is offered for the latter, since regenerating would either be a silent no-op or clobber deliberate user content. `checkWorkspaceHealth()` never imports `GENERATED_BEGIN_MARKER` or reads an index file's content directly; `checkIndexFileStatus()` remains the single source of truth for marker detection, shared with the writer and remover in `workspace-index.ts`. `checkIndexFileStatus()` already returns empty arrays for an uninitialised workspace, so this check needs no separate folder-existence branch.
+
+> **Credential-missing check (Check 4):** When `errorLogManager` is supplied, `checkWorkspaceHealth` performs an additional check: it queries all `Source: 'credentials'` log entries scoped to the workspace and inspects the most recent entry per repository. A `credential-missing` health issue is surfaced only when the most recent entry has `Severity: 'error'`. A `Severity: 'info'` entry — written by `WorkspaceOrchestrator.createWorkspace()` or `RepositoryOrchestrator.addRepositoryToProject()` after a successful credential-based clone — suppresses the stale error badge without deleting history. SSH clones (`credential === null`) do not produce a credentials log entry and are not evaluated by this check.
 
 ---
 
@@ -560,6 +679,14 @@ function isValidKebabCase(input: string): boolean
 function inferSlugFromUrl(url: string): string
 function isValidWorkspaceId(id: string): boolean
 ```
+
+### Version (`version.ts`)
+
+```typescript
+function getToolVersion(): string
+```
+
+> No-argument accessor for the tool's own version, read from `package.json` at `getToolRoot()` (see `paths.ts`). Returns `'unknown'` — never throws — when the file is missing, unreadable, or lacks a non-empty string `version` field. Extracted specifically so callers (e.g. `registerVersionRoute()` in `src/server/routes/version.ts`) never need to know the tool's `package.json` path. The route's own `readVersion(pkgPath: string)` (private, unexported) remains separate and path-taking, since it also reads the GUI's distinct `package.json`.
 
 ---
 
@@ -837,11 +964,19 @@ function registerRepositoryRoutes(
     router: Router,
     repoManager: RepositoryManager,
     appConfig: AppConfig,
-    errorLogManager?: ErrorLogManager,  // optional — when provided, credential assign/clear ops emit audit log entries
+    workspaceArtifactsOrchestrator: WorkspaceArtifactsOrchestrator,  // consulted by PUT /:id (regenerateForRepository()) after a successful update
+    repositoryOrchestrator: RepositoryOrchestrator,  // consulted by DELETE /:id (deleteRepositoryGlobally())
+    errorLogManager?: ErrorLogManager,  // optional — when provided, credential assign/clear ops and artefact-regeneration warnings emit audit/log entries
 ): void
 
 // projects.ts
-function registerProjectRoutes(router: Router, projectManager: ProjectManager): void
+function registerProjectRoutes(
+    router: Router,
+    projectManager: ProjectManager,
+    workspaceArtifacts: WorkspaceArtifactsOrchestrator,
+    repositoryOrchestrator: RepositoryOrchestrator,  // consulted by DELETE /:id/repositories/:repoId (removeRepositoryFromProject()), which also deletes clone folders from every workspace and emits the unlink-repository audit entry
+    errorLogManager: ErrorLogManager,
+): void
 
 // workspaces.ts
 function registerWorkspaceRoutes(
@@ -851,6 +986,7 @@ function registerWorkspaceRoutes(
     appConfig: AppConfig,
     projectManager: ProjectManager,
     errorLogManager: ErrorLogManager,
+    workspaceArtifactsOrchestrator: WorkspaceArtifactsOrchestrator,  // injected for future wiring; not yet consulted by any handler body
     launchFn?: (command: string, args: string[]) => Promise<void>,  // test-only; defaults to launchApplication
     launchTerminalFn?: (directoryPath: string) => Promise<void>,  // test-only; defaults to launchTerminal
 ): void
@@ -1107,14 +1243,14 @@ shell.close();
 
 ### `showRepositoryModal` (`components/repository-modal.js`)
 
-Create/edit modal for a repository. A single implementation serves both flows since they share all four fields (URL, Name, ID, Credential), differing only in pre-fill values and which fields are disabled. Built on `createModalShell` with `className: 'modal--form'`.
+Create/edit modal for a repository. A single implementation serves both flows since they share all five fields (URL, Name, ID, Description, Credential), differing only in pre-fill values and which fields are disabled. Built on `createModalShell` with `className: 'modal--form'`.
 
 ```js
 import { showRepositoryModal } from './components/repository-modal.js';
 
 // config: {
 //   mode: 'create'|'edit',
-//   repo?: { id, name, url, credentialId? },  — required (and only used) in 'edit' mode
+//   repo?: { id, name, url, description?, credentialId? },  — required (and only used) in 'edit' mode
 // }
 // Returns: Promise<Repository>  — normalised, saved repository;
 //   rejects with Error('User cancelled') on Cancel/Escape/backdrop-click.
@@ -1124,6 +1260,7 @@ const repo = await showRepositoryModal({ mode: 'edit', repo: existingRepo });
 
 - URL is required and editable in both modes; Name is optional and editable in both modes.
 - ID is editable in create mode; disabled and excluded from the edit-mode `update()` payload.
+- Description is an optional textarea field, editable in both modes, pre-filled from `repo.description || ''` in edit mode. The create payload omits it when blank; the update payload always includes it (even `''`) so clearing persists.
 - Credential is a `<select>` repopulated after every `api.repositories.credentialOptionsForUrl()` fetch, selecting: the stored credential ID when still present among the options, else the single option flagged `auto: true` when exactly one exists, else `''` (None).
 - Edit mode fetches credential options once on mount (keyed by `repo.url`); create mode skips the initial fetch. Both modes debounce (~400ms) a re-fetch on URL-field `input` events.
 - Submit: create mode calls `create()` then `updateCredential()` when a credential is selected; edit mode calls `update(repo.id, { name, url })` then `updateCredential()` only when the selection differs from `repo.credentialId ?? ''`. A rejected `updateCredential()` still resolves the Promise with the pre-credential-update repository (with an error toast); a rejected primary call re-enables all controls, shows a toast, and keeps the modal open.
