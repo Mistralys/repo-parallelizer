@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.5.0 - Workspace Index Files
+
+**Workspaces now get auto-generated README, AGENTS.md, and CLAUDE.md index files.**
+These files summarize the project, workspace, and repository list, and stay in sync
+as data changes while preserving any hand-added content. Repositories and workspaces
+can now also carry a short description, shown throughout the GUI.
+
+- Workspaces: AGENTS.md, README, and CLAUDE.md index files are now auto-generated per workspace.
+- GUI: Added description fields to repositories and workspaces.
+- Workspaces: Health checks now flag missing or hand-edited index files.
+- Security: Added path-traversal protections when generating workspace files.
+
 ## v1.4.0 - Terminal Launch Button
 
 - GUI: Added an "Open in Terminal" button to launch a terminal window at a workspace's folder.
