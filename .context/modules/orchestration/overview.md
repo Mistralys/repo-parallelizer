@@ -49,6 +49,6 @@ After a successful credential-based clone, both `WorkspaceOrchestrator.createWor
 ```
 ---
 **File Statistics**
-- **Size**: 1.67 KB
-- **Lines**: 44
+- **Size**: 2.77 KB
+- **Lines**: 55
 File: `modules/orchestration/overview.md`

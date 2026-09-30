@@ -77,6 +77,7 @@
     │           └── notes-collected.js
     │           └── notes-collected.test.mjs
     │           └── project-detail.js
+    │           └── project-detail.remove-repository.test.mjs
     │           └── repositories.js
     │           └── repositories.test.mjs
     │           └── repository-detail.js
@@ -84,6 +85,8 @@
     │           └── settings.js
     │           └── settings.test.mjs
     │           └── workspace-detail.credential-error.test.mjs
+    │           └── workspace-detail.description.test.mjs
+    │           └── workspace-detail.index-health.test.mjs
     │           └── workspace-detail.js
     │           └── workspace-detail.notes.test.mjs
     │           └── workspace-detail.open-button.test.mjs
@@ -141,7 +144,9 @@
     │   ├── project-orchestrator.ts
     │   ├── repository-orchestrator.ts
     │   ├── vscode-workspace.ts
+    │   ├── workspace-artifacts.ts
     │   ├── workspace-health.ts
+    │   ├── workspace-index.ts
     │   ├── workspace-orchestrator.ts
     ├── server/
     │   ├── README.md
@@ -202,6 +207,7 @@
     │   ├── git-status.test.ts
     │   ├── json-storage.test.ts
     │   ├── module-context.yaml
+    │   ├── path-guard.test.ts
     │   ├── paths.test.ts
     │   ├── project-orchestrator.test.ts
     │   ├── project.manager.test.ts
@@ -211,20 +217,26 @@
     │   ├── slug.test.ts
     │   ├── storage-init.test.ts
     │   ├── test-helpers.ts
+    │   ├── version.test.ts
     │   ├── vscode-workspace.test.ts
+    │   ├── workspace-artifacts-chokepoint.test.ts
+    │   ├── workspace-artifacts.test.ts
     │   ├── workspace-health.test.ts
+    │   ├── workspace-index.test.ts
     │   ├── workspace-orchestrator.test.ts
     │   ├── workspace.manager.test.ts
     ├── utils/
     │   └── README.md
     │   └── module-context.yaml
+    │   └── path-guard.ts
     │   └── paths.ts
     │   └── slug.ts
+    │   └── version.ts
 └── tsconfig.json
 
 ```
 ---
 **File Statistics**
-- **Size**: 8.4 KB
-- **Lines**: 231
+- **Size**: 8.89 KB
+- **Lines**: 242
 File: `project-folder-structure.md`

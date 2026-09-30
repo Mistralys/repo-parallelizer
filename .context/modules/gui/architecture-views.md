@@ -2852,7 +2852,9 @@ export async function renderNotesCollected(container, _params) {
  *
  * Renders the full detail page for a single project:
  *   - Project metadata (ID, name/description with inline description edit).
- *   - Repositories section: list with per-repo Remove, plus "Add Repository" picker.
+ *   - Repositories section: list with per-repo Remove (deletes the repo's cloned
+ *     folders from disk across this project's workspaces; the global repository
+ *     record is retained), plus "Add Repository" picker.
  *   - Workspaces section: list with links, per-workspace Delete (STABLE disabled),
  *     and "Add Workspace" form.
  *   - Rename Project action (changes project ID).
@@ -3060,7 +3062,9 @@ function buildMetaSection(project) {
  * Build the Repositories section for a project.
  *
  * Lists repos currently in the project (cross-referenced with global repo list
- * for name/URL). Provides a Remove button per repo and an "Add Repository"
+ * for name/URL). Provides a Remove button per repo — which permanently deletes
+ * the repository's cloned folders from disk in every workspace of this project
+ * while retaining the global repository record — and an "Add Repository"
  * picker that excludes already-added repos.
  *
  * @param {string}   projectId       - Current project ID.
@@ -3134,7 +3138,7 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
                 try {
                     await showConfirm(
                         'Remove Repository',
-                        `Remove "${label}" from this project? The repository itself is not deleted.`,
+                        `Remove "${label}" from this project? The repository's cloned folders in every workspace of this project will be permanently deleted from disk. The global repository record itself is retained and can be re-added later.`,
                     );
                 } catch {
                     return;
@@ -3869,7 +3873,7 @@ export async function renderProjectDetail(container, params) {
  * Repositories View — Repo Parallelizer GUI.
  *
  * Renders a full CRUD management page for all registered repositories:
- *   - Table listing all repositories (ID, Name, URL).
+ *   - Table listing all repositories (ID, Name, URL, Description, Credential).
  *   - "+ Add Repository" button opening the create/edit modal in create mode.
  *   - Edit button per row opening the same modal in edit mode.
  *   - Delete per row with a confirmation dialog.
@@ -3899,7 +3903,7 @@ function buildTableHead() {
     const thead = document.createElement('thead');
     const tr    = document.createElement('tr');
 
-    ['ID', 'Name', 'URL', 'Credential', 'Actions'].forEach((label) => {
+    ['ID', 'Name', 'URL', 'Description', 'Credential', 'Actions'].forEach((label) => {
         const th = document.createElement('th');
         th.textContent = label;
         tr.appendChild(th);
@@ -3907,6 +3911,26 @@ function buildTableHead() {
 
     thead.appendChild(tr);
     return thead;
+}
+
+// ---------------------------------------------------------------------------
+// Description truncation
+// ---------------------------------------------------------------------------
+
+/** Maximum number of characters shown inline in the Description column before truncating. */
+const DESCRIPTION_TRUNCATE_LENGTH = 60;
+
+/**
+ * Truncate `text` to `DESCRIPTION_TRUNCATE_LENGTH` characters, appending an
+ * ellipsis when truncated. The full, untruncated text is expected to be set
+ * separately as a `title` attribute so it remains available on hover.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function truncateDescription(text) {
+    if (text.length <= DESCRIPTION_TRUNCATE_LENGTH) return text;
+    return `${text.slice(0, DESCRIPTION_TRUNCATE_LENGTH).trimEnd()}…`;
 }
 
 /**
@@ -3917,7 +3941,7 @@ function buildTableHead() {
  * create/edit modal in edit mode, pre-filled with the row's current data.
  * Clicking Delete shows a confirmation dialog and calls the API on confirm.
  *
- * @param {{ id: string, name: string, url: string }} repo
+ * @param {{ id: string, name: string, url: string, description: string }} repo
  * @param {function(): void} onChanged - Callback to refresh the table after a change (edit save or delete).
  * @returns {HTMLTableRowElement}
  */
@@ -3954,6 +3978,17 @@ function buildRepoRow(repo, onChanged) {
     urlLink.className = 'repo-url-link';
     urlCell.appendChild(urlLink);
     tr.appendChild(urlCell);
+
+    // ---- Description cell (truncated, full text on hover) ----
+    const descriptionCell = document.createElement('td');
+    descriptionCell.className = 'repo-description-cell';
+    if (repo.description) {
+        descriptionCell.textContent = truncateDescription(repo.description);
+        descriptionCell.title = repo.description;
+    } else {
+        descriptionCell.textContent = '—';
+    }
+    tr.appendChild(descriptionCell);
 
     // ---- Credential status cell ----
     const credentialCell = document.createElement('td');
@@ -4518,7 +4553,7 @@ function formatRelativeTime(date) {
  *   - Repository ID and URL (URL as an external `<a>`).
  *   - A "Refresh" button (wired by the caller after construction).
  *
- * @param {{ id: string, name: string, url: string }} repo
+ * @param {{ id: string, name: string, url: string, description: string }} repo
  * @returns {{ header: HTMLElement, refreshBtn: HTMLButtonElement }}
  */
 function buildHeader(repo) {
@@ -4561,6 +4596,14 @@ function buildHeader(repo) {
     }
 
     header.appendChild(titleRow);
+
+    // Description (shown only when present)
+    if (repo.description) {
+        const descEl = document.createElement('p');
+        descEl.className   = 'project-meta-description text-secondary';
+        descEl.textContent = repo.description;
+        header.appendChild(descEl);
+    }
 
     // URL row
     if (repo.url) {
@@ -6856,7 +6899,7 @@ function buildHealthAlertSection(healthReport, callbacks) {
             const btn = document.createElement('button');
             btn.type = 'button';
             btn.className = 'btn btn-secondary btn-sm';
-            btn.textContent = 'Regenerate File';
+            btn.textContent = 'Regenerate Files';
             btn.addEventListener('click', async () => {
                 btn.disabled = true;
                 btn.textContent = 'Regenerating\u2026';
@@ -6864,7 +6907,7 @@ function buildHealthAlertSection(healthReport, callbacks) {
                     await callbacks.onRegenerate();
                 } finally {
                     btn.disabled = false;
-                    btn.textContent = 'Regenerate File';
+                    btn.textContent = 'Regenerate Files';
                 }
             });
             actionWrap.appendChild(btn);
@@ -6912,35 +6955,46 @@ function buildHealthAlertSection(healthReport, callbacks) {
 }
 
 // ---------------------------------------------------------------------------
-// Notes section builder
+// Debounced text-field section builder
 // ---------------------------------------------------------------------------
 
 /**
- * Build the Notes textarea section with debounced auto-save and status indicator.
+ * Build a debounced-textarea field section with auto-save and a status
+ * indicator. Shared by the Notes and Description sections \u2014 both are plain
+ * string fields on the same workspace resource, saved through the same
+ * `api.workspaces.update()` call.
  *
- * @param {string} initialNotes - Pre-populated notes value from the workspace.
+ * DOM structure and class names are generated from `idSuffix` as
+ * `workspace-{idSuffix}-section` / `-label` / `-textarea` / `-status`, and
+ * the textarea's `id` is `workspace-{idSuffix}-textarea`. Passing `'notes'`
+ * reproduces the original `buildNotesSection()` output byte-for-byte.
+ *
+ * @param {string} label - Visible label text for the field (e.g. `'Notes'`).
+ * @param {string} idSuffix - Kebab-case suffix used to derive element IDs and
+ *   class names (e.g. `'notes'`, `'description'`).
+ * @param {string} initialValue - Pre-populated value from the workspace.
  * @param {function(string): Promise<void>} onSave - Called with the current
- *   textarea value after the 1000 ms debounce; should persist the notes.
+ *   textarea value after the 1000 ms debounce; should persist the field.
  * @returns {HTMLElement}
  */
-function buildNotesSection(initialNotes, onSave) {
+function buildTextFieldSection(label, idSuffix, initialValue, onSave) {
     const section = document.createElement('section');
-    section.className = 'workspace-notes-section';
+    section.className = `workspace-${idSuffix}-section`;
 
-    const label = document.createElement('label');
-    label.htmlFor = 'workspace-notes-textarea';
-    label.className = 'workspace-notes-label';
-    label.textContent = 'Notes';
-    section.appendChild(label);
+    const labelEl = document.createElement('label');
+    labelEl.htmlFor = `workspace-${idSuffix}-textarea`;
+    labelEl.className = `workspace-${idSuffix}-label`;
+    labelEl.textContent = label;
+    section.appendChild(labelEl);
 
     const textarea = document.createElement('textarea');
-    textarea.id = 'workspace-notes-textarea';
-    textarea.className = 'workspace-notes-textarea';
-    textarea.value = initialNotes;
+    textarea.id = `workspace-${idSuffix}-textarea`;
+    textarea.className = `workspace-${idSuffix}-textarea`;
+    textarea.value = initialValue;
     section.appendChild(textarea);
 
     const statusEl = document.createElement('span');
-    statusEl.className = 'workspace-notes-status';
+    statusEl.className = `workspace-${idSuffix}-status`;
     statusEl.setAttribute('aria-live', 'polite');
     statusEl.hidden = true;
     section.appendChild(statusEl);
@@ -6963,6 +7017,18 @@ function buildNotesSection(initialNotes, onSave) {
     });
 
     return section;
+}
+
+/**
+ * Build the Notes textarea section with debounced auto-save and status indicator.
+ *
+ * @param {string} initialNotes - Pre-populated notes value from the workspace.
+ * @param {function(string): Promise<void>} onSave - Called with the current
+ *   textarea value after the 1000 ms debounce; should persist the notes.
+ * @returns {HTMLElement}
+ */
+function buildNotesSection(initialNotes, onSave) {
+    return buildTextFieldSection('Notes', 'notes', initialNotes, onSave);
 }
 
 // ---------------------------------------------------------------------------
@@ -7437,6 +7503,12 @@ export function renderWorkspaceDetail(container, params) {
             container.appendChild(buildSwitchBranchesButton(projectId, wid));
         }
 
+        // Description section — always shown below the status table, above Notes.
+        container.appendChild(buildTextFieldSection('Description', 'description', workspace.description, async (description) => {
+            await api.workspaces.update(projectId, wid, { description });
+            workspace.description = description;
+        }));
+
         // Notes section — always shown below the status table.
         container.appendChild(buildNotesSection(workspace.notes, async (notes) => {
             await api.workspaces.update(projectId, wid, { notes });
@@ -7483,6 +7555,6 @@ export function renderWorkspaceDetail(container, params) {
 ```
 ---
 **File Statistics**
-- **Size**: 277.62 KB
-- **Lines**: 7489
+- **Size**: 280.72 KB
+- **Lines**: 7557
 File: `modules/gui/architecture-views.md`

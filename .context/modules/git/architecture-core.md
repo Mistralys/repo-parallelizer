@@ -822,6 +822,6 @@ export interface RunGitOptions {
 ```
 ---
 **File Statistics**
-- **Size**: 27.51 KB
-- **Lines**: 755
+- **Size**: 30.6 KB
+- **Lines**: 828
 File: `modules/git/architecture-core.md`

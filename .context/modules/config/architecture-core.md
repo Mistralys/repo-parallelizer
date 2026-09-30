@@ -123,6 +123,17 @@ export const MAX_CREDENTIAL_HOST_LENGTH = 253;
  */
 export const MAX_CREDENTIAL_TOKEN_LENGTH = 500;
 
+// ---------------------------------------------------------------------------
+// Repository — per-field maximum lengths
+// ---------------------------------------------------------------------------
+
+/**
+ * Maximum character length for a repository `Description` field.
+ * 500 characters is sufficient for a short, human-readable summary while
+ * guarding against unbounded input.
+ */
+export const MAX_REPOSITORY_DESCRIPTION_LENGTH = 500;
+
 ```
 ###  Path: `/src/config/config.ts`
 
@@ -591,6 +602,6 @@ export interface AppConfig {
 ```
 ---
 **File Statistics**
-- **Size**: 13.49 KB
-- **Lines**: 416
+- **Size**: 21.22 KB
+- **Lines**: 608
 File: `modules/config/architecture-core.md`

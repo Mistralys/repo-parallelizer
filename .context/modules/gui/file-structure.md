@@ -50,6 +50,7 @@
                 └── notes-collected.js
                 └── notes-collected.test.mjs
                 └── project-detail.js
+                └── project-detail.remove-repository.test.mjs
                 └── repositories.js
                 └── repositories.test.mjs
                 └── repository-detail.js
@@ -57,6 +58,8 @@
                 └── settings.js
                 └── settings.test.mjs
                 └── workspace-detail.credential-error.test.mjs
+                └── workspace-detail.description.test.mjs
+                └── workspace-detail.index-health.test.mjs
                 └── workspace-detail.js
                 └── workspace-detail.notes.test.mjs
                 └── workspace-detail.open-button.test.mjs
@@ -66,6 +69,6 @@
 ```
 ---
 **File Statistics**
-- **Size**: 2.64 KB
-- **Lines**: 72
+- **Size**: 2.76 KB
+- **Lines**: 74
 File: `modules/gui/file-structure.md`

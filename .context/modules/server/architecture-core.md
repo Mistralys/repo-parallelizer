@@ -171,6 +171,8 @@ import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import { WorkspaceOrchestrator } from '../orchestration/workspace-orchestrator.js';
+import { WorkspaceArtifactsOrchestrator } from '../orchestration/workspace-artifacts.js';
+import { RepositoryOrchestrator } from '../orchestration/repository-orchestrator.js';
 import { BranchOrchestrator } from '../orchestration/branch-orchestrator.js';
 import { ErrorLogManager } from '../error-log/error-log.manager.js';
 import { PollingManager } from './pollingManager.js';
@@ -260,11 +262,24 @@ export function startServer(config: ServerConfig): Promise<void> {
     const projectManager = new ProjectManager(config.appConfig, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
     const errorLogManager = new ErrorLogManager(config.appConfig);
+    const workspaceArtifactsOrchestrator = new WorkspaceArtifactsOrchestrator(
+        config.appConfig,
+        projectManager,
+        repoManager,
+    );
     const workspaceOrchestrator = new WorkspaceOrchestrator(
         config.appConfig,
         projectManager,
         workspaceManager,
         repoManager,
+        workspaceArtifactsOrchestrator,
+        errorLogManager,
+    );
+    const repositoryOrchestrator = new RepositoryOrchestrator(
+        config.appConfig,
+        projectManager,
+        repoManager,
+        workspaceArtifactsOrchestrator,
         errorLogManager,
     );
     const branchOrchestrator = new BranchOrchestrator(
@@ -298,9 +313,9 @@ export function startServer(config: ServerConfig): Promise<void> {
     // ------------------------------------------------------------------
     const router = new Router();
     router.setErrorLogManager(errorLogManager);
-    registerRepositoryRoutes(router, repoManager, config.appConfig, errorLogManager);
-    registerProjectRoutes(router, projectManager);
-    registerWorkspaceRoutes(router, workspaceManager, workspaceOrchestrator, config.appConfig, projectManager, errorLogManager);
+    registerRepositoryRoutes(router, repoManager, config.appConfig, workspaceArtifactsOrchestrator, repositoryOrchestrator, errorLogManager);
+    registerProjectRoutes(router, projectManager, workspaceArtifactsOrchestrator, repositoryOrchestrator, errorLogManager);
+    registerWorkspaceRoutes(router, workspaceManager, workspaceOrchestrator, config.appConfig, projectManager, errorLogManager, workspaceArtifactsOrchestrator);
     registerBranchRoutes(router, branchOrchestrator, workspaceManager);
     registerStatusRoutes(router, pollingManager, projectManager, workspaceManager, config.appConfig);
     registerConfigRoutes({ router, appConfig: config.appConfig, pollingManager, errorLogManager });
@@ -1163,6 +1178,6 @@ export async function serveStatic(
 ```
 ---
 **File Statistics**
-- **Size**: 44.04 KB
-- **Lines**: 1169
+- **Size**: 44.74 KB
+- **Lines**: 1184
 File: `modules/server/architecture-core.md`

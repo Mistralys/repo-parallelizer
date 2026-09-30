@@ -294,6 +294,6 @@ export interface ErrorLogListResult {
 ```
 ---
 **File Statistics**
-- **Size**: 9.5 KB
+- **Size**: 9.52 KB
 - **Lines**: 300
 File: `modules/error-log/architecture-core.md`

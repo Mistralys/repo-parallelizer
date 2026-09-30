@@ -50,6 +50,6 @@ Loads and validates the application configuration from a `config.json` file on d
 ```
 ---
 **File Statistics**
-- **Size**: 1.71 KB
-- **Lines**: 35
+- **Size**: 4.4 KB
+- **Lines**: 56
 File: `modules/config/overview.md`

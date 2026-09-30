@@ -51,6 +51,6 @@ SSH URLs (`git@…`, `ssh://…`) return `null` from `extractHost()` and are byp
 ```
 ---
 **File Statistics**
-- **Size**: 2.11 KB
-- **Lines**: 46
+- **Size**: 3.25 KB
+- **Lines**: 57
 File: `modules/git/overview.md`

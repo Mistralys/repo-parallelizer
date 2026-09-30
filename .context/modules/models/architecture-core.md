@@ -593,6 +593,7 @@ import { readJsonFile, writeJsonFile, FileNotFoundError } from '../../storage/js
 import { inferSlugFromUrl, isValidKebabCase } from '../../utils/slug.js';
 import { NotFoundError } from '../../errors.js';
 import { hasEmbeddedCredentials, stripEmbeddedCredentials } from '../../git/git-credentials.js';
+import { MAX_REPOSITORY_DESCRIPTION_LENGTH } from '../../config/config.constants.js';
 import type { Repository, RepositoryStore } from './repository.types.js';
 
 const REPOSITORIES_FILE = 'repositories.json';
@@ -611,6 +612,26 @@ const DEFAULT_STORE: RepositoryStore = { Repositories: [], SchemaVersion: 1 };
  */
 function redactUrl(url: string): string {
     return url.replace(/\/\/[^@]+@/, '//***@');
+}
+
+/**
+ * Trims a candidate `Description` value and validates it against
+ * `MAX_REPOSITORY_DESCRIPTION_LENGTH`.
+ *
+ * @returns The trimmed value. Returns an empty string when the trimmed
+ *          value is empty — callers use this to decide whether to persist
+ *          or delete the field.
+ *
+ * @throws {Error} If the trimmed value exceeds `MAX_REPOSITORY_DESCRIPTION_LENGTH`.
+ */
+function normalizeDescription(description: string): string {
+    const trimmed = description.trim();
+    if (trimmed.length > MAX_REPOSITORY_DESCRIPTION_LENGTH) {
+        throw new Error(
+            `Repository description exceeds the maximum length of ${MAX_REPOSITORY_DESCRIPTION_LENGTH} characters.`
+        );
+    }
+    return trimmed;
 }
 
 /**
@@ -681,17 +702,24 @@ export class RepositoryManager {
      *   after trimming. Path-traversal sequences and invalid formats are rejected.
      * - When `name` is omitted, it defaults to the resolved ID.
      *
-     * @param params.url  Remote Git URL (HTTPS or SSH).
-     * @param params.name Optional human-readable display name. Defaults to the resolved ID.
-     * @param params.id   Optional explicit repository ID. Must be a valid kebab-case string.
+     * @param params.url         Remote Git URL (HTTPS or SSH).
+     * @param params.name        Optional human-readable display name. Defaults to the resolved ID.
+     * @param params.id          Optional explicit repository ID. Must be a valid kebab-case string.
+     * @param params.description Optional short description. Trimmed before storage; omitted
+     *                           entirely from the persisted record when empty after trimming.
      *
      * @throws {Error} If the explicit `id` is not valid kebab-case.
      * @throws {Error} If the URL produces an empty slug and no explicit `id` was given.
      * @throws {Error} If a repository with the same ID already exists.
      * @throws {Error} If a repository with the same URL already exists.
+     * @throws {Error} If the trimmed `description` exceeds `MAX_REPOSITORY_DESCRIPTION_LENGTH`.
      */
-    add(params: { url: string; name?: string; id?: string }): Repository {
+    add(params: { url: string; name?: string; id?: string; description?: string }): Repository {
         const store = this.load();
+
+        const description = params.description !== undefined
+            ? normalizeDescription(params.description)
+            : undefined;
 
         let id = params.id;
         if (id) {
@@ -737,6 +765,9 @@ export class RepositoryManager {
         }
 
         const repo: Repository = { Id: id, Name: name, Url: cleanUrl };
+        if (description) {
+            repo.Description = description;
+        }
         store.Repositories.push(repo);
         this.save(store);
 
@@ -754,10 +785,16 @@ export class RepositoryManager {
      * the cleaned URL is checked for duplicates against every other repository
      * (self-excluded by `Id`).
      *
+     * When `description` is provided, it is trimmed before storage. Supplying an
+     * empty (or whitespace-only) string clears the stored `Description` field
+     * entirely rather than persisting an empty string. Omitting `description`
+     * leaves the existing value untouched.
+     *
      * @throws {NotFoundError} If no repository with the given ID exists.
      * @throws {Error} If the cleaned `url` duplicates another repository's URL.
+     * @throws {Error} If the trimmed `description` exceeds `MAX_REPOSITORY_DESCRIPTION_LENGTH`.
      */
-    update(id: string, params: { name: string; url?: string }): Repository {
+    update(id: string, params: { name: string; url?: string; description?: string }): Repository {
         const store = this.load();
         const index = store.Repositories.findIndex((r) => r.Id === id);
 
@@ -767,6 +804,16 @@ export class RepositoryManager {
 
         let updated: Repository = { ...store.Repositories[index], Name: params.name };
         let credentialsWereStripped = false;
+
+        if (params.description !== undefined) {
+            const description = normalizeDescription(params.description);
+            if (description) {
+                updated = { ...updated, Description: description };
+            } else {
+                const { Description: _removed, ...rest } = updated;
+                updated = rest as Repository;
+            }
+        }
 
         if (params.url !== undefined) {
             let cleanUrl = params.url.trim();
@@ -917,6 +964,14 @@ export interface Repository {
      * When absent, the tool falls back to auto-selecting a credential by host match.
      */
     CredentialId?: string;
+
+    /**
+     * Optional, user-entered, short human-readable description of the
+     * repository. Trimmed and capped at `MAX_REPOSITORY_DESCRIPTION_LENGTH`
+     * (see `config.constants.ts`) by `RepositoryManager.add()`/`.update()`.
+     * Absent when never set, or after being cleared via an empty string.
+     */
+    Description?: string;
 }
 
 /**
@@ -1254,6 +1309,6 @@ export interface WorkspaceInfo {
 ```
 ---
 **File Statistics**
-- **Size**: 40.86 KB
-- **Lines**: 1183
+- **Size**: 46.41 KB
+- **Lines**: 1315
 File: `modules/models/architecture-core.md`

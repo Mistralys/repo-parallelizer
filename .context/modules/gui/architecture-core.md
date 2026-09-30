@@ -153,7 +153,7 @@ const repositories = {
 
     /**
      * Register a new repository.
-     * @param {{ url: string, name?: string, id?: string }} data
+     * @param {{ url: string, name?: string, id?: string, description?: string }} data
      * @returns {Promise<Object>} The created repository (HTTP 201).
      */
     create(data) {
@@ -163,7 +163,7 @@ const repositories = {
     /**
      * Update a repository's metadata.
      * @param {string} id
-     * @param {{ name?: string, url?: string }} data - `url` is optional; when omitted, the repository's URL is left unchanged.
+     * @param {{ name?: string, url?: string, description?: string }} data - `url` and `description` are optional; when `url` is omitted, the repository's URL is left unchanged.
      * @returns {Promise<Object>}
      */
     update(id, data) {
@@ -1268,6 +1268,6 @@ export class Router {
 ```
 ---
 **File Statistics**
-- **Size**: 42.32 KB
+- **Size**: 42.39 KB
 - **Lines**: 1274
 File: `modules/gui/architecture-core.md`

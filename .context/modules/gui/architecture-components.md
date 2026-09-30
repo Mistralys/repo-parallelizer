@@ -1354,7 +1354,7 @@ function describeEmptyCredentialOptions(url, options) {
  *
  * @param {Object} config
  * @param {'create'|'edit'} config.mode - Which mode to render.
- * @param {{ id: string, name: string, url: string, credentialId?: string }} [config.repo]
+ * @param {{ id: string, name: string, url: string, description?: string, credentialId?: string }} [config.repo]
  *   The repository being edited. Required (and only used) when `mode === 'edit'`.
  * @returns {Promise<Object>} Resolves with the normalised, saved repository;
  *   rejects with `Error('User cancelled')` on Cancel/Escape/backdrop-click.
@@ -1390,6 +1390,12 @@ export function showRepositoryModal({ mode, repo }) {
             idField.querySelector('input').disabled = true;
         }
 
+        const descriptionField = createFormField('Description', 'textarea', 'description', {
+            placeholder: 'Optional — short description.',
+            value: isEdit ? (repo.description || '') : '',
+            rows: 3,
+        });
+
         const credentialField = createFormField('Credential', 'select', 'credentialId', {
             choices: [{ value: '', label: 'None' }],
         });
@@ -1407,6 +1413,7 @@ export function showRepositoryModal({ mode, repo }) {
         form.appendChild(urlField);
         form.appendChild(nameField);
         form.appendChild(idField);
+        form.appendChild(descriptionField);
         form.appendChild(credentialField);
 
         const actions = document.createElement('div');
@@ -1513,8 +1520,9 @@ export function showRepositoryModal({ mode, repo }) {
 
             if (!validateRequired(form, ['url'])) return;
 
-            const urlValue  = urlInput.value.trim();
-            const nameValue = form.querySelector('[name="name"]').value.trim();
+            const urlValue         = urlInput.value.trim();
+            const nameValue        = form.querySelector('[name="name"]').value.trim();
+            const descriptionValue = form.querySelector('[name="description"]').value.trim();
             const selectedCredentialId = credentialSelect.value;
 
             setBusy(true);
@@ -1523,7 +1531,11 @@ export function showRepositoryModal({ mode, repo }) {
                 let resolvedRepo;
 
                 if (isEdit) {
-                    const updated = await api.repositories.update(repo.id, { name: nameValue, url: urlValue });
+                    const updated = await api.repositories.update(repo.id, {
+                        name: nameValue,
+                        url: urlValue,
+                        description: descriptionValue,
+                    });
                     resolvedRepo = normaliseRepo(updated);
 
                     if (selectedCredentialId !== storedCredentialId) {
@@ -1540,6 +1552,7 @@ export function showRepositoryModal({ mode, repo }) {
                         url: urlValue,
                         ...(nameValue ? { name: nameValue } : {}),
                         ...(idValue ? { id: idValue } : {}),
+                        ...(descriptionValue ? { description: descriptionValue } : {}),
                     });
                     resolvedRepo = normaliseRepo(created);
 
@@ -2109,20 +2122,21 @@ export function initNavHighlight() {
  * Normalise a repository object from the backend.
  *
  * @param {Object} repo
- * @returns {{ id: string, name: string, url: string, credentialId: string|undefined, LastRefreshedAt: string|undefined }}
+ * @returns {{ id: string, name: string, url: string, description: string, credentialId: string|undefined, LastRefreshedAt: string|undefined }}
  *
  * @remarks
  * Unlike other normalised fields, `LastRefreshedAt` intentionally retains its
  * Go-capitalised casing in the returned object. This preserves compatibility
  * with existing consumers (e.g. `buildRepoStatusCells`) that already reference
- * it by that name. All other fields (`id`, `name`, `url`, `credentialId`) use
- * camelCase as the normalised form.
+ * it by that name. All other fields (`id`, `name`, `url`, `description`,
+ * `credentialId`) use camelCase as the normalised form.
  */
 export function normaliseRepo(repo) {
     return {
         id:              repo.Id   || repo.id   || '',
         name:            repo.Name || repo.name || '',
         url:             repo.Url  || repo.url  || repo.URL || '',
+        description:     repo.Description || repo.description || '',
         credentialId:    repo.CredentialId || repo.credentialId || undefined,
         LastRefreshedAt: repo.LastRefreshedAt || repo.lastRefreshedAt || undefined,
     };
@@ -2330,6 +2344,6 @@ export function formatLastActivity(isoTimestamp) {
 ```
 ---
 **File Statistics**
-- **Size**: 63.57 KB
-- **Lines**: 1751
+- **Size**: 86.2 KB
+- **Lines**: 2350
 File: `modules/gui/architecture-components.md`

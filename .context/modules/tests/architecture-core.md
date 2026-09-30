@@ -104,6 +104,6 @@ export function setupFakeGit(dir: string): string {
 ```
 ---
 **File Statistics**
-- **Size**: 3.33 KB
-- **Lines**: 101
+- **Size**: 3.93 KB
+- **Lines**: 110
 File: `modules/tests/architecture-core.md`
