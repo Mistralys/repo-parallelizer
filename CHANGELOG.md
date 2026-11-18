@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.6.0 - Project Custom Files
+
+**Projects can now define custom files that are written into every workspace.**
+Each file has a target folder, name, label, description, and text content, and stays in sync
+with the project definition. Files can optionally be listed in a dedicated section of the
+generated workspace AGENTS.md, and shell scripts are made executable automatically.
+
+- Custom Files: Projects can define files that are written into all of their workspaces.
+- Custom Files: Copies are kept in sync on save and removed from all workspaces on delete or move.
+- GUI: Added a Custom Files tab to the project view for adding, editing, and deleting files.
+- Workspaces: Custom files can be listed in a "Custom Files" table in the generated AGENTS.md.
+- GUI: Project view now remembers the active tab after saving or deleting.
+- Security: Custom file paths cannot escape the workspace or overwrite generated index files.
+
 ## v1.5.0 - Workspace Index Files
 
 **Workspaces now get auto-generated README, AGENTS.md, and CLAUDE.md index files.**
