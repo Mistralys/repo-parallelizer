@@ -99,6 +99,14 @@ The `SchemaVersion` field on `BaseStore` tracks structural changes to persisted 
 
 **Example:** `Repository.CredentialId` is an optional field addition — existing `repositories.json` files remain valid without it. No `SCHEMA_VERSION` bump was needed for this change.
 
+## Custom Files
+
+- A project's `CustomFiles` are copied into **every** workspace folder (relative to the workspace root) and overwritten on each sync — never treat a copy as a source of truth.
+- Targets must stay inside the workspace folder: validated on save (`validateCustomFileInput`) **and** re-guarded on every write/delete (`custom-files.ts` reuses `path-guard.ts`). Never write a custom file without going through `writeCustomFiles()`.
+- Reserved at the workspace root: `README.md`, `AGENTS.md`, `CLAUDE.md`. Repository folder names (first path segment) are off limits. Paths are unique case-insensitively (cross-OS).
+- Text only (UTF-8, no NUL, max 256 KB). Line endings: `.bat`/`.cmd` CRLF, executable shell files LF, all else as typed. Executable bit (POSIX only) for `.sh/.bash/.zsh/.ksh/.command` or a `#!` first line.
+- Adding `CustomFiles` was an optional-field addition: no `SCHEMA_VERSION` bump.
+
 ## Test Conventions
 
 - **Test runner:** Node.js built-in test runner (`node --test`).

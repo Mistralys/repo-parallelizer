@@ -52,6 +52,20 @@ export interface WorkspaceIndexRepositoryRow {
 }
 
 /**
+ * A single custom file row rendered into the `AGENTS.md` "Custom Files" table.
+ */
+export interface WorkspaceIndexCustomFileRow {
+    /** Path relative to the workspace root, using `/` separators. */
+    path: string;
+
+    /** Human-readable label. */
+    label: string;
+
+    /** Description. Empty string when none is set. */
+    description: string;
+}
+
+/**
  * Everything the renderers need to produce the three index files for one
  * workspace. Callers (the artefact choke-point in `workspace-artifacts.ts`)
  * are responsible for resolving this context from the data layer; this
@@ -81,6 +95,12 @@ export interface WorkspaceIndexContext {
 
     /** Repository rows, in the order they should appear in the table (`project.Repositories` order). */
     repositories: WorkspaceIndexRepositoryRow[];
+
+    /**
+     * Custom files flagged `ListInAgents`, in project order. Rendered into the
+     * `AGENTS.md` "Custom Files" section only; omitted when empty or absent.
+     */
+    customFiles?: WorkspaceIndexCustomFileRow[];
 
     /** Absolute URL to this workspace's GUI page (built from `config.serverPort`). */
     guiUrl: string;
@@ -193,7 +213,34 @@ export function renderWorkspaceReadme(ctx: WorkspaceIndexContext): string {
  * {@link renderWorkspaceReadme} plus the agent-directives block.
  */
 export function renderWorkspaceAgents(ctx: WorkspaceIndexContext): string {
-    return `${renderIndexBody(ctx)}\n\n${AGENT_DIRECTIVES_BLOCK}`;
+    const customSection = renderCustomFilesSection(ctx.customFiles ?? []);
+    return customSection === ''
+        ? `${renderIndexBody(ctx)}\n\n${AGENT_DIRECTIVES_BLOCK}`
+        : `${renderIndexBody(ctx)}\n\n${customSection}\n\n${AGENT_DIRECTIVES_BLOCK}`;
+}
+
+/**
+ * Renders the "Custom Files" table for `AGENTS.md`, or an empty string when
+ * no custom file is flagged for listing. Every user-supplied cell goes
+ * through {@link escapeMarkdownCell}; the path is additionally wrapped in a
+ * code span.
+ */
+function renderCustomFilesSection(rows: WorkspaceIndexCustomFileRow[]): string {
+    if (rows.length === 0) return '';
+
+    const lines: string[] = [
+        '## Custom Files',
+        '',
+        'Project-specific files managed by paralizer, located relative to this workspace folder. They are overwritten on every sync — edit them in the Paralizer GUI, not here.',
+        '',
+        '| Path | Label | Description |',
+        '|---|---|---|',
+    ];
+    for (const row of rows) {
+        const filePath = escapeMarkdownCell(row.path).replace(/`/g, '');
+        lines.push(`| \`${filePath}\` | ${escapeMarkdownCell(row.label)} | ${escapeMarkdownCell(row.description)} |`);
+    }
+    return lines.join('\n');
 }
 
 /**

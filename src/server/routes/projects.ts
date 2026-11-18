@@ -7,13 +7,14 @@ import type { ErrorLogManager } from '../../error-log/error-log.manager.js';
 import { NotFoundError } from '../../errors.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
 import type { ProjectData } from '../../models/project/project.types.js';
+import type { CustomFileInput } from '../../models/project/custom-file.js';
 
 // ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
 /**
- * Registers the eight standard routes for the `/api/projects` resource group
+ * Registers the standard routes for the `/api/projects` resource group
  * and its nested `/repositories` sub-resource on the provided `Router` instance.
  *
  * All handlers delegate to the supplied `ProjectManager` (and optionally
@@ -30,6 +31,10 @@ import type { ProjectData } from '../../models/project/project.types.js';
  * | DELETE | /api/projects/:id                         | 204     | 404     |
  * | POST   | /api/projects/:id/repositories            | 200     | 404/400 |
  * | DELETE | /api/projects/:id/repositories/:repoId   | 204     | 404, 500 |
+ * | GET    | /api/projects/:id/custom-files            | 200     | 404     |
+ * | POST   | /api/projects/:id/custom-files            | 201     | 404/400 |
+ * | PUT    | /api/projects/:id/custom-files/:fileId    | 200     | 404/400 |
+ * | DELETE | /api/projects/:id/custom-files/:fileId    | 204     | 404     |
  *
  * The four lifecycle handlers that mutate a project's metadata or
  * workspace/repository set — `PUT /:id`, `DELETE /:id`, `PUT /:id/rename`,
@@ -349,6 +354,153 @@ export function registerProjectRoutes(
 
         res.writeHead(204, {});
         res.end('');
+    });
+
+    // ------------------------------------------------------------------
+    // Custom files — /api/projects/:id/custom-files[/:fileId]
+    //
+    //   Request bodies are camelCase (`directory`, `fileName`, `label`,
+    //   `description`, `content`, `listInAgents`); responses carry the stored
+    //   PascalCase `CustomFile` shape. Every mutation syncs the files into all
+    //   workspaces through the artefact choke-point; delete and move/rename
+    //   first remove the previous on-disk copies. A sync failure is logged as
+    //   a warning and does not change the response.
+    // ------------------------------------------------------------------
+
+    /**
+     * Parses and type-checks a custom file request body. Sends a 400 and
+     * returns `undefined` when the shape is wrong; content rules (paths, size,
+     * collisions) are enforced later by `ProjectManager`.
+     */
+    async function readCustomFileBody(
+        req: IncomingMessage,
+        res: ServerResponse,
+    ): Promise<CustomFileInput | undefined> {
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return undefined;
+        }
+
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return undefined;
+        }
+
+        const b = body as Record<string, unknown>;
+        for (const key of ['fileName', 'label', 'content'] as const) {
+            if (typeof b[key] !== 'string') {
+                sendError(res, 400, `Missing required field: ${key} (string).`);
+                return undefined;
+            }
+        }
+        for (const key of ['directory', 'description'] as const) {
+            if (b[key] !== undefined && typeof b[key] !== 'string') {
+                sendError(res, 400, `Field ${key} must be a string.`);
+                return undefined;
+            }
+        }
+        if (b['listInAgents'] !== undefined && typeof b['listInAgents'] !== 'boolean') {
+            sendError(res, 400, 'Field listInAgents must be a boolean.');
+            return undefined;
+        }
+
+        return {
+            Directory: (b['directory'] as string | undefined) ?? '',
+            FileName: b['fileName'] as string,
+            Label: b['label'] as string,
+            Description: (b['description'] as string | undefined) ?? '',
+            Content: b['content'] as string,
+            ListInAgents: b['listInAgents'] === true,
+        };
+    }
+
+    router.get('/api/projects/:id/custom-files', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        try {
+            sendJson(res, 200, projectManager.listCustomFiles(params['id']));
+        } catch (err) {
+            sendError(res, 404, err instanceof Error ? err.message : 'Project not found.');
+        }
+    });
+
+    router.post('/api/projects/:id/custom-files', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const projectId = params['id'];
+        if (resolveProject(res, projectId) === undefined) return;
+
+        const input = await readCustomFileBody(req, res);
+        if (input === undefined) return;
+
+        try {
+            const created = projectManager.addCustomFile(projectId, input);
+            try {
+                workspaceArtifacts.regenerateProject(projectId);
+            } catch (err) {
+                logArtifactWarning('add-custom-file', projectId, undefined, err);
+            }
+            sendJson(res, 201, created);
+        } catch (err) {
+            sendError(res, err instanceof NotFoundError ? 404 : 400, err instanceof Error ? err.message : 'Could not add custom file.');
+        }
+    });
+
+    router.put('/api/projects/:id/custom-files/:fileId', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const projectId = params['id'];
+        if (resolveProject(res, projectId) === undefined) return;
+
+        const input = await readCustomFileBody(req, res);
+        if (input === undefined) return;
+
+        try {
+            const { previous, updated } = projectManager.updateCustomFile(projectId, params['fileId'], input);
+            try {
+                // A moved or renamed file must not leave its old copy behind.
+                if (previous.Directory !== updated.Directory || previous.FileName !== updated.FileName) {
+                    workspaceArtifacts.removeCustomFileCopies(projectId, previous);
+                }
+                workspaceArtifacts.regenerateProject(projectId);
+            } catch (err) {
+                logArtifactWarning('update-custom-file', projectId, undefined, err);
+            }
+            sendJson(res, 200, updated);
+        } catch (err) {
+            sendError(res, err instanceof NotFoundError ? 404 : 400, err instanceof Error ? err.message : 'Could not update custom file.');
+        }
+    });
+
+    router.delete('/api/projects/:id/custom-files/:fileId', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        const projectId = params['id'];
+
+        try {
+            const removed = projectManager.removeCustomFile(projectId, params['fileId']);
+            try {
+                workspaceArtifacts.removeCustomFileCopies(projectId, removed);
+                workspaceArtifacts.regenerateProject(projectId);
+            } catch (err) {
+                logArtifactWarning('delete-custom-file', projectId, undefined, err);
+            }
+            res.writeHead(204, {});
+            res.end('');
+        } catch (err) {
+            sendError(res, 404, err instanceof Error ? err.message : 'Custom file not found.');
+        }
     });
 
     // ------------------------------------------------------------------

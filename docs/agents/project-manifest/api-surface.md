@@ -304,9 +304,30 @@ interface ProjectData {
     DateModified: string;
     Repositories: string[];
     Workspaces: Record<string, ProjectWorkspace>;
+    CustomFiles?: CustomFile[];  // Files copied into every workspace; absent on older records (reads as []). No SCHEMA_VERSION bump.
     LastActivity?: string;  // ISO 8601 — most recent activity timestamp; updated by updateLastActivity(), does NOT affect DateModified
     SchemaVersion: number;
 }
+
+// src/models/project/custom-file.ts — pure module (no fs): type, validation, executable/line-ending policy
+interface CustomFile {
+    Id: string;            // UUID, stable across path/name edits
+    Directory: string;     // relative to workspace root, '/' separators, '' = root
+    FileName: string;      // with extension; never contains a separator
+    Label: string;
+    Description: string;
+    Content: string;       // UTF-8 text, max 256 KB
+    ListInAgents: boolean; // default false — lists the file in the workspace AGENTS.md
+    DateModified: string;
+}
+type CustomFileInput = Omit<CustomFile, 'Id' | 'DateModified'>;
+
+validateCustomFileInput(input: CustomFileInput, repositoryIds: readonly string[], others: readonly CustomFile[]): CustomFileInput  // throws Error with a user-presentable message
+normaliseDirectory(raw: string): string
+customFileRelativePath(file: Pick<CustomFile, 'Directory' | 'FileName'>): string
+isExecutableFile(fileName: string, content: string): boolean   // .sh/.bash/.zsh/.ksh/.command or '#!' shebang
+applyLineEndingPolicy(fileName: string, content: string): string // .bat/.cmd → CRLF; executable shell files → LF; others as typed
+const RESERVED_ROOT_FILE_NAMES: readonly string[]               // README.md, AGENTS.md, CLAUDE.md
 
 interface ProjectIndexEntry {
     Id: string;
@@ -337,6 +358,10 @@ class ProjectManager {
     updateWorkspace(projectId: string, workspaceId: string, changes: Partial<Pick<ProjectWorkspace, 'Description' | 'DateModified' | 'Notes'>>): ProjectData
     removeWorkspace(projectId: string, workspaceId: string): ProjectData
     renameWorkspace(projectId: string, oldId: string, newId: string, dateModified: string): ProjectData
+    listCustomFiles(projectId: string): CustomFile[]
+    addCustomFile(projectId: string, input: CustomFileInput): CustomFile              // validates via validateCustomFileInput()
+    updateCustomFile(projectId: string, fileId: string, input: CustomFileInput): { previous: CustomFile; updated: CustomFile }
+    removeCustomFile(projectId: string, fileId: string): CustomFile                   // returns the removed definition
 }
 ```
 
@@ -557,6 +582,23 @@ function checkIndexFileStatus(projectsFolder: string, projectId: string, workspa
 
 > **`checkIndexFileStatus()`:** read-only, no writes, no `mkdir`; returns both arrays empty when the workspace folder is absent. Consumed by `checkWorkspaceHealth()` (`workspace-health.ts`, below). Classifies each of the three files as missing (absent array entry), present-managed (absent from both arrays), or present-unmanaged (in `unmanaged`) — guaranteed consistent with what the writer/remover would do to the same file, since all three share `hasBeginMarker()`.
 
+### Custom Files (`custom-files.ts`)
+
+Stateless writer/remover for a project's custom files inside one workspace folder. Same guard chain as the index files (`path-guard.ts`), with the **workspace folder** as the containment root.
+
+```typescript
+interface CustomFilesResult { written: string[]; skipped: string[] }   // workspace-relative paths
+
+writeCustomFiles(projectsFolder: string, projectId: string, workspaceId: string, files: readonly CustomFile[], repositoryIds: readonly string[]): CustomFilesResult
+removeCustomFileCopy(projectsFolder: string, projectId: string, workspaceId: string, file: CustomFile): boolean
+```
+
+- **No-op when the workspace folder does not exist** (no `mkdir` of the root), like the index files.
+- **Overwrites unconditionally** — local edits to a copy are lost on the next sync; the project definition is the single source of truth.
+- Skips (never throws) targets that fail lexical containment, the realpath symlink-escape check (re-run after `mkdir -p` of the sub-folder), the directory-shape check, that sit in a repository folder, or that equal a reserved root index file.
+- POSIX: `chmod 755` for executable files, `644` otherwise; skipped on win32.
+- `removeCustomFileCopy()` deletes only a regular file/symlink at the guarded path, then prunes directories left empty (never the workspace root).
+
 ### Workspace Artifacts Orchestrator (`workspace-artifacts.ts`)
 
 Single choke-point for the "per-workspace artefact set": the `.code-workspace` file (via `vscode-workspace.ts`) plus the three generated index files (via `workspace-index.ts`, above). Every caller needing to create, refresh, or remove a workspace's on-disk artefacts should go through this orchestrator rather than calling `generateWorkspaceFile()`/`writeWorkspaceIndexFiles()` directly, so a future third artefact only needs wiring in one place.
@@ -573,8 +615,11 @@ class WorkspaceArtifactsOrchestrator {
     regenerateProject(projectId: string): void
     regenerateForRepository(repositoryId: string): void
     removeWorkspace(projectId: string, workspaceId: string): void
+    removeCustomFileCopies(projectId: string, file: CustomFile): void  // deletes a custom file's copies from every workspace (pass the PREVIOUS definition when moving/renaming)
 }
 ```
+
+> **Custom files:** `regenerateWorkspace()` also calls `writeCustomFiles()` (see `custom-files.ts` below), so every existing trigger of the artefact set (project/workspace/repository edits, setup, regenerate) syncs custom files too, and `WorkspaceIndexContext.customFiles` carries the `ListInAgents` rows rendered into the `AGENTS.md` "Custom Files" table (README.md is unaffected; the section is omitted when no file is listed).
 
 > **`.code-workspace` vs. index-file initialisation asymmetry:** `regenerateWorkspace()` preserves `generateWorkspaceFile()`'s existing unconditional-write behaviour (it writes, and `mkdir -p`s its parent, even for a workspace whose own folder does not exist yet), but `writeWorkspaceIndexFiles()` is a deliberate no-op in that same case (see `workspace-index.ts` above). Calling `regenerateWorkspace()` on an uninitialised workspace therefore still produces a `.code-workspace` file while silently skipping the three index files.
 

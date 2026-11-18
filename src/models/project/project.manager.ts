@@ -10,6 +10,8 @@ import { NotFoundError } from '../../errors.js';
 import type { RepositoryManager } from '../repository/repository.manager.js';
 import type { ProjectData, ProjectIndex, ProjectIndexEntry, ProjectWorkspace } from './project.types.js';
 import { STABLE_WORKSPACE_ID } from '../workspace/workspace.types.js';
+import { randomUUID } from 'node:crypto';
+import { validateCustomFileInput, type CustomFile, type CustomFileInput } from './custom-file.js';
 
 const INDEX_FILE = 'projects-index.json';
 const PROJECTS_SUBDIR = 'projects';
@@ -334,6 +336,106 @@ export class ProjectManager {
         project.DateModified = this.now();
         this.saveProject(project);
         return project;
+    }
+
+    // -------------------------------------------------------------------------
+    // Custom files
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns the project's custom files (empty array when none).
+     *
+     * @throws {NotFoundError} If the project does not exist.
+     */
+    listCustomFiles(projectId: string): CustomFile[] {
+        const project = this.loadProject(projectId);
+        if (!project) {
+            throw new NotFoundError(`Cannot list custom files: project with ID "${projectId}" does not exist.`);
+        }
+        return project.CustomFiles ?? [];
+    }
+
+    /**
+     * Adds a custom file. Input is validated and normalised via
+     * `validateCustomFileInput()`.
+     *
+     * @throws {NotFoundError} If the project does not exist.
+     * @throws {Error} If validation fails (message is user-presentable).
+     */
+    addCustomFile(projectId: string, input: CustomFileInput): CustomFile {
+        const project = this.loadProject(projectId);
+        if (!project) {
+            throw new NotFoundError(`Cannot add custom file: project with ID "${projectId}" does not exist.`);
+        }
+
+        const files = project.CustomFiles ?? [];
+        const valid = validateCustomFileInput(input, project.Repositories, files);
+        const now = this.now();
+        const file: CustomFile = { Id: randomUUID(), ...valid, DateModified: now };
+
+        project.CustomFiles = [...files, file];
+        project.DateModified = now;
+        this.saveProject(project);
+        return file;
+    }
+
+    /**
+     * Replaces the editable fields of a custom file.
+     *
+     * @returns The previous and updated definitions, so the caller can clean
+     *   up the old on-disk path when the location changed.
+     * @throws {NotFoundError} If the project or the custom file does not exist.
+     * @throws {Error} If validation fails.
+     */
+    updateCustomFile(
+        projectId: string,
+        fileId: string,
+        input: CustomFileInput,
+    ): { previous: CustomFile; updated: CustomFile } {
+        const project = this.loadProject(projectId);
+        if (!project) {
+            throw new NotFoundError(`Cannot update custom file: project with ID "${projectId}" does not exist.`);
+        }
+
+        const files = project.CustomFiles ?? [];
+        const idx = files.findIndex((f) => f.Id === fileId);
+        if (idx === -1) {
+            throw new NotFoundError(`Custom file "${fileId}" does not exist in project "${projectId}".`);
+        }
+
+        const valid = validateCustomFileInput(input, project.Repositories, files.filter((f) => f.Id !== fileId));
+        const now = this.now();
+        const previous = files[idx];
+        const updated: CustomFile = { Id: fileId, ...valid, DateModified: now };
+
+        project.CustomFiles = files.map((f, i) => (i === idx ? updated : f));
+        project.DateModified = now;
+        this.saveProject(project);
+        return { previous, updated };
+    }
+
+    /**
+     * Removes a custom file definition and returns it, so the caller can
+     * delete its copies from the workspaces.
+     *
+     * @throws {NotFoundError} If the project or the custom file does not exist.
+     */
+    removeCustomFile(projectId: string, fileId: string): CustomFile {
+        const project = this.loadProject(projectId);
+        if (!project) {
+            throw new NotFoundError(`Cannot remove custom file: project with ID "${projectId}" does not exist.`);
+        }
+
+        const files = project.CustomFiles ?? [];
+        const removed = files.find((f) => f.Id === fileId);
+        if (!removed) {
+            throw new NotFoundError(`Custom file "${fileId}" does not exist in project "${projectId}".`);
+        }
+
+        project.CustomFiles = files.filter((f) => f.Id !== fileId);
+        project.DateModified = this.now();
+        this.saveProject(project);
+        return removed;
     }
 
     /**

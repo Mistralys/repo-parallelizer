@@ -334,6 +334,56 @@ const projects = {
             `/api/projects/${encodeURIComponent(projectId)}/repositories/${encodeURIComponent(repoId)}`,
         );
     },
+
+    /**
+     * Custom-file endpoints — files copied into every workspace of a project.
+     * Request bodies are camelCase; responses use the stored PascalCase shape.
+     * @namespace api.projects.customFiles
+     */
+    customFiles: {
+        /**
+         * @param {string} projectId
+         * @returns {Promise<Object[]>}
+         */
+        list(projectId) {
+            return request('GET', `/api/projects/${encodeURIComponent(projectId)}/custom-files`);
+        },
+
+        /**
+         * @param {string} projectId
+         * @param {{ directory?: string, fileName: string, label: string, description?: string, content: string, listInAgents?: boolean }} data
+         * @returns {Promise<Object>} The created custom file.
+         */
+        create(projectId, data) {
+            return request('POST', `/api/projects/${encodeURIComponent(projectId)}/custom-files`, data);
+        },
+
+        /**
+         * @param {string} projectId
+         * @param {string} fileId
+         * @param {{ directory?: string, fileName: string, label: string, description?: string, content: string, listInAgents?: boolean }} data
+         * @returns {Promise<Object>} The updated custom file.
+         */
+        update(projectId, fileId, data) {
+            return request(
+                'PUT',
+                `/api/projects/${encodeURIComponent(projectId)}/custom-files/${encodeURIComponent(fileId)}`,
+                data,
+            );
+        },
+
+        /**
+         * @param {string} projectId
+         * @param {string} fileId
+         * @returns {Promise<void>}
+         */
+        delete(projectId, fileId) {
+            return request(
+                'DELETE',
+                `/api/projects/${encodeURIComponent(projectId)}/custom-files/${encodeURIComponent(fileId)}`,
+            );
+        },
+    },
 };
 
 /**

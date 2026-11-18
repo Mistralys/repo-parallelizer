@@ -263,6 +263,22 @@ User → POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file
 
 ---
 
+## 13b. Custom Files Sync
+
+```
+Triggers: POST/PUT/DELETE /api/projects/:id/custom-files[/:fileId]
+          + every existing regenerateWorkspace()/regenerateProject() caller (setup, project/workspace/repo edits, regenerate)
+  └→ projectManager.add/update/removeCustomFile()     # validate + persist in projects/{id}.json (CustomFiles)
+  └→ (PUT with changed Directory/FileName, or DELETE)
+       workspaceArtifacts.removeCustomFileCopies(projectId, previousDefinition)
+         └→ per workspace: guard chain → rm file → prune empty dirs up to the workspace root
+  └→ workspaceArtifacts.regenerateProject(projectId)
+       └→ per workspace: writeWorkspaceIndexFiles() (AGENTS.md "Custom Files" = ListInAgents rows)
+                         writeCustomFiles()            (mkdir -p, overwrite, chmod 755 for scripts)
+```
+
+The folder-must-exist rule applies: an uninitialised workspace receives nothing until it is set up (setup regenerates artefacts). Local edits to a copy are overwritten; removal is driven by the stored definition, not a separate ledger of written files.
+
 ## 14. Credential Success Log Entry and Stale Badge Suppression
 
 When a workspace setup or repository addition completes a **credential-based clone** (i.e. a credential was resolved and injected), both `WorkspaceOrchestrator.createWorkspace()` and `RepositoryOrchestrator.addRepositoryToProject()` write a success entry to the error log. The `Operation` value differs by call site:
