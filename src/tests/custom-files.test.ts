@@ -193,7 +193,7 @@ function ctx(customFiles?: WorkspaceIndexContext['customFiles']): WorkspaceIndex
     return {
         projectsFolder: '/x', projectId: 'p', projectName: 'P', projectDescription: '',
         workspaceId: 'DEV', workspaceDescription: '', workspaceNotes: '', repositories: [],
-        customFiles, guiUrl: 'http://localhost/', toolVersion: '1', generatedAt: 't',
+        customFiles, guiUrl: 'http://localhost/', toolVersion: '1', toolRoot: '/opt/paralizer', generatedAt: 't',
     };
 }
 

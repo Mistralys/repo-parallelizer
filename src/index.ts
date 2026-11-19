@@ -10,6 +10,8 @@
  *   paralizer serve     → Start the HTTP server directly (requires config.json)
  *   paralizer setup     → Run the setup wizard (no config.json required)
  *   paralizer docs      → Generate CTX documentation (no config.json required)
+ *   paralizer custom-files <subcommand> → Manage a project's custom files (non-interactive)
+ *   paralizer help      → Print the full command documentation and exit with code 0
  *   paralizer <other>   → Print usage help and exit with code 1
  *
  * Options:
@@ -21,6 +23,12 @@ import { startServer } from './server/index.js';
 import { showMenu } from './cli/menu.js';
 import { runSetup } from './cli/setup.js';
 import { generateDocs } from './cli/docs.js';
+import {
+    CUSTOM_FILES_HELP,
+    createDefaultCustomFilesDeps,
+    runCustomFilesCommand,
+    EXIT_ERROR,
+} from './cli/custom-files.js';
 import { getToolRoot } from './utils/paths.js';
 
 // ---------------------------------------------------------------------------
@@ -45,6 +53,16 @@ const command = process.argv[2] ?? 'menu';
 
         case 'docs':
             await generateDocs();
+            break;
+
+        case 'custom-files':
+            await runCustomFilesCliCommand();
+            break;
+
+        case 'help':
+        case '--help':
+        case '-h':
+            printFullHelp();
             break;
 
         default:
@@ -109,6 +127,45 @@ async function startServerCommand(): Promise<void> {
 }
 
 /**
+ * Runs the 'custom-files' command group. The help subcommand needs no config;
+ * everything else loads `config.json` first. Sets `process.exitCode` rather
+ * than calling `process.exit()` so piped output is flushed.
+ */
+async function runCustomFilesCliCommand(): Promise<void> {
+    const args = process.argv.slice(3);
+    const wantsHelp = args.length === 0 || ['help', '--help', '-h'].includes(args[0]);
+
+    if (wantsHelp) {
+        // Help never touches the data layer, so it works without a config file.
+        console.log(CUSTOM_FILES_HELP);
+        process.exitCode = args.length === 0 ? EXIT_ERROR : 0;
+        return;
+    }
+
+    let deps;
+    try {
+        deps = createDefaultCustomFilesDeps();
+    } catch (err) {
+        process.stderr.write(`repo-parallelizer error: ${(err as Error).message}\n`);
+        process.stderr.write(`Run 'paralizer setup' to create a config file.\n`);
+        process.exitCode = EXIT_ERROR;
+        return;
+    }
+
+    process.exitCode = await runCustomFilesCommand(args, deps);
+}
+
+/**
+ * Prints the full command documentation (`paralizer help`) to stdout.
+ * This is the single place agents are pointed to, so it includes the
+ * documentation of every command group.
+ */
+function printFullHelp(): void {
+    printUsage();
+    console.log(`\n${CUSTOM_FILES_HELP}`);
+}
+
+/**
  * Prints a concise usage / help message to stdout.
  */
 function printUsage(): void {
@@ -119,6 +176,8 @@ Commands:
   serve   Start the GUI server directly
   setup   Run the setup wizard
   docs    Generate CTX documentation
+  custom-files  Manage a project's custom files (list, show, add, update, delete)
+  help    Show this help including the full command documentation
 
 Options:
   --verbose  Show detailed configuration (with 'serve')`);
