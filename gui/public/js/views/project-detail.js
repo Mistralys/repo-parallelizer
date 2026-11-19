@@ -6,6 +6,8 @@
  *   - Repositories section: list with per-repo Remove (deletes the repo's cloned
  *     folders from disk across this project's workspaces; the global repository
  *     record is retained), plus "Add Repository" picker.
+ *   - Custom Files tab (see `project-custom-files.js`): per-project files copied into
+ *     every workspace, with an add/edit form and delete.
  *   - Workspaces section: list with links, per-workspace Delete (STABLE disabled),
  *     and "Add Workspace" form.
  *   - Rename Project action (changes project ID).
@@ -49,6 +51,7 @@ import { createFormField, validateRequired, WORKSPACE_ID_PATTERN } from '../comp
 import { normaliseProject, normaliseRepo, normaliseWorkspace } from '../utils/normalise.js';
 import { STABLE_WS_ID, APP_NAME_SHORT } from '../utils/constants.js';
 import { buildCredentialBadge } from '../utils/dom.js';
+import { buildCustomFilesSection } from './project-custom-files.js';
 
 // ---------------------------------------------------------------------------
 // Router reference — injected from app.js via setRouter()
@@ -57,6 +60,14 @@ import { buildCredentialBadge } from '../utils/dom.js';
 
 /** @type {import('../router.js').Router|null} */
 let _router = null;
+
+/**
+ * Last active tab, remembered per project so the full re-render that follows
+ * a mutation (e.g. saving a custom file) does not bounce the user back to
+ * the first tab.
+ * @type {{ projectId: string, tabId: string }|null}
+ */
+let _activeTab = null;
 
 /**
  * Inject the router instance so project-detail can navigate on rename/delete.
@@ -947,25 +958,32 @@ export async function renderProjectDetail(container, params) {
     const tabs = [
         { id: 'workspaces', label: 'Workspaces' },
         { id: 'repositories', label: 'Repositories' },
+        { id: 'custom-files', label: 'Custom Files' },
         { id: 'danger', label: 'Danger Zone' },
     ];
 
     const panels = {};
 
+    const restoredTab = _activeTab && _activeTab.projectId === projectId
+        ? tabs.findIndex((t) => t.id === _activeTab.tabId)
+        : -1;
+    const activeIndex = restoredTab === -1 ? 0 : restoredTab;
+
     tabs.forEach((tab, index) => {
+        const isActive = index === activeIndex;
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'tab-btn' + (index === 0 ? ' active' : '');
+        btn.className = 'tab-btn' + (isActive ? ' active' : '');
         btn.textContent = tab.label;
         btn.setAttribute('role', 'tab');
-        btn.setAttribute('aria-selected', index === 0 ? 'true' : 'false');
+        btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
         btn.setAttribute('aria-controls', `tab-panel-${tab.id}`);
         btn.dataset.tab = tab.id;
         tabNav.appendChild(btn);
 
         const panel = document.createElement('div');
         panel.id = `tab-panel-${tab.id}`;
-        panel.className = 'tab-panel' + (index === 0 ? ' active' : '');
+        panel.className = 'tab-panel' + (isActive ? ' active' : '');
         panel.setAttribute('role', 'tabpanel');
         panels[tab.id] = panel;
     });
@@ -974,6 +992,7 @@ export async function renderProjectDetail(container, params) {
         const btn = e.target.closest('.tab-btn');
         if (!btn) return;
         const tabId = btn.dataset.tab;
+        _activeTab = { projectId, tabId };
 
         tabNav.querySelectorAll('.tab-btn').forEach((b) => {
             b.classList.remove('active');
@@ -998,6 +1017,12 @@ export async function renderProjectDetail(container, params) {
         ),
     );
     container.appendChild(panels.repositories);
+
+    // ---- Custom Files panel ----
+    panels['custom-files'].appendChild(
+        buildCustomFilesSection(normProject.id, project.CustomFiles, refresh),
+    );
+    container.appendChild(panels['custom-files']);
 
     // ---- Workspaces panel ----
     panels.workspaces.appendChild(

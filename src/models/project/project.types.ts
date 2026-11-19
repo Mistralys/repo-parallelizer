@@ -1,4 +1,5 @@
 import type { BaseStore } from '../../storage/storage.types.js';
+import type { CustomFile } from './custom-file.js';
 
 /**
  * Represents a single workspace within a project.
@@ -46,6 +47,13 @@ export interface ProjectData {
      * Always contains at least the "STABLE" workspace.
      */
     Workspaces: Record<string, ProjectWorkspace>;
+
+    /**
+     * Custom files copied into every workspace of this project. Optional and
+     * absent on projects created before the feature existed (treat as `[]`);
+     * adding it needed no `SCHEMA_VERSION` bump.
+     */
+    CustomFiles?: CustomFile[];
 
     /**
      * ISO 8601 timestamp of the most recent activity recorded against this

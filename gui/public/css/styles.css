@@ -1360,6 +1360,11 @@ td.mono {
         font-size: var(--font-size-xs);
     }
 
+    /* Four tabs no longer fit one row on narrow screens — wrap instead of overflowing. */
+    .tab-nav {
+        flex-wrap: wrap;
+    }
+
     .refresh-delay-input-row {
         flex-wrap: wrap;
     }
@@ -2005,4 +2010,83 @@ input.notes-display-input {
     text-align: center;
     padding: 48px 24px;
     margin: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Project Custom Files tab
+   -------------------------------------------------------------------------- */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.custom-files-intro {
+    max-width: 75ch;
+    margin-bottom: 16px;
+}
+
+.custom-files-toolbar {
+    margin-top: 16px;
+}
+
+.custom-files-table .table-actions {
+    white-space: nowrap;
+}
+
+.custom-files-table .table-actions .btn + .btn {
+    margin-left: 6px;
+}
+
+.custom-file-desc {
+    margin-top: 2px;
+    font-size: var(--font-size-xs);
+    max-width: 60ch;
+}
+
+.custom-file-editor-slot:not(:empty) {
+    margin-top: 16px;
+}
+
+.custom-file-form {
+    max-width: 900px;
+}
+
+.custom-file-content {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-sm);
+    line-height: 1.5;
+    tab-size: 4;
+    white-space: pre;
+    overflow: auto;
+    min-height: 240px;
+}
+
+.custom-file-switch .switch-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+}
+
+.custom-file-summary {
+    min-height: 1.4em;
+    font-size: var(--font-size-xs);
+    font-family: var(--font-mono);
+}
+
+.custom-file-form .unsaved-indicator {
+    align-self: center;
+    margin-left: 8px;
+    font-size: var(--font-size-xs);
+}
+
+.custom-files-table-wrap {
+    overflow-x: auto;
 }

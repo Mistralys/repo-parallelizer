@@ -9,6 +9,8 @@ import {
     removeWorkspaceIndexFiles,
     type WorkspaceIndexContext,
 } from './workspace-index.js';
+import { writeCustomFiles, removeCustomFileCopy } from './custom-files.js';
+import { customFileRelativePath, type CustomFile } from '../models/project/custom-file.js';
 import { getToolVersion } from '../utils/version.js';
 
 /**
@@ -147,6 +149,13 @@ export class WorkspaceArtifactsOrchestrator {
                 description: repo.Description ?? '',
                 url: repo.Url,
             })),
+            customFiles: (project.CustomFiles ?? [])
+                .filter((file) => file.ListInAgents)
+                .map((file) => ({
+                    path: customFileRelativePath(file),
+                    label: file.Label,
+                    description: file.Description,
+                })),
             guiUrl: this.guiUrl(projectId, workspaceId),
             toolVersion: getToolVersion(),
             generatedAt: new Date().toISOString(),
@@ -155,6 +164,36 @@ export class WorkspaceArtifactsOrchestrator {
         // No-op (no mkdir, no write) when the workspace folder does not yet
         // exist on disk — see the class-level doc comment.
         writeWorkspaceIndexFiles(indexContext);
+
+        // Custom files share the same trigger and the same no-op-when-the-
+        // workspace-folder-is-missing semantics as the index files.
+        writeCustomFiles(
+            this.config.projectsFolder,
+            projectId,
+            workspaceId,
+            project.CustomFiles ?? [],
+            repositories.map((repo) => repo.Id),
+        );
+    }
+
+    /**
+     * Deletes the on-disk copies of `file` from every workspace of the
+     * project, pruning directories left empty. Used when a custom file is
+     * deleted, or when an edit moves/renames it (pass the *previous*
+     * definition). Callers should follow up with {@link regenerateProject}.
+     *
+     * @throws {Error} If the project does not exist.
+     */
+    removeCustomFileCopies(projectId: string, file: CustomFile): void {
+        const project = this.projectManager.getById(projectId);
+        if (!project) {
+            throw new Error(
+                `Cannot remove custom file copies: project with ID "${projectId}" does not exist.`
+            );
+        }
+        for (const workspaceId of Object.keys(project.Workspaces)) {
+            removeCustomFileCopy(this.config.projectsFolder, projectId, workspaceId, file);
+        }
     }
 
     /**
