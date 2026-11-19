@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased - Custom Files CLI
+
+**Agents and scripts can now manage a project's custom files from the command line.**
+Changes are validated and synced to all workspaces exactly like in the GUI. The generated
+workspace AGENTS.md now says where Paralizer is installed and how to reach its help.
+
+- CLI: Added `paralizer custom-files` with list, show, add, update, and delete subcommands.
+- CLI: Added `paralizer help`, printing the full command documentation.
+- Workspaces: The generated AGENTS.md gets a "Paralizer CLI" section pointing to the installation and `paralizer help`.
+
 ## v1.6.0 - Project Custom Files
 
 **Projects can now define custom files that are written into every workspace.**
