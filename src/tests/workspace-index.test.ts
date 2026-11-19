@@ -40,6 +40,7 @@ function makeContext(overrides?: Partial<WorkspaceIndexContext>): WorkspaceIndex
         ],
         guiUrl: 'http://localhost:4200/#/projects/my-project/workspaces/DEV',
         toolVersion: '1.2.3',
+        toolRoot: '/opt/paralizer',
         generatedAt: '2026-09-25T00:00:00.000Z',
         ...overrides,
     };
@@ -127,6 +128,16 @@ test('renderWorkspaceReadme: emits project/workspace metadata, the repository ta
 test('renderWorkspaceReadme: omits the agent-directives block', () => {
     const body = renderWorkspaceReadme(makeContext());
     assert.doesNotMatch(body, /Agent Directives/);
+});
+
+test('renderWorkspaceAgents: points agents at the installation and the help command, without duplicating command docs', () => {
+    const body = renderWorkspaceAgents(makeContext());
+    assert.match(body, /## Paralizer CLI/);
+    assert.match(body, /`\/opt\/paralizer`/);
+    assert.match(body, /paralizer help/);
+    assert.match(body, /\/opt\/paralizer\/dist\/index\.js" help/);
+    assert.doesNotMatch(renderWorkspaceReadme(makeContext()), /Paralizer CLI/);
+    assert.ok(body.indexOf('## Paralizer CLI') < body.indexOf('## Agent Directives'));
 });
 
 test('renderWorkspaceAgents: emits the same metadata plus the agent-directives block', () => {

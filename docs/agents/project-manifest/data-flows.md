@@ -277,6 +277,8 @@ Triggers: POST/PUT/DELETE /api/projects/:id/custom-files[/:fileId]
                          writeCustomFiles()            (mkdir -p, overwrite, chmod 755 for scripts)
 ```
 
+The CLI (`paralizer custom-files add|update|delete`) runs the same chain in-process: it loads `config.json`, builds the managers and the orchestrator itself (no running server needed), and calls the same `ProjectManager` + choke-point methods. Exit code 2 signals "saved, but sync failed".
+
 The folder-must-exist rule applies: an uninitialised workspace receives nothing until it is set up (setup regenerates artefacts). Local edits to a copy are overwritten; removal is driven by the stored definition, not a separate ledger of written files.
 
 ## 14. Credential Success Log Entry and Stale Badge Suppression

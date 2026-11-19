@@ -559,6 +559,7 @@ interface WorkspaceIndexContext {
     repositories: WorkspaceIndexRepositoryRow[]; // project.Repositories order
     guiUrl: string;                // built from config.serverPort
     toolVersion: string;           // from getToolVersion()
+    toolRoot: string;              // from getToolRoot(); rendered into the AGENTS.md "Paralizer CLI" section
     generatedAt: string;           // ISO 8601
 }
 
@@ -734,6 +735,26 @@ function getToolVersion(): string
 > No-argument accessor for the tool's own version, read from `package.json` at `getToolRoot()` (see `paths.ts`). Returns `'unknown'` — never throws — when the file is missing, unreadable, or lacks a non-empty string `version` field. Extracted specifically so callers (e.g. `registerVersionRoute()` in `src/server/routes/version.ts`) never need to know the tool's `package.json` path. The route's own `readVersion(pkgPath: string)` (private, unexported) remains separate and path-taking, since it also reads the GUI's distinct `package.json`.
 
 ---
+
+## Custom Files CLI (`src/cli/custom-files.ts`)
+
+Non-interactive `paralizer custom-files <list|show|add|update|delete|help>` command group. Dependency-injected for tests; mirrors the REST handlers (validate via `ProjectManager`, purge previous copies on move/rename/delete, then `regenerateProject()`).
+
+```typescript
+const EXIT_OK = 0; const EXIT_ERROR = 1; const EXIT_SYNC_FAILED = 2;   // 2 = saved, workspace sync failed
+interface CustomFilesCliDeps {
+    projectManager: Pick<ProjectManager, 'listCustomFiles' | 'addCustomFile' | 'updateCustomFile' | 'removeCustomFile'>;
+    artifacts: Pick<WorkspaceArtifactsOrchestrator, 'regenerateProject' | 'removeCustomFileCopies'>;
+    readStdin: () => Promise<string>; out: (text: string) => void; err: (text: string) => void;
+}
+const CUSTOM_FILES_HELP: string                                            // shown by `paralizer help` / `custom-files help`
+runCustomFilesCommand(args: string[], deps: CustomFilesCliDeps): Promise<number>   // args after "custom-files"; returns exit code, never throws for user errors
+createDefaultCustomFilesDeps(): CustomFilesCliDeps                          // loads config.json; throws if missing
+```
+
+- `<file>` references resolve by exact ID, then workspace-relative path (case-insensitive, `\` accepted), then unique ID prefix (>= 4 chars).
+- Content sources for `add`/`update`: `--content-file <path>` (`-` = stdin), `--stdin`, `--content <text>` (mutually exclusive). `update` changes only the given fields.
+- `paralizer help` (`src/index.ts`) prints the general usage plus `CUSTOM_FILES_HELP`; it needs no `config.json`. Workspace `AGENTS.md` files point agents at this command instead of duplicating the docs.
 
 ## CLI Terminal UI (`src/cli/`)
 

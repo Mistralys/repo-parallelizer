@@ -105,6 +105,8 @@ The `SchemaVersion` field on `BaseStore` tracks structural changes to persisted 
 - Targets must stay inside the workspace folder: validated on save (`validateCustomFileInput`) **and** re-guarded on every write/delete (`custom-files.ts` reuses `path-guard.ts`). Never write a custom file without going through `writeCustomFiles()`.
 - Reserved at the workspace root: `README.md`, `AGENTS.md`, `CLAUDE.md`. Repository folder names (first path segment) are off limits. Paths are unique case-insensitively (cross-OS).
 - Text only (UTF-8, no NUL, max 256 KB). Line endings: `.bat`/`.cmd` CRLF, executable shell files LF, all else as typed. Executable bit (POSIX only) for `.sh/.bash/.zsh/.ksh/.command` or a `#!` first line.
+- **CLI/REST parity:** `paralizer custom-files` (`src/cli/custom-files.ts`) must keep the same mutation sequence as the REST handlers in `routes/projects.ts` (validate via `ProjectManager`, purge previous copies when moved/renamed/deleted, then `regenerateProject()`). Never write workspace copies directly from the CLI.
+- **Agent pointer, not docs:** the generated workspace `AGENTS.md` carries a short "Paralizer CLI" section (installation path + `paralizer help`). Command documentation lives only in `CUSTOM_FILES_HELP` / `printUsage()`; do not duplicate it into generated files.
 - Adding `CustomFiles` was an optional-field addition: no `SCHEMA_VERSION` bump.
 
 ## Test Conventions

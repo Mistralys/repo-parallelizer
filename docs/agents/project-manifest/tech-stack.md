@@ -60,7 +60,7 @@ The backend follows a strict layered architecture, bottom to top:
 4. **Git** (`src/git/`) — Stateless functions wrapping Git CLI subprocess calls.
 5. **Orchestration** (`src/orchestration/`) — Composes models + git for high-level multi-step operations (clone, branch switch, workspace creation).
 6. **Server** (`src/server/`) — HTTP server with a custom `Router`, REST API route handlers, static file serving, and a `PollingManager` for periodic git status polling.
-7. **CLI** (`src/index.ts`) — Interactive menu entry point.
+7. **CLI** (`src/index.ts`, `src/cli/`) — Interactive menu plus non-interactive command groups (`custom-files`, `help`).
 
 ### Stateless Managers
 

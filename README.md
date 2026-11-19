@@ -77,6 +77,14 @@ menu.cmd
 | `paralizer serve` | Start the GUI server directly |
 | `paralizer setup` | Run the setup wizard |
 | `paralizer docs` | Generate project documentation |
+| `paralizer custom-files <subcommand>` | Manage a project's custom files (list, show, add, update, delete) without the GUI |
+| `paralizer help` | Show all commands, including the full custom-files documentation |
+
+The generated `AGENTS.md` of every workspace tells agents where Paralizer is installed and to run `paralizer help`, so agents can update a project's custom files themselves, for example:
+
+```
+paralizer custom-files update my-project scripts/deploy.sh --content-file ./deploy.sh
+```
 
 ## Start with Windows
 

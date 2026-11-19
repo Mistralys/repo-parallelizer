@@ -12,6 +12,7 @@ import {
 import { writeCustomFiles, removeCustomFileCopy } from './custom-files.js';
 import { customFileRelativePath, type CustomFile } from '../models/project/custom-file.js';
 import { getToolVersion } from '../utils/version.js';
+import { getToolRoot } from '../utils/paths.js';
 
 /**
  * Overrides accepted by {@link WorkspaceArtifactsOrchestrator.regenerateWorkspace}.
@@ -158,6 +159,7 @@ export class WorkspaceArtifactsOrchestrator {
                 })),
             guiUrl: this.guiUrl(projectId, workspaceId),
             toolVersion: getToolVersion(),
+            toolRoot: getToolRoot(),
             generatedAt: new Date().toISOString(),
         };
 

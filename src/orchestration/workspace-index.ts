@@ -108,6 +108,12 @@ export interface WorkspaceIndexContext {
     /** The tool's own version, from `getToolVersion()`. */
     toolVersion: string;
 
+    /**
+     * Absolute path of the Paralizer installation (tool root), from
+     * `getToolRoot()`. Rendered into the `AGENTS.md` "Paralizer CLI" section.
+     */
+    toolRoot: string;
+
     /** ISO 8601 timestamp recorded as the generation time. */
     generatedAt: string;
 }
@@ -214,9 +220,28 @@ export function renderWorkspaceReadme(ctx: WorkspaceIndexContext): string {
  */
 export function renderWorkspaceAgents(ctx: WorkspaceIndexContext): string {
     const customSection = renderCustomFilesSection(ctx.customFiles ?? []);
-    return customSection === ''
-        ? `${renderIndexBody(ctx)}\n\n${AGENT_DIRECTIVES_BLOCK}`
-        : `${renderIndexBody(ctx)}\n\n${customSection}\n\n${AGENT_DIRECTIVES_BLOCK}`;
+    const sections = [renderIndexBody(ctx)];
+    if (customSection !== '') sections.push(customSection);
+    sections.push(renderCliSection(ctx), AGENT_DIRECTIVES_BLOCK);
+    return sections.join('\n\n');
+}
+
+/**
+ * Renders the "Paralizer CLI" section for `AGENTS.md`: where the installation
+ * lives and how to reach the built-in help. Deliberately does not document
+ * the commands — `paralizer help` is the single source of truth.
+ */
+function renderCliSection(ctx: WorkspaceIndexContext): string {
+    const root = ctx.toolRoot.replace(/`/g, '');
+    const projectId = ctx.projectId.replace(/`/g, '');
+    return [
+        '## Paralizer CLI',
+        '',
+        `This workspace is managed by Paralizer, installed at \`${root}\`. Project \`${projectId}\` is the project ID to pass to its commands.`,
+        '',
+        '- Run `paralizer help` for the available commands (if `paralizer` is not on the PATH: `node "' + root + '/dist/index.js" help`).',
+        '- To change a custom file for all workspaces of this project, use `paralizer custom-files` — never edit the copy in this workspace, it is overwritten on every sync.',
+    ].join('\n');
 }
 
 /**
