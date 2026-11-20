@@ -18,6 +18,7 @@ Set up a project once, then spin up as many parallel workspaces as you need — 
 - **Web GUI** — a built-in browser UI for managing repositories, projects, workspaces, and branches — no terminal required after setup. The project dashboard supports real-time filtering by name/ID/description, repository filtering, and sort by alphabetical or last-activity order.
 - **Live git status** — automatic polling shows current branches, uncommitted changes, and unfetched commits at a glance.
 - **Workspace health checks** — detect and fix configuration drift (missing repos, stale workspace files, credential errors).
+- **Repository workspace info sync** — opt in per repository to share its name and description through version control: Paralizer keeps a small `.workspace/info.json` file up to date in a managed clone, offers an import when the repository and Paralizer's data diverge, and commits/pushes the change for you.
 - **Interactive CLI** — a keyboard-driven terminal menu for quick access to setup, server launch, and documentation generation.
 - **Private repo support** — per-host credential management for cloning private repositories.
 

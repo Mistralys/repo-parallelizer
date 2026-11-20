@@ -13,6 +13,8 @@ import { writeCustomFiles, removeCustomFileCopy } from './custom-files.js';
 import { customFileRelativePath, type CustomFile } from '../models/project/custom-file.js';
 import { getToolVersion } from '../utils/version.js';
 import { getToolRoot } from '../utils/paths.js';
+import type { RepositoryInfoSyncOrchestrator } from './repository-info-sync.js';
+import type { ErrorLogManager } from '../error-log/error-log.manager.js';
 
 /**
  * Overrides accepted by {@link WorkspaceArtifactsOrchestrator.regenerateWorkspace}.
@@ -57,17 +59,53 @@ export interface RegenerateWorkspaceOverrides {
  * `regenerateWorkspace()` for a workspace whose folder has not yet been
  * created therefore still produces a `.code-workspace` file while silently
  * skipping the index files.
+ *
+ * **`.workspace/info.json` is a repository-level artefact, not a
+ * per-workspace one:** unlike the `.code-workspace` file and the three index
+ * files, the repository info file lives inside the repository's own managed
+ * main folder, independent of any particular project/workspace pairing. This
+ * orchestrator nonetheless triggers its sync from the same choke-point
+ * (`regenerateWorkspace()`, and directly from `regenerateForRepository()`),
+ * since every path that can mutate repository metadata already funnels
+ * through here. A thrown sync failure is caught and logged rather than
+ * propagated, so it never breaks the unrelated per-workspace artefacts.
  */
 export class WorkspaceArtifactsOrchestrator {
     constructor(
         private readonly config: AppConfig,
         private readonly projectManager: ProjectManager,
         private readonly repositoryManager: RepositoryManager,
+        private readonly repositoryInfoSync?: RepositoryInfoSyncOrchestrator,
+        private readonly errorLogManager?: ErrorLogManager,
     ) {}
 
     // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Runs {@link RepositoryInfoSyncOrchestrator.syncRepository} for a single
+     * repository, catching and logging any failure so a sync problem never
+     * breaks the artefact regeneration call that triggered it. A no-op when
+     * `repositoryInfoSync` was not injected.
+     */
+    private safeSync(repositoryId: string): void {
+        if (!this.repositoryInfoSync) {
+            return;
+        }
+        try {
+            this.repositoryInfoSync.syncRepository(repositoryId);
+        } catch (error) {
+            this.errorLogManager?.append({
+                Severity: 'warning',
+                Source: 'workspace-info',
+                Operation: 'sync',
+                Context: { RepositoryId: repositoryId },
+                Message: `Failed to sync repository info for "${repositoryId}": ` +
+                    `${error instanceof Error ? error.message : String(error)}`,
+            });
+        }
+    }
 
     private repoPath(projectId: string, workspaceId: string, repoId: string): string {
         return path.join(this.config.projectsFolder, projectId, workspaceId, repoId);
@@ -176,6 +214,13 @@ export class WorkspaceArtifactsOrchestrator {
             project.CustomFiles ?? [],
             repositories.map((repo) => repo.Id),
         );
+
+        // Repository info sync is a repository-level artefact — see the
+        // class-level doc comment. A failure here is logged and never
+        // propagates out of this call.
+        for (const repo of repositories) {
+            this.safeSync(repo.Id);
+        }
     }
 
     /**
@@ -222,8 +267,16 @@ export class WorkspaceArtifactsOrchestrator {
      *
      * Uses `ProjectManager.list()` + `getById()` to enumerate all projects;
      * projects that do not reference the repository are skipped without error.
+     *
+     * Also triggers a repository info sync for `repositoryId` once up front,
+     * independent of project membership — a repository with no project at
+     * all is still a valid repository-level sync target, since the info file
+     * is a repository-level artefact (see the class-level doc comment), not
+     * a per-project one.
      */
     regenerateForRepository(repositoryId: string): void {
+        this.safeSync(repositoryId);
+
         for (const entry of this.projectManager.list()) {
             const project = this.projectManager.getById(entry.Id);
             if (!project) continue;

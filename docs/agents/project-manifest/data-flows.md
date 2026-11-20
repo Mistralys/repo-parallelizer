@@ -175,8 +175,13 @@ toast UI.
   ├── repositories.json              # { Repositories: [...], SchemaVersion: 1 }
   ├── projects-index.json            # { Projects: [{ Id, Name }], SchemaVersion: 1 }
   ├── error-log.json                 # { Entries: [...], SchemaVersion: 1 }
-  └── projects/
-       └── {project-id}.json         # Full ProjectData (workspaces embedded)
+  ├── projects/
+  │    └── {project-id}.json         # Full ProjectData (workspaces embedded)
+  └── repositories/                  # Created lazily, only for repositories with InfoSync.Enabled
+       └── {repo-id}/                # Managed main folder — a partial, sparse-checkout clone
+            └── .workspace/
+                 ├── info.json       # RepositoryInfoFile — see §16
+                 └── README.md       # Generated, not data — see §16
 
 {projectsFolder}/
   └── {project-id}/
@@ -195,6 +200,8 @@ toast UI.
 ```
 
 > **Generated index files:** as of `WorkspaceOrchestrator.createWorkspace()`'s migration onto `WorkspaceArtifactsOrchestrator` (the production-reachable path via `POST .../setup`), the three files above are written alongside the `.code-workspace` file for every workspace whose folder exists on disk. They are absent for a workspace that has not yet been set up. See the Orchestration section of `api-surface.md` (`workspace-index.ts`, `workspace-artifacts.ts`) for the rendering/merge/write-guard contract, and §12 below for how their status feeds into the health check.
+
+> **Managed main folder:** unlike every path above, `{storageFolder}/repositories/{repo-id}/` is **not** a per-workspace artefact — it is a single, repository-level clone shared across every project/workspace that contains the repository (or none at all). It exists only while `Repository.InfoSync.Enabled` is `true` for that repository, and is removed when sync is disabled, the managed clone is recreated, or the repository itself is deleted (§15). See §16 for its full lifecycle.
 
 ---
 
@@ -281,6 +288,8 @@ The CLI (`paralizer custom-files add|update|delete`) runs the same chain in-proc
 
 The folder-must-exist rule applies: an uninitialised workspace receives nothing until it is set up (setup regenerates artefacts). Local edits to a copy are overwritten; removal is driven by the stored definition, not a separate ledger of written files.
 
+> **Repository info sync shares the same choke-point.** Every `regenerateWorkspace()`/`regenerateProject()`/`regenerateForRepository()` call above also runs `RepositoryInfoSyncOrchestrator.syncRepository()` for each resolved repository (`regenerateForRepository()` runs it once up front, independent of project membership) — so a custom-files add/update/delete, a project/workspace/repository edit, or a manual regenerate all keep `.workspace/info.json` current as a side effect, with no separate trigger wiring. See §16.
+
 ## 14. Credential Success Log Entry and Stale Badge Suppression
 
 When a workspace setup or repository addition completes a **credential-based clone** (i.e. a credential was resolved and injected), both `WorkspaceOrchestrator.createWorkspace()` and `RepositoryOrchestrator.addRepositoryToProject()` write a success entry to the error log. The `Operation` value differs by call site:
@@ -355,15 +364,99 @@ User → DELETE /api/repositories/:id
        │             │       # logged and swallowed — does not propagate, does not erase the audit entry above
        │             affectedProjectIds.push(projectId)      # recorded by the caller loop
        ├→ repositoryManager.remove(repositoryId)              # drop the global store entry
+       ├→ if repositoryInfoSync injected:
+       │      try: repositoryInfoSync.removeManagedFolder(repositoryId)   # plain filesystem removal, no settings mutation
+       │          managedFolderRemoved = true
+       │      catch: errorLogManager?.append({ Severity: 'warning', Source: 'workspace-info',
+       │          Operation: 'delete-repository-global', Context: { RepositoryId } })
+       │          # logged and swallowed — the repository record is already gone, so this is best-effort cleanup
        └→ errorLogManager?.append({ Severity: 'audit', Source: 'repository-audit',
               Operation: 'delete-repository-global', Context: { RepositoryId },
+              Message: '... Managed main folder removed.' if managedFolderRemoved else '...',
               Details: JSON.stringify(affectedProjectIds) })
               # emitted ONLY after repositoryManager.remove() succeeds
   └→ sendNoContent 204
 ```
 
-**Completion boundaries:** the association check and the two path-traversal guard layers all throw *before* any mutation, so a guard failure or an unlisted repository leaves no `unlink-repository` entry behind (an incomplete project never gets a misleading "success" audit line). Once `projectManager.removeRepository()` succeeds, the audited event is complete and its `unlink-repository` entry is emitted **unconditionally** — a subsequent failure in `workspaceArtifacts.regenerateProject()` (best-effort downstream reconciliation) is caught and logged as a separate `Severity: 'warning'` entry instead of propagating, so it can no longer erase the audit record of a deletion that genuinely happened. If `repositoryManager.remove()` throws after the per-project cascade has already completed, `deleteRepositoryGlobally()` propagates the throw and writes no `delete-repository-global` summary entry — but the `unlink-repository` entries already emitted during the cascade are **not rolled back**, since they describe cascade steps that genuinely did complete.
+**Completion boundaries:** the association check and the two path-traversal guard layers all throw *before* any mutation, so a guard failure or an unlisted repository leaves no `unlink-repository` entry behind (an incomplete project never gets a misleading "success" audit line). Once `projectManager.removeRepository()` succeeds, the audited event is complete and its `unlink-repository` entry is emitted **unconditionally** — a subsequent failure in `workspaceArtifacts.regenerateProject()` (best-effort downstream reconciliation) is caught and logged as a separate `Severity: 'warning'` entry instead of propagating, so it can no longer erase the audit record of a deletion that genuinely happened. If `repositoryManager.remove()` throws after the per-project cascade has already completed, `deleteRepositoryGlobally()` propagates the throw and writes no `delete-repository-global` summary entry — but the `unlink-repository` entries already emitted during the cascade are **not rolled back**, since they describe cascade steps that genuinely did complete. The managed-main-folder removal step runs only after `repositoryManager.remove()` has succeeded; a removal failure there is logged as a warning (`Source: 'workspace-info'`) rather than thrown, and the summary audit entry's message gains a trailing "Managed main folder removed." sentence only when the removal actually succeeded.
 
 **Two distinct roots, same pattern as the write-guard chain (§13's sibling note in `api-surface.md`):** the lexical check compares against `path.resolve(projectsFolder)`; the realpath check compares against a separately-resolved `resolveRootRealPath(projectsFolder)`. Both checks and the shared symlink-resolution logic live in `src/utils/path-guard.ts` (see `api-surface.md`), the same module consumed by `workspace-index.ts`'s write-guard chain (§13).
 
 **Now shared with the project-level unlink route:** the project-level "unlink one repository from one project" route (`DELETE /api/projects/:id/repositories/:repoId`) now delegates directly to this same `removeRepositoryFromProject()` method (see `rest-api.md`'s **Repository Unlink Delegation** note), so it produces the identical clone-folder deletion, data-record update, and `unlink-repository` audit entry described above — it is no longer a separate, unaudited mutation path.
+
+---
+
+## 16. Repository Info Sync
+
+Opt-in, per-repository sync of `.workspace/info.json` (Id/Name/Description, plus an informational `Url`) into a Paralizer-managed main folder — a partial, sparse-checkout clone at `{storageFolder}/repositories/{repoId}/` (§11). See `api-surface.md` for `repository-info.ts`/`repository-main-folder.ts`/`repository-info-sync.ts` signatures, `rest-api.md` for the route table, and `constraints.md`'s "Repository Info Sync" section for the content/security rules.
+
+**Trigger (filesystem-only, synchronous):**
+
+```
+WorkspaceArtifactsOrchestrator.regenerateWorkspace()/regenerateProject()/regenerateForRepository()
+  └→ safeSync(repositoryId):  # per resolved repository; regenerateForRepository() also runs it
+                               # once up front, independent of project membership
+       try: repositoryInfoSync.syncRepository(repositoryId)
+              ├→ resolve main folder; absent/not-a-git-repo → state 'disabled' or 'main-folder-unavailable', no-op
+              ├→ readRepositoryInfoFile() + hashRepositoryInfoPayload() + evaluateRepositoryInfoSync()
+              ├→ on 'write-required': guard chain → mkdir .workspace/ → write info.json only if bytes differ
+              │      → recordInfoSyncWrite(hash)  # RepositoryManager.InfoSync.LastWrittenHash/LastSyncedAt
+              ├→ independently, write .workspace/README.md only if bytes differ — EXCEPT in states
+              │      'disabled' | 'main-folder-unavailable' | 'id-mismatch' | 'incoming' | 'conflict'
+              └→ on 'in-sync' with a stale/missing baseline: record the hash only, no write
+       catch: errorLogManager?.append({ Severity: 'warning', Source: 'workspace-info', Operation: 'sync' })
+              # logged and swallowed — a sync failure never makes artefact regeneration throw
+```
+
+**Decision table** (`evaluateRepositoryInfoSync()`, driven by a hash of `[Id, Name, Description]` only — `Url` never participates):
+
+| Folder file | Condition | State | Action |
+|---|---|---|---|
+| absent | — | `write-required` | write (create) — also when a previously-synced file was deleted upstream |
+| invalid | — | `invalid-file` | none; health issue |
+| unsupported-schema | — | `unsupported-schema` | none; health issue |
+| ok | `Id` ≠ repository `Id` | `id-mismatch` | none; health issue |
+| ok | folder hash = data hash | `in-sync` | none (record hash as baseline if it differs) |
+| ok | no baseline (`LastWrittenHash` unset), folder ≠ data | `conflict` | none; import dialog |
+| ok | folder = baseline, data ≠ baseline | `write-required` | write silently (local edit) |
+| ok | folder ≠ baseline, data = baseline | `incoming` | none; "Import available" |
+| ok | folder ≠ baseline, data ≠ baseline | `conflict` | none; import dialog |
+
+A missing `.workspace/info.json` is never an error — it is simply created on the next sync (including the first sync after enabling), and a file deleted upstream after an earlier sync is recreated silently. Both show up only as a pending change, never a health issue.
+
+**User-triggered flows (async, git-backed), all serialised per repository by an in-process mutex (`Map<repoId, Promise>`):**
+
+```
+PUT /api/repositories/:id/info-sync { enabled, discardPendingChanges? }   # saveSettings()
+  ├→ enabling:  createManagedClone()  →  partial clone (--filter=blob:none) + cone sparse-checkout
+  │              of .workspace/ on the default branch  →  persist { InfoSync: { Enabled: true } }
+  │              → syncRepository()  # may land state 'conflict' if the clone already carries a
+  │                                   # differing file — see AC-17b
+  └→ disabling: refuse 409 (PendingChangesError) unless discardPendingChanges  →  removeManagedClone()
+                → persist InfoSync removed (LastWrittenHash does not survive the flip either way)
+
+POST /api/repositories/:id/info-sync/refresh                              # refresh()
+  └→ re-set origin to the current authenticated URL → fetchBranch() → mergeFastForward() when
+     behind and nothing pending (on-demand only — no background polling, Open Question 4)
+     → syncRepository()
+
+GET  /api/repositories/:id/info-sync/import                               # getImportPreview()
+  └→ requires state 'incoming'|'conflict', file status 'ok', Id match → diffRepositoryInfo()
+
+POST /api/repositories/:id/info-sync/import { fields: ('Name'|'Description')[] }   # applyImport()
+  └→ apply selected fields via RepositoryManager.update() (Url/CredentialId/managed clone untouched)
+     → rewrite file, recordInfoSyncWrite()  → state becomes 'in-sync' (or 'write-required' if some
+       local values were kept) → audit log entry → route calls regenerateForRepository() best-effort
+
+POST /api/repositories/:id/info-sync/commit-push { message? }             # commitAndPush()
+  └→ refuse 409 (SyncPreconditionError) when folder unavailable, remote mismatched, not on
+     default branch, or state is incoming/conflict/invalid-file/id-mismatch/unsupported-schema
+     → re-set origin → fetchBranch() → ff-only merge if behind and the info folder wasn't touched
+       upstream (else refuse 409 — "import first")
+     → stagePaths(infoFolderPathspec()) → commitPaths(…, INFO_COMMIT_AUTHOR_NAME/EMAIL)
+     → pushHead() → re-fetch → audit log entry
+```
+
+**Health issues** (`fixAction` in parentheses), surfaced only on the repository detail page and the repositories-list Sync badge — never in the per-workspace health report (Open Question 10): `info-sync-main-folder-missing` (`recreate-main-folder`), `info-sync-remote-mismatch` (`recreate-main-folder`), `info-sync-wrong-branch` (`recreate-main-folder`), `info-sync-behind-remote` (`refresh`), `info-sync-pending-changes` (`commit-push`), `info-sync-import-available` (`import`), `info-sync-conflict` (`import`), `info-sync-invalid-file` (`none`), `info-sync-id-mismatch` (`none`), `info-sync-unsupported-schema` (`none`), `info-sync-credential-missing` (`configure-credential`).
+
+**Credential handling:** `resolveRemoteAuth()` (`src/orchestration/remote-auth.ts`) resolves and injects the credential; the managed clone's `origin` keeps the token-injected URL (matching every other workspace clone), re-set before every fetch/push so credential rotation takes effect. See `constraints.md`'s "Repository Info Sync" section for the full set of content/security rules (no credentials in the file, write-only-if-changed, pathspec-limited commit, default-branch-only push, the 502 convention).

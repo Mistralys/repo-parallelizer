@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased - Custom Files CLI
+## Unreleased - Custom Files CLI & Repository Workspace Info Sync
 
 **Agents and scripts can now manage a project's custom files from the command line.**
 Changes are validated and synced to all workspaces exactly like in the GUI. The generated
@@ -8,7 +8,19 @@ workspace AGENTS.md now says where Paralizer is installed and how to reach its h
 
 - CLI: Added `paralizer custom-files` with list, show, add, update, and delete subcommands.
 - CLI: Added `paralizer help`, printing the full command documentation.
-- Workspaces: The generated AGENTS.md gets a "Paralizer CLI" section pointing to the installation and `paralizer help`.
+- Workspaces: AGENTS.md now has a "Paralizer CLI" section with install path and help command.
+
+**Repositories can now opt in to sync their name and description through version control.**
+Enabling it creates a small Paralizer-managed clone that keeps a `.workspace/info.json` file
+up to date; changes made on either side (Paralizer or the repository itself) are detected,
+and the repository detail page offers an import or lets you commit and push a local update.
+Custom files for repositories (as opposed to projects) are not part of this change yet.
+
+- Repositories: Added an opt-in "Sync workspace info" setting backed by a managed clone.
+- GUI: Repository detail page gained a Workspace Info Sync section with status, import, and push.
+- GUI: Repositories list gained a Sync column showing whether sync is on or off for each repository.
+- Git: Added partial/sparse clone, remote fetch/push/fast-forward, and scoped commit helpers.
+- Security: Synced files never store credentials; git error output strips credential-bearing URLs.
 
 ## v1.6.0 - Project Custom Files
 

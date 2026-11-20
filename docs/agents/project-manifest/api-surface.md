@@ -96,6 +96,13 @@ interface CloneOptions {
     branch?: string;
     bare?: boolean;
     timeoutMs?: number;
+    filter?: 'blob:none';     // partial clone; omits blobs, fetched lazily on demand
+    noCheckout?: boolean;     // skip working-tree population; pair with setSparseCheckout()
+}
+
+interface PathStatusEntry {
+    code: string;  // two-char XY status code from `git status --porcelain` (e.g. "M ", "??")
+    path: string;  // path relative to the repository root
 }
 
 interface RunGitOptions {
@@ -104,12 +111,16 @@ interface RunGitOptions {
 }
 ```
 
+> **`CloneOptions.filter`/`noCheckout`:** a server that does not support partial clone (`uploadpack.allowFilter` unset) rejects a `filter`-bearing clone with a message containing `FILTER_UNSUPPORTED_WARNING` (exported from `git-clone.ts`). `noCheckout` is intended to be paired with `setSparseCheckout()` (below) so only the desired paths are ever written to disk.
+
 ### CLI (`git-cli.ts`)
 
 ```typescript
 function runGit(args: string[], cwd?: string, options?: RunGitOptions): Promise<GitResult>
 function runGitOrThrow(args: string[], cwd?: string): Promise<string>
 ```
+
+> **`runGitOrThrow()` credential stripping:** applies `stripEmbeddedCredentials()` (from `git-credentials.ts`) to `stderr` before interpolating it into the thrown `Error` message, so a credential-embedded URL that git echoes back in a failure message (e.g. `fatal: repository https://ghp_token@host/... not found`) is never exposed to a caller that surfaces the thrown message in logs or an API response.
 
 ### Credentials (`git-credentials.ts`)
 
@@ -146,8 +157,34 @@ const authenticatedUrl = entry ? injectCredentialToken(repoUrl, entry.token) : r
 ### Clone (`git-clone.ts`)
 
 ```typescript
+const FILTER_UNSUPPORTED_WARNING = 'filtering not recognized by server'
+
 function cloneRepository(url: string, destination: string, options?: CloneOptions): Promise<GitResult>
+function setSparseCheckout(repoPath: string, paths: string[]): Promise<GitResult>
 ```
+
+> **`setSparseCheckout()`:** runs `sparse-checkout set --cone -- <paths>`; rejects (without invoking git) any path starting with `-`, resolving a `GitResult` with `exitCode: 128` in that case, consistent with `createBranch()`/`switchBranch()`'s validation-failure convention in `git-branch.ts`.
+
+### Remote (`git-remote.ts`)
+
+```typescript
+function getRemoteUrl(repoPath: string, remote?: string): Promise<string | null>                 // remote defaults to "origin"
+function setRemoteUrl(repoPath: string, url: string, remote?: string): Promise<GitResult>         // remote defaults to "origin"
+function fetchBranch(repoPath: string, branch: string, options?: { filter?: 'blob:none'; timeoutMs?: number }): Promise<GitResult>
+function pushHead(repoPath: string, branch: string, timeoutMs?: number): Promise<GitResult>
+function mergeFastForward(repoPath: string, branch: string): Promise<GitResult>
+function countAheadBehind(repoPath: string, branch: string): Promise<{ ahead: number; behind: number }>
+function changedPathsBetween(repoPath: string, fromRef: string, toRef: string): Promise<string[]>
+function remoteUrlsMatch(a: string, b: string): boolean
+```
+
+> **Safe-refname validation:** every `branch`/`fromRef`/`toRef` argument above is validated against a shared pattern (`^[A-Za-z0-9._/-]+$`, rejecting a leading `-` and any `..` segment) before being interpolated into a refspec or passed as a positional ref argument. An invalid value resolves immediately (`GitResult` with `exitCode: 128`, or `{ ahead: 0, behind: 0 }` / `[]` for the non-`GitResult` functions) without invoking git.
+>
+> **`fetchBranch()`/`pushHead()`:** operate on one explicit branch via a literal refspec (`+refs/heads/<branch>:refs/remotes/origin/<branch>` for fetch, `HEAD:refs/heads/<branch>` for push) rather than git's default "whatever is configured" behavior used by `fetchRemote()` in `git-branch.ts`.
+>
+> **`setRemoteUrl()` — SECURITY:** when `url` embeds a credential token, that token is written to `.git/config` on disk for as long as the URL remains configured. A caller that temporarily points `origin` at an authenticated URL (to pair with `fetchBranch()`/`pushHead()`) must restore the plain URL via a second `setRemoteUrl()` call immediately afterward.
+>
+> **`remoteUrlsMatch()`:** normalises both URLs before comparing — strips embedded credentials, lowercases the hostname, and drops a trailing `/` and/or `.git` suffix. Handles both WHATWG-parseable URLs and SCP-style SSH URLs (`git@host:org/repo.git`).
 
 ### Branch (`git-branch.ts`)
 
@@ -167,6 +204,23 @@ function fetchRemote(repoPath: string, remote?: string, timeoutMs?: number): Pro
 function getGitStatus(repoPath: string): Promise<GitStatusInfo>
 function fetchAndGetStatus(repoPath: string, timeoutMs?: number): Promise<GitStatusInfo>
 ```
+
+### Commit (`git-commit.ts`)
+
+```typescript
+interface CommitIdentity {
+    name: string;
+    email: string;
+}
+
+function getPathStatus(repoPath: string, pathspec: string): Promise<PathStatusEntry[]>
+function stagePaths(repoPath: string, pathspec: string): Promise<GitResult>
+function commitPaths(repoPath: string, pathspec: string, message: string, identity: CommitIdentity): Promise<GitResult>
+```
+
+> Unlike `getGitStatus()` (whole working tree), all three functions are scoped to a single `pathspec` (passed to git after a literal `--` separator), for callers that manage one narrow, well-known set of files (e.g. the `.workspace/info.json` sync artifact) without being influenced by unrelated changes elsewhere in the repository.
+>
+> **`commitPaths()`:** runs `-c user.name=<name> -c user.email=<email> commit -m <message> -- <pathspec>` — the `identity` is a one-off config override for this single invocation only and is never written to the repository's persisted `user.name`/`user.email` config. Rejects (without invoking git, resolving `exitCode: 128`) an empty/whitespace-only `message`, or an `identity` field that is empty, contains a newline, or starts with `-`.
 
 ---
 
@@ -252,6 +306,13 @@ interface Repository {
     LastRefreshedAt?: string;      // ISO 8601 — written by touchRefreshTimestamp(); absent until first manual refresh
     CredentialId?: string;         // references GitCredentialEntry.id; absent = auto-select by host match
     Description?: string;          // optional, user-entered; trimmed and capped at MAX_REPOSITORY_DESCRIPTION_LENGTH; absent when never set or cleared
+    InfoSync?: RepositoryInfoSyncSettings; // opt-in `.workspace/info.json` sync settings; absent when never configured
+}
+
+interface RepositoryInfoSyncSettings {
+    Enabled: boolean;
+    LastWrittenHash?: string; // hash of the last `.workspace/info.json` content written by the tool; absent until first sync write
+    LastSyncedAt?: string;    // ISO 8601 — absent until first sync write
 }
 
 interface RepositoryStore extends BaseStore {
@@ -259,7 +320,9 @@ interface RepositoryStore extends BaseStore {
 }
 ```
 
-> **Schema version note:** `CredentialId` and `Description` are optional field additions. Per the `BaseStore` versioning policy (see `storage.types.ts`), adding an optional field is backward-compatible — existing `repositories.json` files that lack the field remain valid. No `SCHEMA_VERSION` bump is required.
+> **Schema version note:** `CredentialId`, `Description` and `InfoSync` are optional field additions. Per the `BaseStore` versioning policy (see `storage.types.ts`), adding an optional field is backward-compatible — existing `repositories.json` files that lack the field remain valid. No `SCHEMA_VERSION` bump is required.
+
+> **`InfoSync` grouping:** the opt-in sync settings (enabled flag, last-written hash, last-synced timestamp) are grouped under one optional `Repository.InfoSync` field rather than as flat top-level fields, so there is a single field to destructure away when clearing and a single home for any future machine-local sync setting.
 
 #### Manager (`repository.manager.ts`)
 
@@ -275,8 +338,18 @@ class RepositoryManager {
     remove(id: string): void
     updateCredential(id: string, credentialId: string | null): Repository
     touchRefreshTimestamp(id: string): Repository
+    setInfoSyncSettings(id: string, settings: RepositoryInfoSyncSettings | null): Repository
+    recordInfoSyncWrite(id: string, hash: string): Repository
 }
 ```
+
+> **Private `mutate(id, operationLabel, fn)` helper:** consolidates the repeated `load → findIndex → NotFoundError → fn → save` sequence shared by `update()`, `updateCredential()`, `touchRefreshTimestamp()`, `setInfoSyncSettings()` and `recordInfoSyncWrite()`. `fn` receives `(existing, store)` — the full store is passed alongside the existing record so a mutator can run a cross-repository check (e.g. `update()`'s duplicate-URL scan) inside the same load/save transaction instead of a separate `load()` call. `operationLabel` is interpolated into the `NotFoundError` message as `` Cannot ${operationLabel}: repository with ID "${id}" does not exist. `` — each of the five mutators' error message text is unchanged from before this consolidation.
+
+> **`setInfoSyncSettings()`:** sets the `InfoSync` group to the given `RepositoryInfoSyncSettings`, or pass `null` to remove the `InfoSync` key entirely (destructured out, not set to `undefined`), reverting the repository to the "info sync never configured" state. Throws `NotFoundError` if the repository ID does not exist.
+
+> **`recordInfoSyncWrite()`:** records a successful `.workspace/info.json` sync write by setting `InfoSync.LastWrittenHash` to the given hash and `InfoSync.LastSyncedAt` to the current UTC timestamp, preserving `InfoSync.Enabled`. Throws `NotFoundError` if the repository ID does not exist, and a plain `Error` if the repository has no `InfoSync` settings configured — info sync must be enabled via `setInfoSyncSettings()` first.
+
+> **`update()` preserves `InfoSync`:** since `update()`'s `mutate()` callback spreads `{ ...existing, Name: params.name, ... }`, an unrelated `Name`/`Url`/`Description` edit leaves any existing `InfoSync` group untouched.
 
 > **`Description` handling in `add()`/`.update()`:** `params.description` is trimmed via a shared private `normalizeDescription()` helper and validated against `MAX_REPOSITORY_DESCRIPTION_LENGTH` (500, `config.constants.ts`), throwing a plain `Error` naming the limit when exceeded. In `add()`, the field is set on the new record only when the trimmed value is non-empty; omitting `description` leaves it unset. In `update()`, supplying `description` trims and stores it when non-empty, but supplying an empty or whitespace-only string **removes** the `Description` key from the record entirely (not persisted as `""`); omitting `description` leaves the existing stored value untouched. Wired through the REST layer (`POST`/`PUT /api/repositories(/:id)`, see `rest-api.md`) with a route-level `validateDescription()` pre-check, and surfaced in the GUI's repository modal, list, and detail views (`normaliseRepo()`, `showRepositoryModal`, `repositories.js`, `repository-detail.js` — see `gui-frontend.md`).
 
@@ -410,6 +483,7 @@ class WorkspaceManager {
 ```typescript
 const CLONE_TIMEOUT_MS = 120_000;
 const FETCH_TIMEOUT_MS = 30_000;
+const PUSH_TIMEOUT_MS = 60_000;  // shorter than CLONE_TIMEOUT_MS (a push moves fewer files), longer than FETCH_TIMEOUT_MS (headroom for a slow/congested remote)
 
 interface OrchestrationRepoResult {
     repositoryId: string;
@@ -454,17 +528,216 @@ class ProjectOrchestrator {
 }
 ```
 
+### Remote Auth (`remote-auth.ts`)
+
+Shared credential resolve/inject/explain helper, extracted from the duplicated inline block formerly in `WorkspaceOrchestrator.createWorkspace()` and `RepositoryOrchestrator.addRepositoryToProject()`, so both orchestrators (and future managed-clone git operations) resolve a repository's git-ready remote URL through one place.
+
+```typescript
+type RemoteAuthResolution =
+    | { ok: true; url: string; credential: GitCredentialEntry | null }
+    | { ok: false; host: string; message: string };
+
+function resolveRemoteAuth(repo: Repository, credentials: GitCredentialEntry[]): RemoteAuthResolution
+```
+
+> **SECURITY — `url` must not be persisted:** the success variant's `url` may carry an embedded credential token (via `injectCredentialToken()`). It must be consumed immediately by the single git call it was resolved for (`git clone`, `git remote set-url`, etc.) and never stored on disk, logged, or returned across an API/HTTP boundary. See the `RemoteAuthResolution` JSDoc in `remote-auth.ts` for the full contract.
+
+> **Consumers:** `WorkspaceOrchestrator.createWorkspace()` and `RepositoryOrchestrator.addRepositoryToProject()` (both below) call `resolveRemoteAuth()` instead of inlining `resolveCredential()`/`extractHost()`/`injectCredentialToken()`; behavior, error message text, and error-log entries are unchanged from the former inline block.
+
+### Repository Info Sync File (`repository-info.ts`)
+
+Pure, filesystem-only module for the per-repository `.workspace/info.json` sync file and its companion `README.md`: rendering, parsing, hashing, diffing, and sync-state evaluation. Mirrors `workspace-index.ts`'s pure-module pattern (below) — no manager or git access; `RepositoryInfoSyncOrchestrator` (`repository-info-sync.ts`, below) resolves paths and drives git.
+
+```typescript
+const REPOSITORY_INFO_FOLDER_NAME = '.workspace'
+const REPOSITORY_INFO_FILE_NAME = 'info.json'
+const REPOSITORY_INFO_README_FILE_NAME = 'README.md'
+const REPOSITORY_INFO_SCHEMA_VERSION = 1
+
+interface RepositoryInfoFile {
+    SchemaVersion: number;
+    Id: string;
+    Name: string;
+    Url?: string;              // informational only — never hashed, diffed, or imported
+    Description: string;
+    Settings: Record<string, unknown>;
+    [key: string]: unknown;    // unknown top-level keys preserved verbatim on rewrite
+}
+
+interface RepositoryInfoPayload { Id: string; Name: string; Description: string }  // the synced field set
+
+interface RepositoryInfoReadResult {
+    status: 'absent' | 'ok' | 'invalid' | 'unsupported-schema';
+    payload?: RepositoryInfoPayload;  // present when status === 'ok'
+    raw?: RepositoryInfoFile;         // present when status === 'ok'
+    error?: string;                   // present when status === 'invalid'
+}
+
+type RepositoryInfoSyncState =
+    | 'disabled' | 'main-folder-unavailable'   // caller-applied short-circuit states; never returned by evaluateRepositoryInfoSync()
+    | 'in-sync' | 'write-required' | 'incoming' | 'conflict'
+    | 'invalid-file' | 'id-mismatch' | 'unsupported-schema';
+
+type RepositoryInfoImportField = 'Name' | 'Description';
+
+interface RepositoryInfoFieldDiff { field: RepositoryInfoImportField; current: string; incoming: string }
+
+interface EvaluateRepositoryInfoSyncParams {
+    dataHash: string;
+    folder: RepositoryInfoReadResult;
+    lastWrittenHash?: string;
+    repositoryId: string;
+}
+
+function buildRepositoryInfoPayload(repo: Repository): RepositoryInfoPayload
+function buildInformationalUrl(repo: Repository): string                              // repo.Url with embedded credentials stripped
+function hashRepositoryInfoPayload(payload: RepositoryInfoPayload): string             // SHA-256 of [Id, Name, Description]; Url excluded
+function readRepositoryInfoFile(mainFolder: string): RepositoryInfoReadResult
+function renderRepositoryInfoFile(payload: RepositoryInfoPayload, informationalUrl: string, existingRaw?: RepositoryInfoFile): string
+function renderRepositoryInfoReadme(): string                                          // fixed, machine-independent text; never affects the hash
+function evaluateRepositoryInfoSync(params: EvaluateRepositoryInfoSyncParams): RepositoryInfoSyncState
+function diffRepositoryInfo(current: RepositoryInfoPayload, incoming: RepositoryInfoPayload): RepositoryInfoFieldDiff[]
+function writeRepositoryInfoFile(mainFolder: string, content: string): { written: boolean }
+function writeRepositoryInfoReadme(mainFolder: string): { written: boolean }
+function infoFolderPathspec(): string                                                  // '.workspace/' — scopes a git status/stage/commit to this module's files
+```
+
+> **`Url` is informational only:** excluded from `hashRepositoryInfoPayload()`, `diffRepositoryInfo()`, and the sync-state decision table — a file differing from Paralizer's data only in `Url` evaluates as `in-sync`. This prevents per-colleague remote-form differences (HTTPS-with-token vs. SSH vs. host alias) from manufacturing false `incoming`/`conflict` states. `buildInformationalUrl()` always strips embedded credentials via `stripEmbeddedCredentials()` before the value is written.
+
+> **`evaluateRepositoryInfoSync()` decision table** (hash-driven only):
+
+| Folder file status | Condition | State |
+|---|---|---|
+| absent | — | `write-required` |
+| invalid | — | `invalid-file` |
+| unsupported-schema | — | `unsupported-schema` |
+| ok | `Id` ≠ `repositoryId` | `id-mismatch` |
+| ok | folderHash = dataHash | `in-sync` |
+| ok | no baseline (`lastWrittenHash` unset) | `conflict` |
+| ok | folder = baseline, data ≠ baseline | `write-required` (local edit) |
+| ok | folder ≠ baseline, data = baseline | `incoming` |
+| ok | folder ≠ baseline, data ≠ baseline | `conflict` |
+
+> Recording a new baseline hash when an `in-sync` folder's hash differs from a stale `lastWrittenHash` is the caller's responsibility — this function only returns the state.
+
+> **Write guard chain:** `writeRepositoryInfoFile()` and `writeRepositoryInfoReadme()` share a guard (lexical containment → realpath symlink-escape → directory-shape check on the `.workspace` folder, reusing `path-guard.ts`, below) and a write-only-if-changed rule (an unchanged second write leaves the file's mtime untouched). A guard failure is reported as `{ written: false }`, never throws.
+>
+> **`writeRepositoryInfoReadme()` is unconditional** — it has no sync-state awareness. `RepositoryInfoSyncOrchestrator.syncRepository()` (below) is responsible for calling it only when the evaluated state is not `disabled`, `main-folder-unavailable`, `id-mismatch`, `incoming`, or `conflict`.
+
+### Main Folder (`repository-main-folder.ts`)
+
+Resolves and git-inspects the managed main folder — the Paralizer-managed partial/sparse clone that is the *only* location Paralizer ever reads or writes `.workspace/` from, kept separate from any clone the user already has under `projectsFolder`. Creation, removal, and read-only inspection of that clone all live here; `RepositoryInfoSyncOrchestrator` (`repository-info-sync.ts`, below) drives these functions together with the pure `repository-info.ts` module above.
+
+```typescript
+const MANAGED_MAIN_FOLDER_DIR = 'repositories'
+
+function getManagedMainFolderRoot(config: Pick<AppConfig, 'storageFolder'>): string      // {storageFolder}/repositories/
+function resolveMainFolderPath(config: Pick<AppConfig, 'storageFolder'>, repoId: string): string  // {storageFolder}/repositories/{repoId}/
+
+class MainFolderGitError extends Error {}          // any git failure other than an unresolvable default branch
+class MainFolderPreconditionError extends Error {} // empty remote, or default branch with no remote-tracking ref
+
+interface MainFolderInspection {
+    exists: boolean;
+    isGitRepository: boolean;
+    remoteUrl: string | null;        // credential-stripped; null when not a git repository
+    remoteMatches: boolean;          // via remoteUrlsMatch()
+    currentBranch: string | null;
+    defaultBranch: string | null;
+    ahead: number;
+    behind: number;
+    pendingChanges: string[];        // git status --porcelain, scoped to the .workspace/ info folder
+}
+
+function inspectMainFolder(folder: string, repoUrl: string): Promise<MainFolderInspection>
+
+function deriveMainFolderIssues(inspection: MainFolderInspection): HealthIssue[]
+function isMainFolderUsable(inspection: MainFolderInspection): boolean
+
+interface CreateManagedCloneResult { path: string; defaultBranch: string; filterFallback: boolean }
+
+function createManagedClone(config: Pick<AppConfig, 'storageFolder'>, repo: Repository, authUrl: string): Promise<CreateManagedCloneResult>
+function removeManagedClone(config: Pick<AppConfig, 'storageFolder'>, repoId: string): boolean
+```
+
+> **No user-supplied path:** `resolveMainFolderPath()` deliberately accepts only `config` and `repoId` — there is no path or "mode" field anywhere in this sync feature (`RepositoryInfoSyncSettings` carries neither), so there is nothing else this function could accept without silently growing a second, unsanctioned way to point at a main folder. A user-chosen main-folder path was considered and dropped (see Deferred Items in the plan); it would have needed path validation, SSH/HTTPS remote equivalence, a wrong-branch guard, and never-reconfigure rules for little added value once import and commit-&-push both work on the managed clone.
+
+> **`createManagedClone()` sequence:** guard the destination (reject if something already exists there) → `git clone --filter=blob:none --no-checkout` → `sparse-checkout set --cone .workspace` → resolve the default branch → verify `refs/remotes/origin/<default>` exists, throwing `MainFolderPreconditionError` when it does not → `checkout <default>`. A server that does not support partial-clone filtering does not fail the clone: git itself silently falls back to a full clone and emits `FILTER_UNSUPPORTED_WARNING` (from `git-clone.ts`) as a stderr warning with `exitCode: 0` — this is detected and reported via `filterFallback` rather than retried without `--filter` (a retry would duplicate work git already did). Any failure from the clone step onward removes the partially created destination before the error propagates, so a failed call never leaves a half-built clone on disk.
+
+> **`removeManagedClone()` guard:** uses the same two-layer path-traversal guard (strict-descendant lexical containment, then a realpath symlink-escape check — see `path-guard.ts`, below) as `removeRepositoryFromProject()` in `repository-orchestrator.ts`. Refuses (returns `false` without touching the filesystem) rather than throwing — a guard rejection and a folder that was never created are both ordinary "nothing to do" outcomes for this boolean-returning API.
+
+> **`deriveMainFolderIssues()` / `isMainFolderUsable()` scope:** scoped to the main folder's own git state only (missing, not a git repository, remote mismatch, wrong branch). Sync-state issues (e.g. an incoming change available for import) are derived from `evaluateRepositoryInfoSync()` above by `RepositoryInfoSyncOrchestrator`, not here. `isMainFolderUsable()` deliberately does **not** require being on the default branch — a wrong branch is reported as a warning-level issue but still permits read-only sync evaluation; only `commitAndPush()` (below) refuses outright when off the default branch.
+
+### Repository Info Sync Orchestrator (`repository-info-sync.ts`)
+
+Ties the pure `repository-info.ts` module and the git-backed `repository-main-folder.ts` module together into the public operations the GUI/REST layer drives (see `rest-api.md`'s **Repository Info Sync** section for the routes): a synchronous, filesystem-only sync usable from the existing artefact choke-point, plus async settings/refresh/import/commit-and-push/recreate operations, each serialised per repository.
+
+```typescript
+interface RepositoryInfoSyncResult { state: RepositoryInfoSyncState; written: boolean }  // written: info.json was (re)written this call
+
+interface RepositoryInfoSyncStatus {
+    enabled: boolean;
+    mainFolder: (MainFolderInspection & { path: string }) | null;  // null only when sync is disabled
+    state: RepositoryInfoSyncState;
+    pendingChanges: string[];
+    lastSyncedAt?: string;
+    defaultCommitMessage: string;
+    health: HealthReport;
+}
+
+interface RepositoryInfoSyncSettingsInput { enabled: boolean; discardPendingChanges?: boolean }
+interface CommitPushResult { committed: boolean; pushed: boolean; commitSha?: string; filterFallback?: boolean }
+
+class SyncPreconditionError extends Error {}  // wrong state, wrong branch, nothing pending, etc.
+class PendingChangesError extends Error {}    // disable/recreate would discard pending changes; opt in via discardPendingChanges
+class RemoteOperationError extends Error {}   // clone/fetch/push/commit/merge failure; always credential-stripped
+
+function buildDefaultInfoCommitMessage(repositoryId: string): string  // offered by the Commit & Push dialog
+
+class RepositoryInfoSyncOrchestrator {
+    constructor(config: AppConfig, repositoryManager: RepositoryManager, errorLogManager?: ErrorLogManager)
+
+    syncRepository(repositoryId: string): RepositoryInfoSyncResult                 // synchronous, filesystem-only; safe for the artefact choke-point
+    getStatus(repositoryId: string): Promise<RepositoryInfoSyncStatus>             // no network calls
+    saveSettings(repositoryId: string, input: RepositoryInfoSyncSettingsInput): Promise<RepositoryInfoSyncStatus>
+    refresh(repositoryId: string): Promise<RepositoryInfoSyncStatus>
+    getImportPreview(repositoryId: string): Promise<{ state: RepositoryInfoSyncState; fields: RepositoryInfoFieldDiff[] }>
+    applyImport(repositoryId: string, fields: RepositoryInfoImportField[]): Promise<RepositoryInfoSyncStatus>
+    commitAndPush(repositoryId: string, options?: { message?: string }): Promise<CommitPushResult>
+    recreateManagedClone(repositoryId: string, options?: { discardPendingChanges?: boolean }): Promise<RepositoryInfoSyncStatus>
+    removeManagedFolder(repositoryId: string): void                                // synchronous; used by the deletion cascade
+}
+```
+
+> **`syncRepository()` is the only method intended to run on every artefact regeneration;** every other method performs real git I/O and is only ever invoked from an explicit user action (settings toggle, refresh button, import dialog, commit & push, or a health-issue fix action). It never throws for an ordinary "nothing to do" outcome (disabled, no main folder yet) — only `NotFoundError` (unknown repository ID) or a genuine filesystem error escapes. It writes `info.json` only when the evaluated state is `write-required`, records the hash-only baseline (no write) when `in-sync` but `LastWrittenHash` is stale/missing, and writes `.workspace/README.md` whenever it differs except in the states `disabled`, `main-folder-unavailable`, `id-mismatch`, `incoming`, `conflict`.
+>
+> **Per-repository mutex (`withRepositoryLock`):** every git-backed mutator (`saveSettings`, `refresh`, `applyImport`, `commitAndPush`, `recreateManagedClone`) is serialised per repository via a private `Map<string, Promise<unknown>>`, so two concurrent GUI requests never race on `.git/index.lock` for the same repository. A queued operation always runs after the prior one settles regardless of success/failure; the map entry is deleted once nothing is queued behind it, so it does not grow unbounded over a long server lifetime.
+>
+> **`saveSettings()`:** disabling refuses with `PendingChangesError` unless `discardPendingChanges` is `true`, then removes the managed clone and clears `InfoSync` entirely (so `LastWrittenHash` never survives a disable/re-enable cycle). Enabling creates the managed clone first and persists `{ Enabled: true }` (no hash) only after the clone succeeds, so a failed enable leaves no `InfoSync` setting behind. Either way, `syncRepository()` runs before the status is returned.
+>
+> **`getImportPreview()` / `applyImport()`:** both require state `incoming` or `conflict`, which (per `evaluateRepositoryInfoSync()`'s decision table) already guarantees the file reads `ok` and its `Id` matches — not re-checked separately. `applyImport()` re-reads and re-evaluates the state before applying (a concurrent caller serialised behind it may already have resolved it), applies only the selected fields (`Name`/`Description`) through `RepositoryManager.update()`, and never touches `Url` or `CredentialId`. An empty `fields` array is valid — it keeps every local value, still rewrites the file from Paralizer's data, and resolves to `in-sync`. Writes an `audit`-severity log entry (`Source: 'workspace-info'`, `Operation: 'import'`).
+>
+> **`commitAndPush()`:** refuses with `SyncPreconditionError` when the folder is unavailable, off the default branch, the state is `incoming`/`conflict`/`invalid-file`/`id-mismatch`/`unsupported-schema`, or nothing is pending. Otherwise re-points `origin`, fetches, and — when behind — refuses if the upstream change touches the info folder (`changedPathsBetween()` filtered client-side to the `.workspace/` prefix, since that function has no pathspec parameter) or fast-forwards. The commit is staged/committed scoped to `infoFolderPathspec()` and always carries the fixed `INFO_COMMIT_AUTHOR_NAME`/`INFO_COMMIT_AUTHOR_EMAIL` identity (never a global git identity). Every surfaced git error is credential-stripped via `stripEmbeddedCredentials()`; a push rejected for lack of permission (`403`/`permission denied`/`denied`) gets an explanatory hint appended. Writes an `audit`-severity log entry on success.
+>
+> **`recreateManagedClone()` / `removeManagedFolder()`:** `recreateManagedClone()` refuses with `PendingChangesError` unless discarded, then removes and re-clones, clearing `LastWrittenHash` (a fresh clone is baseline-less, so a differing file routes through the import dialog rather than being silently treated as `in-sync` against a stale hash) while preserving `LastSyncedAt`. `removeManagedFolder()` is synchronous, does no settings mutation and no git beyond the filesystem removal already performed by `removeManagedClone()` — used by `RepositoryOrchestrator.deleteRepositoryGlobally()`'s deletion cascade after the repository's data entry has already been removed.
+>
+> **Health report (`buildHealthReport()`, private):** remaps `deriveMainFolderIssues()`'s generic issue types onto this module's own `info-sync-*` vocabulary (`info-sync-main-folder-missing`, `info-sync-remote-mismatch`, `info-sync-wrong-branch`) rather than duplicating the underlying checks, adds sync-state-derived issues (`info-sync-behind-remote`, `info-sync-pending-changes`, `info-sync-import-available`, `info-sync-conflict`, `info-sync-invalid-file`, `info-sync-id-mismatch`, `info-sync-unsupported-schema` — only meaningful when the folder is usable), and `info-sync-credential-missing` (meaningful regardless of folder usability, since it blocks every async operation this orchestrator offers). See `rest-api.md`'s **Repository Info Sync Issue Types** table for the full severity/`fixAction` list.
+
+> **Commit constants (`src/config/config.constants.ts`):** `INFO_COMMIT_AUTHOR_NAME = 'Paralizer'` and `INFO_COMMIT_AUTHOR_EMAIL = 'paralizer@mistralys.eu'` are the fixed identity `commitAndPush()` always passes to `commitPaths()` (`git-commit.ts`), independent of any machine's git config. `MAX_INFO_COMMIT_MESSAGE_LENGTH = 500` bounds the trimmed `message` body field on `POST .../commit-push` (`rest-api.md`) and the commit dialog's own client-side validation (`info-commit-dialog.js`, below) — both enforce the identical limit so the dialog never accepts a message the route would reject.
+
 ### RepositoryOrchestrator (`repository-orchestrator.ts`)
 
 ```typescript
 class RepositoryOrchestrator {
-    constructor(config: AppConfig, projectManager: ProjectManager, repositoryManager: RepositoryManager, workspaceArtifacts: WorkspaceArtifactsOrchestrator, errorLogManager?: ErrorLogManager)
+    constructor(config: AppConfig, projectManager: ProjectManager, repositoryManager: RepositoryManager, workspaceArtifacts: WorkspaceArtifactsOrchestrator, errorLogManager?: ErrorLogManager, repositoryInfoSync?: RepositoryInfoSyncOrchestrator)
 
     addRepositoryToProject(projectId: string, repositoryId: string): Promise<AddRepositoryResult>
     removeRepositoryFromProject(projectId: string, repositoryId: string): void
     deleteRepositoryGlobally(repositoryId: string): void
 }
 ```
+
+> **`deleteRepositoryGlobally()`'s managed-folder cleanup:** when `repositoryInfoSync` is injected, `removeManagedFolder(repositoryId)` (see `RepositoryInfoSyncOrchestrator`, above) runs once `repositoryManager.remove()` has succeeded — there is no `InfoSync` setting left to clear at that point, so this is a plain filesystem removal. A removal failure is logged as a `Severity: 'warning'`, `Source: 'workspace-info'`, `Operation: 'delete-repository-global'` entry rather than thrown, since the repository record is already gone by the time this step runs. On success, the `delete-repository-global` audit message (described below) gains a trailing "Managed main folder removed." sentence; it is omitted on failure or when no sync orchestrator was injected.
 
 > **`removeRepositoryFromProject()`'s association precondition:** before any clone folder is touched, the method checks `project.Repositories.includes(repositoryId)` and throws `Repository "X" is not listed in project "Y".` if it fails — hoisted above the per-workspace delete loop so an unlisted repository ID can never cause a partial, unassociated deletion. `projectManager.removeRepository()` further down re-validates the same association as defense in depth.
 
@@ -530,7 +803,7 @@ function isDirectoryShaped(targetPath: string): boolean
 
 > **`isDirectoryShaped()`:** rejects a target that already exists on disk as a directory. Applied by the write-guard chain in `writeWorkspaceIndexFiles()` (below); deliberately **not** applied by `removeRepositoryFromProject()`'s delete guard, since the delete target (a clone folder) is expected to be a directory.
 
-> **Two distinct roots, one recurring pattern:** every consumer of this module keeps the lexical-check root (`path.resolve(root)`) and the realpath-check root (`resolveRootRealPath(root)`) as two separate values rather than unifying them — unifying them would falsely reject every legitimate write/delete whenever the configured root itself sits behind a symlink (e.g. macOS's `/tmp` → `/private/tmp`). Consumers: `workspace-index.ts`'s `writeWorkspaceIndexFiles()` guard chain (below), and `repository-orchestrator.ts`'s `removeRepositoryFromProject()` clone-folder deletion guard (see `RepositoryOrchestrator`, above).
+> **Two distinct roots, one recurring pattern:** every consumer of this module keeps the lexical-check root (`path.resolve(root)`) and the realpath-check root (`resolveRootRealPath(root)`) as two separate values rather than unifying them — unifying them would falsely reject every legitimate write/delete whenever the configured root itself sits behind a symlink (e.g. macOS's `/tmp` → `/private/tmp`). Consumers: `workspace-index.ts`'s `writeWorkspaceIndexFiles()` guard chain (below), `repository-orchestrator.ts`'s `removeRepositoryFromProject()` clone-folder deletion guard (see `RepositoryOrchestrator`, above), and `repository-main-folder.ts`'s `removeManagedClone()` guard (see `Main Folder`, above).
 
 ### Workspace Index Files (`workspace-index.ts`)
 
@@ -610,7 +883,7 @@ interface RegenerateWorkspaceOverrides {
 }
 
 class WorkspaceArtifactsOrchestrator {
-    constructor(config: AppConfig, projectManager: ProjectManager, repositoryManager: RepositoryManager)
+    constructor(config: AppConfig, projectManager: ProjectManager, repositoryManager: RepositoryManager, repositoryInfoSync?: RepositoryInfoSyncOrchestrator, errorLogManager?: ErrorLogManager)
 
     regenerateWorkspace(projectId: string, workspaceId: string, overrides?: RegenerateWorkspaceOverrides): void
     regenerateProject(projectId: string): void
@@ -632,12 +905,14 @@ class WorkspaceArtifactsOrchestrator {
 
 > **`removeWorkspace()`:** calls both `removeWorkspaceFile()` and `removeWorkspaceIndexFiles()`, each already tolerant of a missing target — no folder-existence check is needed here.
 
+> **`.workspace/info.json` is a repository-level artefact, not a per-workspace one:** `regenerateWorkspace()` calls `RepositoryInfoSyncOrchestrator.syncRepository()` (above) for every resolved repository, and `regenerateForRepository()` also calls it once up front — independent of project membership, so a repository that belongs to no project is still synced. Both route through a private `safeSync()` helper that catches and logs any thrown error (`Severity: 'warning'`, `Source: 'workspace-info'`, `Operation: 'sync'`) rather than propagating it, so a sync failure never breaks `.code-workspace`/index-file regeneration; `safeSync()` is a no-op when `repositoryInfoSync` was not injected. Because `regenerateForRepository()` delegates to `regenerateProject()` → `regenerateWorkspace()` for every project that lists the repository, a repository that does have projects is synced more than once per call — accepted as redundant-but-cheap, since `syncRepository()` is documented as a single read + hash when nothing changed.
+>
 > **Migrated onto by all three orchestrators:** `WorkspaceOrchestrator`, `ProjectOrchestrator`, and `RepositoryOrchestrator` (above) now construct-inject this orchestrator and call it exclusively for artefact generation/removal; `repository-orchestrator.ts`'s former private `regenerateWorkspaceFile()` helper has been deleted. A source-level guard test (`workspace-artifacts-chokepoint.test.ts`) asserts no module outside this file imports `generateWorkspaceFile`/`removeWorkspaceFile`/`writeWorkspaceIndexFiles`/`removeWorkspaceIndexFiles`, and its `TEMPORARY_EXCEPTIONS` allowlist — the mechanism for recording a file that still needs migrating onto this choke-point during an intentionally-incomplete migration — is currently empty by design: `src/server/routes/workspaces.ts`'s former `regenerate-workspace-file` route handler, the allowlist's one-time entry, has since been migrated onto `workspaceArtifacts.regenerateWorkspace()` and no longer imports any guarded identifier, so the stale entry was removed. Any future entry must satisfy two conditions — the named file must exist, and it must still reference a guarded module (`workspace-index.js` or `vscode-workspace.js`) via `referencesGuardedModule()` — both now mechanically enforced by the guard test's assertion (previously an existence-only check that could not detect a stale entry). `referencesGuardedModule()` catches every import shape (named, namespace, default, side-effect, dynamic `import()`, `require()`), not just static named imports, closing the import-shape bypasses the prior identifier-inside-named-import-clause detection missed; see the Choke-Point Guard Tests entry in `constraints.md` for the identifier-vs-specifier gating rationale. `WorkspaceArtifactsOrchestrator` itself is instantiated exactly once, in `src/server/index.ts`, and injected into `WorkspaceOrchestrator`, `registerWorkspaceRoutes()`, `registerRepositoryRoutes()`, and (as of a later WP) `registerProjectRoutes()` directly — see that registrar's updated signature above. `ProjectOrchestrator` (the class) still accepts `workspaceArtifacts` via constructor but is not itself instantiated in `index.ts`; the live project-lifecycle *routes* instead call `WorkspaceArtifactsOrchestrator` directly rather than through the `ProjectOrchestrator` class (see the Artefact Reconciliation note in `rest-api.md`'s Projects/Workspaces sections for the six lifecycle routes now wired this way).
 
-### Workspace Health (`workspace-health.ts`)
+### Generic Health Types (`health.types.ts`)
 
 ```typescript
-interface WorkspaceHealthIssue {
+interface HealthIssue {
     type: string;
     severity: 'error' | 'warning';
     message: string;
@@ -645,10 +920,19 @@ interface WorkspaceHealthIssue {
     repositoryId?: string;
 }
 
-interface WorkspaceHealthReport {
+interface HealthReport {
     healthy: boolean;
-    issues: WorkspaceHealthIssue[];
+    issues: HealthIssue[];
 }
+```
+
+> **Shared shape across health report producers:** `HealthIssue`/`HealthReport` are the generic health-check shape used by every health report producer in the orchestration layer (currently workspace health; the repository-info sync health report introduced later in this plan reuses the same shape). Keeping a single definition here avoids the GUI health-alert component and this documentation diverging across multiple near-identical per-domain types. This module has no imports and no logic — it exists purely to hold the two interfaces.
+
+### Workspace Health (`workspace-health.ts`)
+
+```typescript
+type WorkspaceHealthIssue = HealthIssue;   // from health.types.ts
+type WorkspaceHealthReport = HealthReport; // from health.types.ts
 
 function checkWorkspaceHealth(
     projectId: string,
@@ -658,6 +942,8 @@ function checkWorkspaceHealth(
     errorLogManager?: ErrorLogManager,
 ): WorkspaceHealthReport
 ```
+
+> **`WorkspaceHealthIssue`/`WorkspaceHealthReport` are now type aliases** of the generic `HealthIssue`/`HealthReport` from `health.types.ts` (not their own interfaces) — every existing import of these two names from `workspace-health.ts` continues to compile unchanged, and `checkWorkspaceHealth()`'s logic/signature are untouched.
 
 > **Generated index-file check (Check 3):** `checkWorkspaceHealth()` calls `checkIndexFileStatus()` (from `workspace-index.ts`, above) exactly once, side-effect free, and folds its result into up to two issues: `workspace-index-missing` (`severity: 'warning'`, `fixAction: 'regenerate-workspace-file'`) when any of the three generated files is absent, and `workspace-index-unmanaged` (`severity: 'warning'`, `fixAction: 'none'`) when any is present but hand-authored (no begin marker) — no automated fix is offered for the latter, since regenerating would either be a silent no-op or clobber deliberate user content. `checkWorkspaceHealth()` never imports `GENERATED_BEGIN_MARKER` or reads an index file's content directly; `checkIndexFileStatus()` remains the single source of truth for marker detection, shared with the writer and remover in `workspace-index.ts`. `checkIndexFileStatus()` already returns empty arrays for an uninitialised workspace, so this check needs no separate folder-existence branch.
 
@@ -751,6 +1037,8 @@ const CUSTOM_FILES_HELP: string                                            // sh
 runCustomFilesCommand(args: string[], deps: CustomFilesCliDeps): Promise<number>   // args after "custom-files"; returns exit code, never throws for user errors
 createDefaultCustomFilesDeps(): CustomFilesCliDeps                          // loads config.json; throws if missing
 ```
+
+> **`createDefaultCustomFilesDeps()` also wires `RepositoryInfoSyncOrchestrator`:** it constructs one (config + `RepositoryManager`, no `errorLogManager` — the CLI has none) and passes it as the 4th constructor argument to `WorkspaceArtifactsOrchestrator`, so `paralizer custom-files add/update/delete`'s `regenerateProject()` call also syncs each affected repository's `.workspace/info.json` via the same `safeSync()` choke-point described above.
 
 - `<file>` references resolve by exact ID, then workspace-relative path (case-insensitive, `\` accepted), then unique ID prefix (>= 4 chars).
 - Content sources for `add`/`update`: `--content-file <path>` (`-` = stdin), `--stdin`, `--content <text>` (mutually exclusive). `update` changes only the given fields.
@@ -1072,6 +1360,15 @@ function registerNotesRoutes(router: Router, projectManager: ProjectManager, wor
 // version.ts
 function registerVersionRoute(router: Router): void
 
+// repository-info-sync.ts
+function registerRepositoryInfoSyncRoutes(
+    router: Router,
+    repoManager: RepositoryManager,  // kept for signature symmetry; every handler's 404 comes from `infoSync` instead
+    infoSync: RepositoryInfoSyncOrchestrator,
+    workspaceArtifacts: WorkspaceArtifactsOrchestrator,  // consulted best-effort by POST .../import (regenerateForRepository())
+    errorLogManager?: ErrorLogManager,
+): void
+
 // config.ts — accepts a named-options bag
 interface ConfigRoutesOptions {
     router: Router;
@@ -1128,6 +1425,25 @@ api.repositories.updateCredential(id, credentialId)
 ```
 
 > **`updateCredential` caller contract:** `credentialId` must always be a `string`. Passing `undefined` causes `JSON.stringify` to silently strip the key from the request body, producing an empty `{}` payload instead of `{ credentialId: null }`. Always pass `''` when the intent is to clear the association.
+
+### `api.repositories.infoSync`
+
+Opt-in `.workspace/info.json` sync methods, mirroring the server routes documented in `rest-api.md` and `RepositoryInfoSyncOrchestrator` above. Every method takes the repository ID through `encodeURIComponent`.
+
+```js
+api.repositories.infoSync.status(id)                                  // GET  /api/repositories/:id/info-sync
+api.repositories.infoSync.saveSettings(id, { enabled, discardPendingChanges? })  // PUT  /api/repositories/:id/info-sync
+api.repositories.infoSync.refresh(id)                                 // POST /api/repositories/:id/info-sync/refresh
+api.repositories.infoSync.recreateMainFolder(id, discardPendingChanges?)  // POST /api/repositories/:id/info-sync/recreate-main-folder
+api.repositories.infoSync.importPreview(id)                           // GET  /api/repositories/:id/info-sync/import
+api.repositories.infoSync.applyImport(id, fields)                     // POST /api/repositories/:id/info-sync/import
+api.repositories.infoSync.commitPush(id, message?)                    // POST /api/repositories/:id/info-sync/commit-push
+```
+
+- `status()`, `saveSettings()`, `refresh()`, `recreateMainFolder()`, and `applyImport()` resolve to the `InfoSyncStatus` shape (`enabled`, `mainFolder`, `state`, `pendingChanges`, `lastSyncedAt?`, `defaultCommitMessage`, `health`) — a JSDoc `@typedef {InfoSyncStatus}` above the `repositories` namespace in `api.js` documents the full field set, mirroring `RepositoryInfoSyncStatus` in `src/orchestration/repository-info-sync.ts`.
+- `recreateMainFolder(id, discardPendingChanges?)` and `commitPush(id, message?)` take a plain positional optional parameter (not an options object) and build the request body internally (`{}` when the optional argument is `undefined`), keeping the no-argument call terse.
+- `importPreview()` resolves to `{ state, fields: Array<{ field, current, incoming }> }` instead of `InfoSyncStatus`.
+- `applyImport(id, fields)` sends `{ fields }` as the request body.
 
 ### `api.config.credentials`
 
@@ -1331,6 +1647,52 @@ const repo = await showRepositoryModal({ mode: 'edit', repo: existingRepo });
 - Edit mode fetches credential options once on mount (keyed by `repo.url`); create mode skips the initial fetch. Both modes debounce (~400ms) a re-fetch on URL-field `input` events.
 - Submit: create mode calls `create()` then `updateCredential()` when a credential is selected; edit mode calls `update(repo.id, { name, url })` then `updateCredential()` only when the selection differs from `repo.credentialId ?? ''`. A rejected `updateCredential()` still resolves the Promise with the pre-credential-update repository (with an error toast); a rejected primary call re-enables all controls, shows a toast, and keeps the modal open.
 
+### `buildHealthAlert` (`components/health-alert.js`)
+
+Shared health-alert renderer, extracted from `workspace-detail.js`'s formerly-private `buildHealthAlertSection()` so a second health-reporting view (the repository info-sync section) can reuse the same markup and fix-action dispatch. See `gui-frontend.md`'s **Health Alert Component** section for the full behaviour contract (markup/classes, the `actions` registry, the `'none'`/unrecognised-`fixAction` fallback).
+
+```js
+import { buildHealthAlert } from './components/health-alert.js';
+
+// report: HealthReport { healthy, issues: Array<{ type, severity, message, fixAction, repositoryId? }> }
+// options: {
+//   title: string,
+//   actions: Record<string, { label: string, loadingLabel?: string, onClick(issue): void|Promise<void> }>,
+// }
+// Returns: HTMLElement | null — null when report.healthy is true (nothing to render)
+const healthEl = buildHealthAlert(status.health, { title: 'Workspace info sync issues', actions: { ... } });
+```
+
+### `showRepositoryInfoImportModal` (`components/repository-info-import-modal.js`)
+
+Per-field diff/choice modal for the `incoming`/`conflict` info-sync states. Built on `createModalShell` with `className: 'modal--form'`. See `gui-frontend.md`'s **Repository Info Import Modal Component** section for the full field-row/focus/default-choice contract.
+
+```js
+import { showRepositoryInfoImportModal } from './components/repository-info-import-modal.js';
+
+// config: { repoId: string, repoName?: string, preview: { state: 'incoming'|'conflict', fields: RepositoryInfoFieldDiff[] } }
+// Returns: Promise<{ applied: boolean }> — never rejects
+const { applied } = await showRepositoryInfoImportModal({ repoId, repoName, preview });
+```
+
+- Only `Name`/`Description` rows are rendered (filters defensively even though `diffRepositoryInfo()` already excludes `Url` upstream); each row is a `<fieldset>`/`<legend>` with Keep/Import radios, defaulting to Import for `incoming` and Keep for `conflict`.
+- `Apply` calls `api.repositories.infoSync.applyImport(repoId, selectedFields)` itself (selecting no fields is valid — "keep all"); a rejection is shown inline in a `role="alert"` paragraph without closing the modal.
+
+### `showInfoCommitDialog` (`components/info-commit-dialog.js`)
+
+Commit & Push confirmation dialog that performs the commit itself. Built on `createModalShell` with `className: 'modal--form'`. See `gui-frontend.md`'s **Info Commit Dialog Component** section for the full validation/focus contract.
+
+```js
+import { showInfoCommitDialog } from './components/info-commit-dialog.js';
+
+// config: { repoId: string, pendingFiles?: string[], defaultMessage?: string }
+// Returns: Promise<string|null> — the trimmed, committed message on success; null on Cancel/Escape/backdrop-click. Never rejects.
+const message = await showInfoCommitDialog({ repoId, pendingFiles: status.pendingChanges, defaultMessage: status.defaultCommitMessage });
+```
+
+- The message textarea enforces a trimmed length of 1–`MAX_INFO_COMMIT_MESSAGE_LENGTH` (500, duplicated client-side — see the commit constants note above) with a live character counter and `aria-invalid`/`aria-describedby` wiring; the Commit button stays disabled while invalid.
+- `Commit & Push` calls `api.repositories.infoSync.commitPush(repoId, trimmedMessage)` itself; a 409/502 rejection is shown inline in a `role="alert"` paragraph without closing the modal (so the caller's own inline alert is never used for Commit & Push errors — see the section builder, below).
+
 ---
 
 ## GUI Views (`gui/public/js/views/`)
@@ -1340,6 +1702,22 @@ View functions follow the router contract: `async function render*(container, pa
 | Export | Module | Signature | Description |
 |---|---|---|---|
 | `renderNotesCollected` | `views/notes-collected.js` | `async (container: Element, _params: {}) => void` | Renders the two-panel Notes Collected view. Left sidebar lists all workspaces grouped by collapsible project groups (uses `api.notes.list()` + `normaliseNotesResponse()`); workspaces with notes carry `.has-notes`. Right panel shows editable note cards — one per workspace with a non-empty note on initial load. Clicking a sidebar item for an existing card scrolls to it; clicking one without a card creates a new empty card and focuses the textarea. Each card auto-saves after 1000 ms of inactivity via `api.workspaces.update()`; saving empty text removes the card and clears the sidebar indicator. Route: `#/notes`. |
+
+### `buildRepositoryInfoSyncSection` (`views/repository-info-sync-section.js`)
+
+Section builder (not a routed view) mounted inside `repository-detail.js` directly after the Credential section. See `gui-frontend.md`'s **Repository Info Sync Section** for the full rendered-order, button-matrix, focus-management and accessibility contract.
+
+```js
+import { buildRepositoryInfoSyncSection } from './views/repository-info-sync-section.js';
+
+// repo: { id: string, name?: string } — a normalised repository (normaliseRepo())
+// options: {
+//   onRepositoryChanged?: (updatedRepo) => void,   // called only after a successful import
+//   onConfigureCredential?: () => void,            // wired by the caller to focus the Credential section
+// }
+// Returns: { element: HTMLElement, cleanup: () => void }
+const { element, cleanup } = buildRepositoryInfoSyncSection(repo, { onRepositoryChanged, onConfigureCredential });
+```
 
 ---
 
@@ -1362,7 +1740,7 @@ View functions follow the router contract: `async function render*(container, pa
 
 | Export | Signature | Description |
 |---|---|---|
-| `normaliseRepo` | `(raw) => { id, name, url }` | Maps PascalCase/camelCase backend keys to a consistent camelCase shape. |
+| `normaliseRepo` | `(raw) => { id, name, url, description, credentialId, LastRefreshedAt, infoSync }` | Maps PascalCase/camelCase backend keys to a consistent camelCase shape. `infoSync` maps `raw.InfoSync` to `{ enabled, lastSyncedAt }` only — `InfoSync.LastWrittenHash` (a machine-local sync-detection detail) is never exposed, and `infoSync` is left `undefined` when the backend omits `InfoSync` (sync never configured for that repository). |
 | `normaliseProject` | `(raw) => { id, name, description, repositories }` | Normalises project objects. |
 | `normaliseWorkspace` | `(raw) => { id, description, initialized, folderPath, notes }` | Normalises workspace objects. `notes` maps `raw.Notes ?? raw.notes ?? ''`. |
 | `normaliseNotesResponse` | `(response) => { projects: Array<{ projectId, projectName, workspaces: Array<{ workspaceId, notes }> }> }` | Transforms the PascalCase `GET /api/notes` response into a camelCase structure grouped by project. |

@@ -22,6 +22,7 @@ Built-in HTTP server providing a REST API and static file serving for the GUI. U
 | `requestUtils.ts` | JSON body parsing, response helpers |
 | `routes/` | REST API endpoint handlers (one file per resource domain) |
 | `routes/error-log.ts` | `GET /api/error-log`, `GET /api/error-log/:id`, `DELETE /api/error-log` |
+| `routes/repository-info-sync.ts` | `registerRepositoryInfoSyncRoutes()` — status/settings/refresh/recreate-main-folder/import/commit-push under `/api/repositories/:id/info-sync*`; kept separate from `routes/repositories.ts` so that file stays focused. See `api-surface.md`/`rest-api.md`. |
 | `__tests__/` | Server-specific unit tests |
 
 ## Internal Modules

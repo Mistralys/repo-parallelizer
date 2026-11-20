@@ -1,5 +1,6 @@
 /**
- * Unit tests for normaliseWorkspace() and normaliseNotesResponse() in normalise.js.
+ * Unit tests for normaliseRepo(), normaliseWorkspace() and
+ * normaliseNotesResponse() in normalise.js.
  *
  * Run individually with:
  *   node --test 'gui/public/js/__tests__/normalise.test.mjs'
@@ -9,6 +10,56 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const { normaliseRepo, normaliseWorkspace, normaliseNotesResponse } = await import('../utils/normalise.js');
+
+// ─── normaliseRepo — infoSync field ──────────────────────────────────────────
+
+test('normaliseRepo: InfoSync is mapped to infoSync with enabled and lastSyncedAt', () => {
+    const result = normaliseRepo({
+        Id: 'repo-1',
+        InfoSync: { Enabled: true, LastSyncedAt: '2026-01-01T00:00:00Z', LastWrittenHash: 'abc123' },
+    });
+    assert.deepStrictEqual(result.infoSync, { enabled: true, lastSyncedAt: '2026-01-01T00:00:00Z' });
+});
+
+test('normaliseRepo: infoSync never exposes LastWrittenHash', () => {
+    const result = normaliseRepo({
+        Id: 'repo-1',
+        InfoSync: { Enabled: true, LastWrittenHash: 'abc123' },
+    });
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(result.infoSync, 'LastWrittenHash'), false);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(result.infoSync, 'lastWrittenHash'), false);
+});
+
+test('normaliseRepo: infoSync.lastSyncedAt is undefined when absent', () => {
+    const result = normaliseRepo({ Id: 'repo-1', InfoSync: { Enabled: false } });
+    assert.deepStrictEqual(result.infoSync, { enabled: false, lastSyncedAt: undefined });
+});
+
+test('normaliseRepo: infoSync is undefined when InfoSync is absent', () => {
+    const result = normaliseRepo({ Id: 'repo-1', Name: 'Repo One' });
+    assert.strictEqual(result.infoSync, undefined);
+});
+
+test('normaliseRepo: lowercase infoSync is accepted', () => {
+    const result = normaliseRepo({
+        Id: 'repo-1',
+        infoSync: { enabled: true, lastSyncedAt: '2026-02-02T00:00:00Z' },
+    });
+    assert.deepStrictEqual(result.infoSync, { enabled: true, lastSyncedAt: '2026-02-02T00:00:00Z' });
+});
+
+test('normaliseRepo: existing fields still work alongside infoSync', () => {
+    const result = normaliseRepo({
+        Id: 'repo-1',
+        Name: 'Repo One',
+        Url: 'https://example.com/repo.git',
+        InfoSync: { Enabled: true },
+    });
+    assert.strictEqual(result.id, 'repo-1');
+    assert.strictEqual(result.name, 'Repo One');
+    assert.strictEqual(result.url, 'https://example.com/repo.git');
+    assert.deepStrictEqual(result.infoSync, { enabled: true, lastSyncedAt: undefined });
+});
 
 // ─── normaliseWorkspace — notes field ────────────────────────────────────────
 

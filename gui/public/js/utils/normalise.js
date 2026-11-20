@@ -12,16 +12,23 @@
  * Normalise a repository object from the backend.
  *
  * @param {Object} repo
- * @returns {{ id: string, name: string, url: string, description: string, credentialId: string|undefined, LastRefreshedAt: string|undefined }}
+ * @returns {{ id: string, name: string, url: string, description: string, credentialId: string|undefined, LastRefreshedAt: string|undefined, infoSync: { enabled: boolean, lastSyncedAt: string|undefined }|undefined }}
  *
  * @remarks
  * Unlike other normalised fields, `LastRefreshedAt` intentionally retains its
  * Go-capitalised casing in the returned object. This preserves compatibility
  * with existing consumers (e.g. `buildRepoStatusCells`) that already reference
  * it by that name. All other fields (`id`, `name`, `url`, `description`,
- * `credentialId`) use camelCase as the normalised form.
+ * `credentialId`, `infoSync`) use camelCase as the normalised form.
+ *
+ * `infoSync` is only populated with `enabled` and `lastSyncedAt` — the
+ * backend's `InfoSync.LastWrittenHash` is a machine-local sync-detection
+ * detail with no GUI use and is intentionally never exposed here. `infoSync`
+ * itself is `undefined` when the backend omits `InfoSync` (sync never
+ * configured for this repository).
  */
 export function normaliseRepo(repo) {
+    const rawInfoSync = repo.InfoSync || repo.infoSync;
     return {
         id:              repo.Id   || repo.id   || '',
         name:            repo.Name || repo.name || '',
@@ -29,6 +36,12 @@ export function normaliseRepo(repo) {
         description:     repo.Description || repo.description || '',
         credentialId:    repo.CredentialId || repo.credentialId || undefined,
         LastRefreshedAt: repo.LastRefreshedAt || repo.lastRefreshedAt || undefined,
+        infoSync: rawInfoSync
+            ? {
+                enabled:      rawInfoSync.Enabled != null ? rawInfoSync.Enabled : !!rawInfoSync.enabled,
+                lastSyncedAt: rawInfoSync.LastSyncedAt || rawInfoSync.lastSyncedAt || undefined,
+            }
+            : undefined,
     };
 }
 

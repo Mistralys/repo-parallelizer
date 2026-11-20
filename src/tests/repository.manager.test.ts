@@ -568,3 +568,107 @@ test('updateCredential is visible across two independent manager instances', () 
     m1.updateCredential('repo', 'cred-shared');
     assert.strictEqual(m2.getById('repo')?.CredentialId, 'cred-shared');
 });
+
+// ─── setInfoSyncSettings / recordInfoSyncWrite ────────────────────────────────
+
+test('setInfoSyncSettings sets the InfoSync group on the specified repository', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git' });
+    const updated = manager.setInfoSyncSettings('repo', { Enabled: true });
+    assert.deepStrictEqual(updated.InfoSync, { Enabled: true });
+});
+
+test('setInfoSyncSettings persists the InfoSync group so getById() reflects it', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git' });
+    manager.setInfoSyncSettings('repo', { Enabled: true });
+    assert.deepStrictEqual(manager.getById('repo')?.InfoSync, { Enabled: true });
+});
+
+test('setInfoSyncSettings with null removes the InfoSync group entirely', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git' });
+    manager.setInfoSyncSettings('repo', { Enabled: true });
+    const cleared = manager.setInfoSyncSettings('repo', null);
+    assert.strictEqual(cleared.InfoSync, undefined);
+});
+
+test('setInfoSyncSettings with null removes InfoSync from the persisted record', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git' });
+    manager.setInfoSyncSettings('repo', { Enabled: true });
+    manager.setInfoSyncSettings('repo', null);
+    const stored = manager.getById('repo');
+    assert.ok(stored !== undefined);
+    assert.ok(!Object.hasOwn(stored, 'InfoSync'), 'InfoSync must not be present in persisted record');
+});
+
+test('setInfoSyncSettings throws NotFoundError for a non-existent repository ID', () => {
+    const manager = makeManager(makeTempDir());
+    assert.throws(
+        () => manager.setInfoSyncSettings('nonexistent', { Enabled: true }),
+        (err) => err instanceof NotFoundError,
+    );
+});
+
+test('recordInfoSyncWrite sets LastWrittenHash and LastSyncedAt when InfoSync is configured', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git' });
+    manager.setInfoSyncSettings('repo', { Enabled: true });
+    const updated = manager.recordInfoSyncWrite('repo', 'abc123hash');
+
+    assert.strictEqual(updated.InfoSync?.Enabled, true);
+    assert.strictEqual(updated.InfoSync?.LastWrittenHash, 'abc123hash');
+    assert.ok(typeof updated.InfoSync?.LastSyncedAt === 'string' && updated.InfoSync.LastSyncedAt.length > 0);
+});
+
+test('recordInfoSyncWrite persists LastWrittenHash/LastSyncedAt so getById() reflects it', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git' });
+    manager.setInfoSyncSettings('repo', { Enabled: true });
+    manager.recordInfoSyncWrite('repo', 'abc123hash');
+    assert.strictEqual(manager.getById('repo')?.InfoSync?.LastWrittenHash, 'abc123hash');
+});
+
+test('recordInfoSyncWrite throws when InfoSync is absent', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git' });
+    assert.throws(
+        () => manager.recordInfoSyncWrite('repo', 'abc123hash'),
+        /InfoSync/,
+    );
+});
+
+test('recordInfoSyncWrite throws NotFoundError for a non-existent repository ID', () => {
+    const manager = makeManager(makeTempDir());
+    assert.throws(
+        () => manager.recordInfoSyncWrite('nonexistent', 'abc123hash'),
+        (err) => err instanceof NotFoundError,
+    );
+});
+
+test('update() preserves InfoSync when only the Name is changed', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git' });
+    manager.setInfoSyncSettings('repo', { Enabled: true, LastWrittenHash: 'h1', LastSyncedAt: '2026-01-01T00:00:00.000Z' });
+
+    const updated = manager.update('repo', { name: 'New Name' });
+
+    assert.strictEqual(updated.Name, 'New Name');
+    assert.deepStrictEqual(updated.InfoSync, {
+        Enabled: true,
+        LastWrittenHash: 'h1',
+        LastSyncedAt: '2026-01-01T00:00:00.000Z',
+    });
+});
+
+test('update() preserves InfoSync when the url is also changed', () => {
+    const manager = makeManager(makeTempDir());
+    manager.add({ url: 'https://github.com/user/repo.git' });
+    manager.setInfoSyncSettings('repo', { Enabled: true });
+
+    const updated = manager.update('repo', { name: 'New Name', url: 'https://github.com/user/repo2.git' });
+
+    assert.strictEqual(updated.Url, 'https://github.com/user/repo2.git');
+    assert.deepStrictEqual(updated.InfoSync, { Enabled: true });
+});

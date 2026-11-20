@@ -17,6 +17,7 @@ import { loadConfig } from '../config/config.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceArtifactsOrchestrator } from '../orchestration/workspace-artifacts.js';
+import { RepositoryInfoSyncOrchestrator } from '../orchestration/repository-info-sync.js';
 import {
     customFileRelativePath,
     isExecutableFile,
@@ -143,7 +144,8 @@ export function createDefaultCustomFilesDeps(): CustomFilesCliDeps {
     const config = loadConfig();
     const repoManager = new RepositoryManager(config);
     const projectManager = new ProjectManager(config, repoManager);
-    const artifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const repositoryInfoSync = new RepositoryInfoSyncOrchestrator(config, repoManager);
+    const artifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager, repositoryInfoSync);
     return {
         projectManager,
         artifacts,

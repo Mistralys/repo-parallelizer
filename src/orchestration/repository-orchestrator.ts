@@ -4,12 +4,14 @@ import type { AppConfig } from '../config/config.types.js';
 import type { ProjectManager } from '../models/project/project.manager.js';
 import type { RepositoryManager } from '../models/repository/repository.manager.js';
 import { cloneRepository } from '../git/git-clone.js';
-import { resolveCredential, injectCredentialToken, extractHost, stripEmbeddedCredentials } from '../git/git-credentials.js';
+import { stripEmbeddedCredentials } from '../git/git-credentials.js';
+import { resolveRemoteAuth } from './remote-auth.js';
 import type { WorkspaceArtifactsOrchestrator } from './workspace-artifacts.js';
 import { CLONE_TIMEOUT_MS } from './orchestration.types.js';
 import type { AddRepositoryResult, WorkspaceCloneResult } from './orchestration.types.js';
 import type { ErrorLogManager } from '../error-log/error-log.manager.js';
 import { resolveRootRealPath, escapesRootViaRealpath } from '../utils/path-guard.js';
+import type { RepositoryInfoSyncOrchestrator } from './repository-info-sync.js';
 
 /**
  * High-level orchestrator for repository lifecycle operations within projects.
@@ -45,6 +47,7 @@ export class RepositoryOrchestrator {
         private readonly repositoryManager: RepositoryManager,
         private readonly workspaceArtifacts: WorkspaceArtifactsOrchestrator,
         private readonly errorLogManager?: ErrorLogManager,
+        private readonly repositoryInfoSync?: RepositoryInfoSyncOrchestrator,
     ) {}
 
     // -------------------------------------------------------------------------
@@ -124,33 +127,27 @@ export class RepositoryOrchestrator {
                 }
 
                 const credentials = this.config.gitCredentials ?? [];
-                const credential = resolveCredential(repo.Url, credentials, repo.CredentialId);
-                const host = extractHost(repo.Url);
+                const authResolution = resolveRemoteAuth(repo, credentials);
 
                 // When no credential resolves for an HTTPS URL, report a descriptive
                 // error rather than attempting an unauthenticated clone that would
                 // likely fail with an unhelpful git error message.
-                if (credential === null && host !== null) {
-                    const errorMessage =
-                        `Repository '${repo.Name}' requires a credential for host '${host}'. ` +
-                        `Please select a credential in the repository settings.`;
+                if (!authResolution.ok) {
                     this.errorLogManager?.append({
                         Severity: 'error',
                         Source: 'credentials',
                         Operation: 'add-repository',
                         Context: { ProjectId: projectId, WorkspaceId: workspaceId, RepositoryId: repositoryId },
-                        Message: errorMessage,
+                        Message: authResolution.message,
                     });
                     return {
                         workspaceId,
                         success: false,
-                        error: errorMessage,
+                        error: authResolution.message,
                     };
                 }
 
-                const cloneUrl = credential !== null
-                    ? injectCredentialToken(repo.Url, credential.token)
-                    : repo.Url;
+                const { url: cloneUrl, credential } = authResolution;
 
                 const gitResult = await cloneRepository(cloneUrl, destination, {
                     depth: this.config.cloneDepth > 0 ? this.config.cloneDepth : undefined,
@@ -332,6 +329,13 @@ export class RepositoryOrchestrator {
      * cascade are left in place (they describe cascade steps that did
      * genuinely complete).
      *
+     * When a `repositoryInfoSync` is injected, the repository's managed main
+     * folder (if any) is removed once the global-store removal has succeeded
+     * — there is no `InfoSync` setting left to clear at that point, so this
+     * is a plain filesystem removal. A removal failure is logged as a
+     * warning, never thrown, since the repository record is already gone by
+     * the time this step runs.
+     *
      * @throws {Error} If the repository does not exist in the global store.
      */
     deleteRepositoryGlobally(repositoryId: string): void {
@@ -356,6 +360,26 @@ export class RepositoryOrchestrator {
         // Remove the repository from the global store.
         this.repositoryManager.remove(repositoryId);
 
+        // Remove the managed main folder (if any) now that the repository
+        // record is gone. A failure here is logged, not thrown — the
+        // repository is already deleted and this is best-effort cleanup.
+        let managedFolderRemoved = false;
+        if (this.repositoryInfoSync) {
+            try {
+                this.repositoryInfoSync.removeManagedFolder(repositoryId);
+                managedFolderRemoved = true;
+            } catch (error) {
+                this.errorLogManager?.append({
+                    Severity: 'warning',
+                    Source: 'workspace-info',
+                    Operation: 'delete-repository-global',
+                    Context: { RepositoryId: repositoryId },
+                    Message: `Failed to remove managed main folder for repository "${repositoryId}": ` +
+                        `${error instanceof Error ? error.message : String(error)}`,
+                });
+            }
+        }
+
         // Audit trail — the summary entry is emitted only after the global
         // removal above has succeeded, so a throw here (after the per-project
         // cascade already completed) leaves no summary entry behind while the
@@ -365,7 +389,8 @@ export class RepositoryOrchestrator {
             Source: 'repository-audit',
             Operation: 'delete-repository-global',
             Context: { RepositoryId: repositoryId },
-            Message: `Repository "${repositoryId}" was deleted globally, affecting ${affectedProjectIds.length} project(s).`,
+            Message: `Repository "${repositoryId}" was deleted globally, affecting ${affectedProjectIds.length} project(s).` +
+                (managedFolderRemoved ? ' Managed main folder removed.' : ''),
             Details: JSON.stringify(affectedProjectIds),
         });
     }

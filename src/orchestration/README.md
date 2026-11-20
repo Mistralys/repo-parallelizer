@@ -13,12 +13,21 @@ High-level composite operations that coordinate models and Git commands to imple
 | File | Responsibility |
 |---|---|
 | `orchestration.types.ts` | Shared result types and timeout constants |
+| `health.types.ts` | Generic `HealthIssue`/`HealthReport` shape shared across health-check producers in this layer |
+| `remote-auth.ts` | `resolveRemoteAuth()` — shared credential resolve/inject/explain helper for turning a repository's configured URL into a git-ready remote URL |
+| `repository-info.ts` | Pure, filesystem-only module for the per-repository `.workspace/info.json` sync file and its companion `README.md`: render/parse/hash/diff and sync-state evaluation. Mirrors `workspace-index.ts`'s pure-module pattern — no manager or git access |
+| `repository-main-folder.ts` | Resolves and git-inspects the Paralizer-managed main folder clone (`{storageFolder}/repositories/{repoId}/`) — the only location Paralizer ever reads or writes `.workspace/` from — and creates/removes that partial/sparse clone |
+| `repository-info-sync.ts` | `RepositoryInfoSyncOrchestrator` — ties `repository-info.ts` and `repository-main-folder.ts` together: a synchronous, filesystem-only `syncRepository()` for the artefact choke-point, plus async `getStatus`/`saveSettings`/`refresh`/`getImportPreview`/`applyImport`/`commitAndPush`/`recreateManagedClone`, each serialised per repository via a private mutex |
 | `project-orchestrator.ts` | Create, delete, rename projects (clones repos into STABLE workspace) |
 | `repository-orchestrator.ts` | Add/remove repos from projects, delete repos globally |
 | `workspace-orchestrator.ts` | Create, delete, rename workspaces (clones repos into new workspace) |
 | `branch-orchestrator.ts` | Multi-repo branch switching with conflict detection |
 | `vscode-workspace.ts` | Generate `.code-workspace` files for VS Code |
 | `workspace-health.ts` | Side-effect-free health checks for workspaces (missing files, uncloned repos, credential errors) |
+
+## Credential Resolution
+
+Both `WorkspaceOrchestrator.createWorkspace()` and `RepositoryOrchestrator.addRepositoryToProject()` resolve the git-ready remote URL for a repository through the shared `resolveRemoteAuth()` helper in `remote-auth.ts`, rather than duplicating the resolve/inject/explain sequence. The returned `url` may carry an embedded credential token and must be consumed immediately by the git call it was resolved for — never persisted, logged, or returned across an API boundary. See the `RemoteAuthResolution` JSDoc in `remote-auth.ts` for the full contract.
 
 ## Credential Success Logging
 

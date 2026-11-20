@@ -11,6 +11,14 @@ export const CLONE_TIMEOUT_MS = 120_000;
  */
 export const FETCH_TIMEOUT_MS = 30_000;
 
+/**
+ * Timeout applied to `pushHead()` calls in orchestrators.
+ * Pushes are typically small (a single commit touching a handful of
+ * synced files), so this is shorter than `CLONE_TIMEOUT_MS` but allows more
+ * headroom than `FETCH_TIMEOUT_MS` for a slow or congested remote.
+ */
+export const PUSH_TIMEOUT_MS = 60_000;
+
 // ---------------------------------------------------------------------------
 // Orchestration result types
 // ---------------------------------------------------------------------------

@@ -139,6 +139,115 @@ Returns the subset of configured git credentials whose `host` matches the hostna
 
 ---
 
+## Repository Info Sync (`/api/repositories/:id/info-sync`)
+
+Opt-in, per-repository sync of `Id`, `Name`, `Description`, and an informational `Url` into a Paralizer-managed main-folder clone's versioned `.workspace/info.json`. Every handler delegates to `RepositoryInfoSyncOrchestrator` (see `api-surface.md`), which serialises all mutating operations per repository via an internal async lock. Custom files are out of scope for this sync (deferred to a later milestone).
+
+| Method | Path | Success | Error Codes | Description |
+|---|---|---|---|---|
+| `GET` | `/api/repositories/:id/info-sync` | 200 | 404 | Get the current sync status (enabled flag, main-folder inspection, sync state, pending changes, health). |
+| `PUT` | `/api/repositories/:id/info-sync` | 200 | 400, 404, 409, 502 | Save settings (enable/disable sync). Body: `{ enabled, discardPendingChanges? }`. |
+| `POST` | `/api/repositories/:id/info-sync/refresh` | 200 | 404, 409, 502 | Re-inspect the main folder and re-evaluate sync state without writing anything. |
+| `POST` | `/api/repositories/:id/info-sync/recreate-main-folder` | 200 | 400, 404, 409, 502 | Delete and re-clone the managed main folder. Body (optional): `{ discardPendingChanges? }`. |
+| `GET` | `/api/repositories/:id/info-sync/import` | 200 | 404, 409 | Preview the per-field diff between Paralizer's data and the incoming `.workspace/info.json`. Only valid when state is `incoming` or `conflict`. |
+| `POST` | `/api/repositories/:id/info-sync/import` | 200 | 400, 404, 409 | Apply selected fields from the incoming file onto the repository's data. Body: `{ fields }` — array of `'Name'` and/or `'Description'` (empty array valid, means "keep all local values"). Triggers a best-effort `workspaceArtifacts.regenerateForRepository()` call after a successful apply (failure is logged as a warning, Source: `'workspace-index'`, Operation: `'info-sync-import'`, and does not affect the response). |
+| `POST` | `/api/repositories/:id/info-sync/commit-push` | 200 | 400, 404, 409, 502 | Commit the local `.workspace/info.json` changes in the main folder and push them to the remote. Body (optional): `{ message? }`. |
+
+### Error Mapping
+
+Every handler maps errors thrown by the orchestrator onto HTTP status codes through one shared dispatcher, so the mapping cannot drift between routes:
+
+| Error type | Status |
+|---|---|
+| Body validation failure (checked before calling the orchestrator) | 400 |
+| `NotFoundError` (unknown repository ID) | 404 |
+| `PendingChangesError` / `SyncPreconditionError` / `MainFolderPreconditionError` | 409 |
+| `RemoteOperationError` / `MainFolderGitError` | 502 — message is always credential-stripped |
+| anything else | 500 (generic message) |
+
+### Request Body Validation
+
+| Field | Used by | Type | Required | Description |
+|---|---|---|---|---|
+| `enabled` | `PUT /info-sync` | `boolean` | **Yes** | Enables or disables sync for the repository. |
+| `discardPendingChanges` | `PUT /info-sync`, `POST .../recreate-main-folder` | `boolean` | No | When `true`, allows the operation to proceed even though it would discard pending local changes in the main folder. Omitting it (or `false`) causes a `PendingChangesError` (409) when changes are pending. |
+| `fields` | `POST .../import` | `Array<'Name' \| 'Description'>` | **Yes** | Fields to import from the incoming file. Any value other than `'Name'`/`'Description'` (e.g. `'Url'`) is rejected with 400. An empty array is valid and means "keep all local values" — the file is still rewritten from Paralizer's data and the state resolves to `in-sync`. `Url` is never an importable field: it is informational only and is never synced from the folder back into Paralizer's data. |
+| `message` | `POST .../commit-push` | `string` | No | Commit message. When present, trimmed length must be between 1 and `MAX_INFO_COMMIT_MESSAGE_LENGTH`. When omitted, a default message (`Update <folder-name> for "<repositoryId>" via Paralizer`) is used. |
+
+### `GET /api/repositories/:id/info-sync` Response Shape
+
+```json
+{
+    "enabled": true,
+    "mainFolder": { "path": "/path/to/main-folder", "exists": true, "isGitRepo": true },
+    "state": "in-sync",
+    "pendingChanges": [],
+    "lastSyncedAt": "2026-11-20T12:00:00.000Z",
+    "defaultCommitMessage": "Update .workspace for \"my-repo\" via Paralizer",
+    "health": { "healthy": true, "issues": [] }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | `boolean` | Whether info sync is turned on for this repository. |
+| `mainFolder` | `object \| null` | Inspection of the managed main-folder clone (path plus existence/git-repo checks). `null` only when `enabled` is `false`. |
+| `state` | `string` | One of `'disabled'`, `'main-folder-unavailable'`, `'in-sync'`, `'write-required'`, `'incoming'`, `'conflict'`, `'invalid-file'`, `'id-mismatch'`, `'unsupported-schema'`. `'incoming'`/`'conflict'` are the only states that permit `GET .../import`. |
+| `pendingChanges` | `string[]` | Paths changed in the main folder's `.workspace` subtree that have not yet been committed and pushed. |
+| `lastSyncedAt` | `string` *(optional)* | ISO 8601 timestamp of the last successful sync write. Absent when never synced. |
+| `defaultCommitMessage` | `string` | Pre-filled commit message offered by the Commit & Push dialog. |
+| `health` | `HealthReport` | `{ healthy: boolean, issues: [] }` — same shape as the workspace health report (see **Health Issue Types** below), scoped to this repository's info sync. |
+
+`PUT /info-sync`, `POST .../refresh`, `POST .../recreate-main-folder`, and `POST .../import` all return this same status shape on success.
+
+### `GET /api/repositories/:id/info-sync/import` Response Shape
+
+```json
+{
+    "state": "incoming",
+    "fields": [
+        { "field": "Name", "current": "my-repo", "incoming": "My Repo" },
+        { "field": "Description", "current": "", "incoming": "A short description." }
+    ]
+}
+```
+
+`state` is always `'incoming'` or `'conflict'` here (any other state causes a 409 before this response can be produced). `fields` lists only the fields that actually differ between Paralizer's current data and the incoming file.
+
+### `POST /api/repositories/:id/info-sync/commit-push` Response Shape
+
+```json
+{ "committed": true, "pushed": true, "commitSha": "a1b2c3d", "filterFallback": false }
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `committed` | `boolean` | Whether a new commit was created (`false` when there was nothing to commit). |
+| `pushed` | `boolean` | Whether the commit was pushed to the remote. |
+| `commitSha` | `string` *(optional)* | Short SHA of the created commit. Absent when `committed` is `false`. |
+| `filterFallback` | `boolean` *(optional)* | `true` when the remote rejected a partial/filtered fetch and the orchestrator fell back to a full fetch (see `FILTER_UNSUPPORTED_WARNING` in `git-clone.ts`). |
+
+### Repository Info Sync Issue Types
+
+Issues reported in the `health` field above, each carrying `{ type, severity, message, fixAction }` (the same `HealthIssue` shape as the workspace health report's **Health Issue Types**, below). None carry a `repositoryId` — the report is already scoped to a single repository via the URL's `:id`.
+
+| `type` | Severity | `fixAction` | When |
+|---|---|---|---|
+| `info-sync-main-folder-missing` | `warning` | `recreate-main-folder` | The managed folder does not exist. |
+| `info-sync-main-folder-missing` | `error` | `recreate-main-folder` | The managed folder exists but is not a git repository. (Same `type` as the row above — `deriveMainFolderIssues()` remaps both `main-folder-missing` and `main-folder-not-git` onto this one `info-sync-*` type; only the severity and message differ.) |
+| `info-sync-remote-mismatch` | `error` | `recreate-main-folder` | The managed clone's `origin` no longer matches the repository's registered `Url` (e.g. the URL was edited via the repository form). |
+| `info-sync-wrong-branch` | `warning` | `recreate-main-folder` | The managed clone is checked out to a branch other than the default (defensive — only possible if the clone was edited by hand). |
+| `info-sync-behind-remote` | `warning` | `refresh` | The managed clone is behind `origin`'s default branch. |
+| `info-sync-pending-changes` | `warning` | `commit-push` | The `.workspace` folder has uncommitted changes in the managed clone. |
+| `info-sync-import-available` | `warning` | `import` | State `incoming` — the folder changed upstream and Paralizer's data did not; no write occurred. |
+| `info-sync-conflict` | `warning` | `import` | State `conflict` — both sides changed (or no baseline existed and they differ); no write occurred. |
+| `info-sync-invalid-file` | `error` | `none` | `.workspace/info.json` is unparseable JSON, not an object, or is missing/has non-string synced fields. |
+| `info-sync-id-mismatch` | `error` | `none` | The file's `Id` does not match the repository's own `Id`. |
+| `info-sync-unsupported-schema` | `warning` | `none` | The file's `SchemaVersion` is greater than `REPOSITORY_INFO_SCHEMA_VERSION`. |
+| `info-sync-credential-missing` | `warning` | `configure-credential` | No credential resolves for the repository's host, so a git operation (fetch/push) cannot authenticate. |
+
+---
+
 ## Projects
 
 | Method | Path | Success | Error Codes | Description |

@@ -54,6 +54,36 @@ export interface CloneOptions {
     bare?: boolean;
     /** Abort the clone if it has not completed within this many milliseconds. */
     timeoutMs?: number;
+    /**
+     * Partial-clone filter, passed through as `--filter=<filter>`.
+     * `'blob:none'` omits all file contents (blobs) from the initial clone,
+     * fetching them lazily on demand. Servers that do not support partial
+     * clone (`uploadpack.allowFilter` unset) reject the request with a
+     * message containing {@link FILTER_UNSUPPORTED_WARNING} from `git-clone.ts`.
+     */
+    filter?: 'blob:none';
+    /**
+     * Skip populating the working tree after clone, passed through as
+     * `--no-checkout`. Used together with sparse-checkout (see
+     * `setSparseCheckout()` in `git-clone.ts`) so only the desired paths are
+     * ever written to disk.
+     */
+    noCheckout?: boolean;
+}
+
+/**
+ * A single entry from `git status --porcelain` output, scoped to a pathspec
+ * via {@link getPathStatus} in `git-commit.ts`.
+ */
+export interface PathStatusEntry {
+    /**
+     * Two-character XY status code (e.g. `"M "`, `"??"`, `"A "`) as emitted
+     * by `git status --porcelain`. See `git-status.ts`'s `CONFLICT_CODES` for
+     * the subset of codes that indicate an unresolved merge conflict.
+     */
+    code: string;
+    /** Path reported for this entry, relative to the repository root. */
+    path: string;
 }
 
 /**

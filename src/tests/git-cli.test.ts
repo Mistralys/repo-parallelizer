@@ -95,6 +95,35 @@ test('runGitOrThrow() error message includes the exit code', async () => {
     );
 });
 
+// ─── runGitOrThrow() — embedded credential stripping ──────────────────────────
+
+test('runGitOrThrow() strips an embedded credential token from the thrown error message', async () => {
+    const fakeGitDir = fs.mkdtempSync(path.join(tmpDir, 'fake-git-cred-'));
+    const fakeGitPath = path.join(fakeGitDir, 'git');
+    fs.writeFileSync(
+        fakeGitPath,
+        `#!/bin/sh\necho "fatal: repository 'https://ghp_supersecrettoken@github.com/org/repo.git/' not found" 1>&2\nexit 128\n`,
+        { mode: 0o755 },
+    );
+    const origPath = process.env.PATH ?? '';
+    process.env.PATH = `${fakeGitDir}:${origPath}`;
+    try {
+        await assert.rejects(
+            () => runGitOrThrow(['clone', 'https://ghp_supersecrettoken@github.com/org/repo.git', 'dest'], tmpDir),
+            (err: unknown) => {
+                assert.ok(err instanceof Error);
+                assert.ok(
+                    !err.message.includes('ghp_supersecrettoken'),
+                    `expected token to be stripped from error message, got: ${err.message}`,
+                );
+                return true;
+            },
+        );
+    } finally {
+        process.env.PATH = origPath;
+    }
+});
+
 // ─── Isolation: each test uses the shared tmpDir ──────────────────────────────
 // tmpDir is created with mkdtempSync so it is unique per test run and is
 // completely isolated from any real repository on the file system.

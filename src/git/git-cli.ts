@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { GitResult, RunGitOptions } from './git.types.js';
+import { stripEmbeddedCredentials } from './git-credentials.js';
 
 /**
  * Spawns a git sub-process and collects its output.
@@ -142,7 +143,11 @@ export function runGit(args: string[], cwd?: string, options?: RunGitOptions): P
  *
  * Throws an `Error` when the process exits with a non-zero code. The error
  * message includes the exit code and the trimmed stderr output to aid
- * diagnosis.
+ * diagnosis. `stderr` is passed through {@link stripEmbeddedCredentials}
+ * before being embedded in the error message so that an authenticated URL
+ * echoed back by git (e.g. in a "repository not found" message) never leaks
+ * a credential token into a thrown error, a log, or a UI surface that
+ * displays caught errors.
  *
  * @param args - Git arguments.
  * @param cwd  - Working directory for the spawned process.
@@ -151,7 +156,7 @@ export async function runGitOrThrow(args: string[], cwd?: string): Promise<strin
     const result = await runGit(args, cwd);
     if (result.exitCode !== 0) {
         throw new Error(
-            `git ${args[0] ?? '(unknown)'} failed (exit ${result.exitCode}):\n${result.stderr.trim()}`,
+            `git ${args[0] ?? '(unknown)'} failed (exit ${result.exitCode}):\n${stripEmbeddedCredentials(result.stderr.trim())}`,
         );
     }
     return result.stdout.trim();

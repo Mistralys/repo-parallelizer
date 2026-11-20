@@ -118,6 +118,27 @@ let mockCredentialOptions = [];
 api.repositories.get = async () => mockRepoResponse;
 api.repositories.credentialOptions = async () => mockCredentialOptions;
 api.repositories.updateCredential  = async () => ({});
+
+// Default info-sync mocks (WP-013) — the section is mounted on every render
+// of this view, so every test needs these to resolve to *something*, not
+// just the tests that exercise the section directly.
+api.repositories.infoSync.status = async () => ({
+    enabled: false,
+    mainFolder: null,
+    state: 'disabled',
+    pendingChanges: [],
+    defaultCommitMessage: 'Update workspace info',
+    health: { healthy: true, issues: [] },
+});
+api.repositories.infoSync.saveSettings     = async (_id, input) => ({
+    enabled: input.enabled, mainFolder: null, state: 'disabled', pendingChanges: [],
+    defaultCommitMessage: 'Update workspace info', health: { healthy: true, issues: [] },
+});
+api.repositories.infoSync.refresh          = async () => api.repositories.infoSync.status(REPO_ID);
+api.repositories.infoSync.recreateMainFolder = async () => api.repositories.infoSync.status(REPO_ID);
+api.repositories.infoSync.importPreview    = async () => ({ state: 'incoming', fields: [] });
+api.repositories.infoSync.applyImport      = async () => api.repositories.infoSync.status(REPO_ID);
+api.repositories.infoSync.commitPush       = async () => ({ committed: true, pushed: true });
 api.projects.list    = async () => mockProjectsList;
 api.projects.get     = async () => mockProjectDetail;
 api.workspaces.list  = async () => mockWorkspacesList;
@@ -899,6 +920,106 @@ test('Credential section — changing dropdown calls api.repositories.updateCred
     } finally {
         api.repositories.updateCredential = originalUpdate;
         mockCredentialOptions = [];
+        cleanupContainers();
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Workspace info sync section — WP-013 (AC-17, AC-17b, AC-17c mounting integration)
+// ---------------------------------------------------------------------------
+
+test('AC-17: the "Workspace info sync" section is mounted after the Credential section and before the status table', async () => {
+    const container = await renderAndWait();
+    try {
+        const sections = Array.from(container.querySelectorAll(
+            '.repository-credential-section, .repository-info-sync-section, .repository-detail-status-section',
+        ));
+        const classNames = sections.map((el) => el.className);
+        assert.deepEqual(classNames, [
+            'repository-credential-section',
+            'repository-info-sync-section',
+            'repository-detail-status-section',
+        ]);
+
+        const heading = container.querySelector('.repository-info-sync-section .section-title');
+        assert.equal(heading.textContent, 'Workspace info sync');
+    } finally {
+        cleanupContainers();
+    }
+});
+
+test('AC-17: a successful import updates the header\'s name/description without a full navigation', async () => {
+    api.repositories.infoSync.status = async () => ({
+        enabled: true,
+        mainFolder: { path: '/data/repositories/my-repo', exists: true, isGitRepository: true, remoteUrl: REPO_URL, remoteMatches: true, currentBranch: 'main', defaultBranch: 'main', ahead: 0, behind: 0, pendingChanges: [] },
+        state: 'incoming',
+        pendingChanges: [],
+        defaultCommitMessage: 'Update workspace info',
+        health: { healthy: true, issues: [] },
+    });
+    api.repositories.infoSync.importPreview = async () => ({
+        state: 'incoming', fields: [{ field: 'Name', current: REPO_NAME, incoming: 'Imported Name' }],
+    });
+    const updatedRepo = { Id: REPO_ID, Name: 'Imported Name', Url: REPO_URL, Description: 'Imported description.' };
+    const originalGet = api.repositories.get;
+    api.repositories.get = async () => updatedRepo;
+    api.repositories.infoSync.applyImport = async () => ({
+        enabled: true, mainFolder: null, state: 'in-sync', pendingChanges: [],
+        defaultCommitMessage: 'Update workspace info', health: { healthy: true, issues: [] },
+    });
+
+    const container = await renderAndWait();
+    try {
+        const importBtn = Array.from(container.querySelectorAll('.repository-info-sync-section button'))
+            .find((b) => b.textContent === 'Import…');
+        assert.ok(importBtn, 'Import… button should be present in state "incoming"');
+
+        importBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const applyBtn = Array.from(document.querySelectorAll('.modal-actions button'))
+            .find((b) => b.textContent === 'Apply');
+        assert.ok(applyBtn, 'the import modal should be open');
+        applyBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const h1 = container.querySelector('h1');
+        assert.equal(h1.textContent, 'Imported Name');
+        const descEl = container.querySelector('.project-meta-description');
+        assert.equal(descEl.textContent, 'Imported description.');
+    } finally {
+        api.repositories.get = originalGet;
+        cleanupContainers();
+    }
+});
+
+test('AC-17: the "configure-credential" fix action focuses the Credential section heading', async () => {
+    api.repositories.infoSync.status = async () => ({
+        enabled: true,
+        mainFolder: null,
+        state: 'main-folder-unavailable',
+        pendingChanges: [],
+        defaultCommitMessage: 'Update workspace info',
+        health: {
+            healthy: false,
+            issues: [{ type: 'info-sync-credential-missing', severity: 'error', message: 'No credential resolves for this host.', fixAction: 'configure-credential' }],
+        },
+    });
+
+    const container = await renderAndWait();
+    try {
+        const configureBtn = Array.from(container.querySelectorAll('.health-alert button'))
+            .find((b) => b.textContent === 'Configure');
+        assert.ok(configureBtn, 'the configure-credential fix action button should be present');
+
+        configureBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const credentialHeading = container.querySelector('.repository-credential-section .section-title');
+        assert.equal(document.activeElement, credentialHeading);
+    } finally {
         cleanupContainers();
     }
 });

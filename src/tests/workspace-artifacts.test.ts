@@ -8,8 +8,10 @@ import { RepositoryManager } from '../models/repository/repository.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import { WorkspaceArtifactsOrchestrator } from '../orchestration/workspace-artifacts.js';
+import type { RepositoryInfoSyncOrchestrator, RepositoryInfoSyncResult } from '../orchestration/repository-info-sync.js';
 import { GENERATED_BEGIN_MARKER } from '../orchestration/workspace-index.js';
 import { STABLE_WORKSPACE_ID } from '../models/workspace/workspace.types.js';
+import { ErrorLogManager } from '../error-log/error-log.manager.js';
 import type { AppConfig } from '../config/config.types.js';
 import { makeTestConfig, createTempDirTracker } from './test-helpers.js';
 
@@ -43,6 +45,23 @@ function makeFixture(overrides?: Partial<AppConfig>): TestFixture {
     projectManager.create('Test Project', ['test-repo'], 'A project.', 'test-project');
 
     return { config, repoManager, projectManager, workspaceManager, orchestrator, projectId: 'test-project', repoId: 'test-repo' };
+}
+
+/**
+ * A fake `RepositoryInfoSyncOrchestrator` stand-in exposing only
+ * `syncRepository()` — the only method the choke-point calls. Cast through
+ * `unknown` since the real class carries private fields that make it
+ * nominally (not just structurally) typed.
+ */
+function makeFakeSync(impl: (repositoryId: string) => RepositoryInfoSyncResult): { calls: string[]; sync: RepositoryInfoSyncOrchestrator } {
+    const calls: string[] = [];
+    const fake = {
+        syncRepository(repositoryId: string): RepositoryInfoSyncResult {
+            calls.push(repositoryId);
+            return impl(repositoryId);
+        },
+    };
+    return { calls, sync: fake as unknown as RepositoryInfoSyncOrchestrator };
 }
 
 function wsFolder(config: AppConfig, projectId: string, workspaceId: string): string {
@@ -225,4 +244,88 @@ test('removeWorkspace: removes the .code-workspace file and the generated index 
 test('removeWorkspace: tolerates artefacts that were never created', () => {
     const { orchestrator, projectId } = makeFixture();
     assert.doesNotThrow(() => orchestrator.removeWorkspace(projectId, 'NEVER-CREATED'));
+});
+
+// ---------------------------------------------------------------------------
+// Repository info sync wiring (WP-008, AC-05)
+// ---------------------------------------------------------------------------
+
+test('regenerateWorkspace: calls syncRepository() for every resolved repository when a sync orchestrator is injected', () => {
+    const { config, repoManager, projectManager, projectId, repoId } = makeFixture();
+    const { calls, sync } = makeFakeSync(() => ({ state: 'in-sync', written: false }));
+    const orchestrator = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager, sync);
+
+    orchestrator.regenerateWorkspace(projectId, STABLE_WORKSPACE_ID);
+
+    assert.deepStrictEqual(calls, [repoId]);
+});
+
+test('regenerateWorkspace: never calls syncRepository() for a repository already pruned from the project', () => {
+    const { config, repoManager, projectManager, projectId } = makeFixture();
+    repoManager.add({ url: 'https://example.com/org/ghost.git', id: 'ghost-repo', name: 'Ghost' });
+    projectManager.addRepository(projectId, 'ghost-repo');
+    repoManager.remove('ghost-repo');
+    const { calls, sync } = makeFakeSync(() => ({ state: 'in-sync', written: false }));
+    const orchestrator = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager, sync);
+
+    orchestrator.regenerateWorkspace(projectId, STABLE_WORKSPACE_ID);
+
+    assert.deepStrictEqual(calls, ['test-repo'], 'the pruned repository must not be synced either');
+});
+
+test('regenerateWorkspace: a throwing sync is logged as a warning and never propagates out of the call', () => {
+    const base = makeTempDir();
+    const config = makeTestConfig(base);
+    initializeStorage(config);
+    const repoManager = new RepositoryManager(config);
+    const projectManager = new ProjectManager(config, repoManager);
+    const errorLogManager = new ErrorLogManager(config);
+    repoManager.add({ url: 'https://example.com/org/test-repo.git', id: 'test-repo', name: 'Test Repo' });
+    projectManager.create('Test Project', ['test-repo'], 'A project.', 'test-project');
+    const { sync } = makeFakeSync(() => { throw new Error('boom'); });
+    const orchestrator = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager, sync, errorLogManager);
+
+    assert.doesNotThrow(() => orchestrator.regenerateWorkspace('test-project', STABLE_WORKSPACE_ID));
+
+    const { entries } = errorLogManager.list({ source: 'workspace-info' });
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0]?.Severity, 'warning');
+    assert.strictEqual(entries[0]?.Operation, 'sync');
+    assert.ok(entries[0]?.Message.includes('boom'));
+});
+
+test('regenerateWorkspace: constructor still works and produces no error when the sync dependency is omitted', () => {
+    const { orchestrator, projectId } = makeFixture();
+    assert.doesNotThrow(() => orchestrator.regenerateWorkspace(projectId, STABLE_WORKSPACE_ID));
+});
+
+test('regenerateForRepository: syncs the repository once up front, including for a repository that is in no project', () => {
+    const { config, repoManager, projectManager } = makeFixture();
+    repoManager.add({ url: 'https://example.com/org/orphan.git', id: 'orphan-repo', name: 'Orphan' });
+    const { calls, sync } = makeFakeSync(() => ({ state: 'in-sync', written: false }));
+    const orchestrator = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager, sync);
+
+    orchestrator.regenerateForRepository('orphan-repo');
+
+    assert.ok(calls.includes('orphan-repo'), 'the orphaned repository should still be synced');
+});
+
+test('regenerateForRepository: a throwing sync for the up-front call is logged and does not prevent project regeneration', () => {
+    const base = makeTempDir();
+    const config = makeTestConfig(base);
+    initializeStorage(config);
+    const repoManager = new RepositoryManager(config);
+    const projectManager = new ProjectManager(config, repoManager);
+    const errorLogManager = new ErrorLogManager(config);
+    repoManager.add({ url: 'https://example.com/org/test-repo.git', id: 'test-repo', name: 'Test Repo' });
+    projectManager.create('Test Project', ['test-repo'], 'A project.', 'test-project');
+    fs.mkdirSync(wsFolder(config, 'test-project', STABLE_WORKSPACE_ID), { recursive: true });
+    const { sync } = makeFakeSync(() => { throw new Error('boom'); });
+    const orchestrator = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager, sync, errorLogManager);
+
+    assert.doesNotThrow(() => orchestrator.regenerateForRepository('test-repo'));
+
+    assert.ok(fs.existsSync(path.join(wsFolder(config, 'test-project', STABLE_WORKSPACE_ID), 'README.md')));
+    const { entries } = errorLogManager.list({ source: 'workspace-info' });
+    assert.ok(entries.length >= 1);
 });

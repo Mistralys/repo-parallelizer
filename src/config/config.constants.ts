@@ -118,3 +118,27 @@ export const MAX_CREDENTIAL_TOKEN_LENGTH = 500;
  * guarding against unbounded input.
  */
 export const MAX_REPOSITORY_DESCRIPTION_LENGTH = 500;
+
+// ---------------------------------------------------------------------------
+// Repository-info sync — commit identity and message limits
+// ---------------------------------------------------------------------------
+
+/**
+ * Commit author/committer display name used for all automated
+ * `.workspace/info.json` sync commits, passed to `commitPaths()` in
+ * `git-commit.ts` as part of the one-off commit identity.
+ */
+export const INFO_COMMIT_AUTHOR_NAME = 'Paralizer';
+
+/**
+ * Commit author/committer email address used for all automated
+ * `.workspace/info.json` sync commits, passed to `commitPaths()` in
+ * `git-commit.ts` as part of the one-off commit identity.
+ */
+export const INFO_COMMIT_AUTHOR_EMAIL = 'paralizer@mistralys.eu';
+
+/**
+ * Maximum character length for an automated `.workspace/info.json` sync
+ * commit message, guarding against unbounded input reaching `commitPaths()`.
+ */
+export const MAX_INFO_COMMIT_MESSAGE_LENGTH = 500;

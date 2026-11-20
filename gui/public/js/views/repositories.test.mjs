@@ -1,5 +1,5 @@
 /**
- * Unit tests for views/repositories.js — WP-004, WP-008.
+ * Unit tests for views/repositories.js — WP-004, WP-008, WP-014.
  *
  * Acceptance Criteria verified:
  *   AC1  — Each repository's Name column renders as a clickable <a> element.
@@ -11,6 +11,10 @@
  *           api.repositories.update({name, url}) and re-renders the table.
  *   AC-Add — The "+ Add Repository" button opens the repository modal in
  *           create mode; a successful create re-renders the table.
+ *   Sync (WP-014, AC-17/AC-17d) — the table header includes a "Sync" column;
+ *           each row's badge is sourced from the normalised repo's
+ *           `infoSync.enabled` (no per-row network call), carries both the
+ *           `aria-label` and visible "On"/"Off" text.
  *
  * Uses Node's built-in test runner with jsdom for a minimal DOM environment.
  * Run individually with:
@@ -447,6 +451,93 @@ test('Credential — row shows set-credential badge when repo has a CredentialId
         assert.ok(badge.classList.contains('credential-badge--set'), 'Badge should have --set class when credential is configured');
     } finally {
         api.repositories.list = origList;
+        cleanupContainers();
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Sync badge column tests — WP-014
+// ---------------------------------------------------------------------------
+
+test('Sync — table header includes a "Sync" column', async () => {
+    const container = await renderAndWait();
+    try {
+        const table = container.querySelector('table.repositories-table');
+        const headers = [...table.querySelectorAll('thead th')].map((th) => th.textContent);
+        assert.ok(headers.includes('Sync'), 'Table header should include "Sync" column');
+    } finally {
+        cleanupContainers();
+    }
+});
+
+test('Sync — row shows the off badge, with aria-label and visible "Off" text, when infoSync is absent', async () => {
+    // Default mock returns a repo without InfoSync.
+    const container = await renderAndWait();
+    try {
+        const syncCell = container.querySelector('td.repo-sync-cell');
+        assert.ok(syncCell, 'Sync cell should exist');
+
+        const badge = syncCell.querySelector('.sync-badge');
+        assert.ok(badge, 'Sync badge should exist');
+        assert.ok(badge.classList.contains('sync-badge--off'), 'Badge should have --off class when infoSync is absent');
+        assert.equal(badge.getAttribute('aria-label'), 'Workspace info sync off');
+        assert.equal(badge.textContent, 'Off');
+    } finally {
+        cleanupContainers();
+    }
+});
+
+test('Sync — row shows the on badge, with aria-label and visible "On" text, when InfoSync.Enabled is true', async () => {
+    const origList = api.repositories.list;
+    api.repositories.list = async () => [
+        { Id: REPO_ID, Name: REPO_NAME, Url: REPO_URL, InfoSync: { Enabled: true } },
+    ];
+
+    const container = await renderAndWait();
+    try {
+        const syncCell = container.querySelector('td.repo-sync-cell');
+        assert.ok(syncCell, 'Sync cell should exist');
+
+        const badge = syncCell.querySelector('.sync-badge');
+        assert.ok(badge, 'Sync badge should exist');
+        assert.ok(badge.classList.contains('sync-badge--on'), 'Badge should have --on class when InfoSync.Enabled is true');
+        assert.equal(badge.getAttribute('aria-label'), 'Workspace info sync enabled');
+        assert.equal(badge.textContent, 'On');
+    } finally {
+        api.repositories.list = origList;
+        cleanupContainers();
+    }
+});
+
+test('Sync — row shows the off badge when InfoSync.Enabled is explicitly false', async () => {
+    const origList = api.repositories.list;
+    api.repositories.list = async () => [
+        { Id: REPO_ID, Name: REPO_NAME, Url: REPO_URL, InfoSync: { Enabled: false } },
+    ];
+
+    const container = await renderAndWait();
+    try {
+        const badge = container.querySelector('td.repo-sync-cell .sync-badge');
+        assert.ok(badge.classList.contains('sync-badge--off'), 'Badge should have --off class when InfoSync.Enabled is false');
+    } finally {
+        api.repositories.list = origList;
+        cleanupContainers();
+    }
+});
+
+test('Sync — rendering the list issues no per-row info-sync status request', async () => {
+    let statusCalls = 0;
+    const origStatus = api.repositories.infoSync.status;
+    api.repositories.infoSync.status = async (id) => {
+        statusCalls += 1;
+        return origStatus ? origStatus(id) : {};
+    };
+
+    const container = await renderAndWait();
+    try {
+        assert.equal(statusCalls, 0, 'renderRepositories() must not call api.repositories.infoSync.status()');
+    } finally {
+        api.repositories.infoSync.status = origStatus;
         cleanupContainers();
     }
 });

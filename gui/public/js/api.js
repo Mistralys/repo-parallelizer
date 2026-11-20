@@ -108,6 +108,21 @@ async function request(method, url, body) {
  * @property {number} notesColumns    - Number of columns in the notes view grid. Range: [1, 6]. Default: 2.
  */
 
+/**
+ * Status/health shape returned by every `api.repositories.infoSync` method
+ * except `importPreview()`. Mirrors `RepositoryInfoSyncStatus` in
+ * `src/orchestration/repository-info-sync.ts`.
+ *
+ * @typedef {Object} InfoSyncStatus
+ * @property {boolean} enabled - Whether info sync is enabled for this repository.
+ * @property {Object|null} mainFolder - Managed main-folder inspection result, `null` only when sync is disabled.
+ * @property {string} state - One of `'disabled' | 'main-folder-unavailable' | 'in-sync' | 'write-required' | 'incoming' | 'conflict' | 'invalid-file' | 'id-mismatch' | 'unsupported-schema'`.
+ * @property {string[]} pendingChanges - Paths with uncommitted changes in the managed main folder.
+ * @property {string} [lastSyncedAt] - ISO 8601 timestamp of the most recent sync write, absent until the first one.
+ * @property {string} defaultCommitMessage - Server-suggested commit message for `commitPush()`.
+ * @property {Object} health - Health report (see `HealthReport` in `src/orchestration/health.types.ts`).
+ */
+
 // ---------------------------------------------------------------------------
 // API namespaces
 // ---------------------------------------------------------------------------
@@ -244,6 +259,96 @@ const repositories = {
         return request('PUT', `/api/repositories/${encodeURIComponent(id)}/credential`, {
             credentialId: credentialId === '' ? null : credentialId,
         });
+    },
+
+    /**
+     * Per-repository `.workspace/info.json` sync endpoints.
+     *
+     * @namespace api.repositories.infoSync
+     */
+    infoSync: {
+        /**
+         * Fetch the current info-sync status/health report for a repository.
+         *
+         * @param {string} id - Repository ID.
+         * @returns {Promise<InfoSyncStatus>}
+         */
+        status(id) {
+            return request('GET', `/api/repositories/${encodeURIComponent(id)}/info-sync`);
+        },
+
+        /**
+         * Enable or disable info sync for a repository, optionally discarding
+         * pending changes on disable.
+         *
+         * @param {string} id - Repository ID.
+         * @param {{ enabled: boolean, discardPendingChanges?: boolean }} data
+         * @returns {Promise<InfoSyncStatus>}
+         */
+        saveSettings(id, data) {
+            return request('PUT', `/api/repositories/${encodeURIComponent(id)}/info-sync`, data);
+        },
+
+        /**
+         * Re-evaluate the sync state against the managed main folder on disk.
+         *
+         * @param {string} id - Repository ID.
+         * @returns {Promise<InfoSyncStatus>}
+         */
+        refresh(id) {
+            return request('POST', `/api/repositories/${encodeURIComponent(id)}/info-sync/refresh`);
+        },
+
+        /**
+         * Recreate the managed main-folder clone from scratch.
+         *
+         * @param {string} id - Repository ID.
+         * @param {boolean} [discardPendingChanges] - Opt in to discarding pending changes.
+         * @returns {Promise<InfoSyncStatus>}
+         */
+        recreateMainFolder(id, discardPendingChanges) {
+            return request(
+                'POST',
+                `/api/repositories/${encodeURIComponent(id)}/info-sync/recreate-main-folder`,
+                discardPendingChanges === undefined ? {} : { discardPendingChanges },
+            );
+        },
+
+        /**
+         * Fetch the per-field diff preview for an incoming (or conflicting) import.
+         *
+         * @param {string} id - Repository ID.
+         * @returns {Promise<{ state: string, fields: Array<{ field: string, current: string, incoming: string }> }>}
+         */
+        importPreview(id) {
+            return request('GET', `/api/repositories/${encodeURIComponent(id)}/info-sync/import`);
+        },
+
+        /**
+         * Apply the selected fields from the incoming file onto the repository's data.
+         *
+         * @param {string} id - Repository ID.
+         * @param {Array<'Name'|'Description'>} fields - Fields to import; an empty array keeps every local value.
+         * @returns {Promise<InfoSyncStatus>}
+         */
+        applyImport(id, fields) {
+            return request('POST', `/api/repositories/${encodeURIComponent(id)}/info-sync/import`, { fields });
+        },
+
+        /**
+         * Commit and push the managed main folder's pending changes.
+         *
+         * @param {string} id - Repository ID.
+         * @param {string} [message] - Optional commit message; server supplies a default when omitted.
+         * @returns {Promise<{ committed: boolean, pushed: boolean, commitSha?: string, filterFallback?: boolean }>}
+         */
+        commitPush(id, message) {
+            return request(
+                'POST',
+                `/api/repositories/${encodeURIComponent(id)}/info-sync/commit-push`,
+                message === undefined ? {} : { message },
+            );
+        },
     },
 };
 

@@ -44,6 +44,38 @@ export interface Repository {
      * Absent when never set, or after being cleared via an empty string.
      */
     Description?: string;
+
+    /**
+     * Opt-in per-repository `.workspace/info.json` sync settings. Absent when
+     * info sync has never been configured for this repository. Set/cleared
+     * via `RepositoryManager.setInfoSyncSettings()`, and updated after a
+     * successful sync write via `RepositoryManager.recordInfoSyncWrite()`.
+     */
+    InfoSync?: RepositoryInfoSyncSettings;
+}
+
+/**
+ * Machine-local settings governing the opt-in `.workspace/info.json` sync for
+ * a single repository. Grouped under `Repository.InfoSync` (rather than flat
+ * fields on `Repository`) so that future machine-local sync settings have a
+ * single home and a single field to destructure away when clearing.
+ */
+export interface RepositoryInfoSyncSettings {
+    /** Whether the `.workspace/info.json` sync is enabled for this repository. */
+    Enabled: boolean;
+
+    /**
+     * Hash of the `.workspace/info.json` content as of the most recent sync
+     * write performed by the tool, used for hash-based direction detection.
+     * Absent until the first successful sync write.
+     */
+    LastWrittenHash?: string;
+
+    /**
+     * ISO 8601 timestamp of the most recent sync write performed by the tool.
+     * Absent until the first successful sync write.
+     */
+    LastSyncedAt?: string;
 }
 
 /**
