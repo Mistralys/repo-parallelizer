@@ -23,9 +23,12 @@ the repository detail page offers an import or lets you commit and push a local 
 - GUI: Repositories list gained a Sync column showing whether sync is on or off for each repository.
 - GUI: Commit & push now names the pushed commit and branch in its confirmation toast.
 - GUI: Commit & push shows an info notice when the remote lacks partial-clone filtering support.
+- GUI: Enable, Refresh and Recreate show an info notice when the remote lacks partial-clone filtering support.
 - GUI: Fix actions on health alerts no longer get stuck if the fix action fails or is cancelled.
 - Git: Added partial/sparse clone, remote fetch/push/fast-forward, and scoped commit helpers.
 - Security: Synced files never store credentials; git error output strips credential-bearing URLs.
+- Security: Imported repository files are now validated like files added by hand.
+- Repositories: Sync now logs files it skipped or removed.
 
 ## v1.6.0 - Project Custom Files
 

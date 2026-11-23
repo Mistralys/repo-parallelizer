@@ -56,6 +56,7 @@ import {
     REPOSITORY_FILES_FOLDER_NAME,
     type RepositoryFolderFile,
     type RepositoryFileMetadataEntry,
+    type WriteRepositoryFilesResult,
 } from './repository-files.js';
 import {
     resolveMainFolderPath,
@@ -68,7 +69,11 @@ import {
     type MainFolderInspection,
 } from './repository-main-folder.js';
 import { guardedFileTarget } from '../utils/path-guard.js';
-import { repositoryFileRelativePath, type RepositoryFile } from '../models/repository/repository-file.js';
+import {
+    repositoryFileRelativePath,
+    validateRepositoryFileSet,
+    type RepositoryFile,
+} from '../models/repository/repository-file.js';
 import type { RepositoryFileManager } from '../models/repository/repository-file.manager.js';
 import type { HealthIssue, HealthReport } from './health.types.js';
 import type { AppConfig } from '../config/config.types.js';
@@ -86,6 +91,7 @@ function toFolderFiles(files: readonly RepositoryFile[]): RepositoryFolderFile[]
     return files.map((file) => ({
         path: repositoryFileRelativePath(file),
         content: file.Content,
+        contentKind: 'text',
         metadata: {
             Label: file.Label,
             Description: file.Description,
@@ -252,6 +258,18 @@ export interface CommitPushResult {
     commitSha?: string;
     filterFallback?: boolean;
 }
+
+/**
+ * {@link RepositoryInfoSyncStatus}, extended with `filterFallback` for the
+ * three methods that perform a clone or fetch of their own and may therefore
+ * have fallen back to a full transfer (`saveSettings()` on enable, `refresh()`,
+ * `recreateManagedClone()`). `filterFallback` is `true` only when that
+ * clone/fetch fell back; it is omitted (not `false`) otherwise. Mirrors the
+ * existing {@link CommitPushResult} precedent. Never present on
+ * {@link RepositoryInfoSyncOrchestrator.getStatus}'s result, which performs no
+ * clone or fetch of its own.
+ */
+export type RepositoryInfoSyncRemoteStatus = RepositoryInfoSyncStatus & { filterFallback?: boolean };
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -550,9 +568,10 @@ export class RepositoryInfoSyncOrchestrator {
      *   `unsafeEntries`); it is never followed, read or deleted, so it stays
      *   reported until a human removes it.
      * - `info-sync-files-invalid-incoming` — a regular file under `files/`
-     *   cannot be treated as a normal repository file (binary, oversized,
-     *   unreadable, or an invalid/reserved path segment); resolving it
-     *   requires looking at the incoming change, hence `fixAction: 'import'`.
+     *   carries any {@link RepositoryFolderFile} `problem` (binary, oversized,
+     *   unreadable, an invalid/reserved path segment, a metadata violation, or
+     *   a case collision with another folder file); resolving it requires
+     *   looking at the incoming change, hence `fixAction: 'import'`.
      * - `info-sync-files-write-skipped` — one of the repository's own files
      *   (`RepositoryFileManager.list()`) resolves to a write target that the
      *   shared guard chain ({@link guardedFileTarget}) refuses (a symlink
@@ -614,6 +633,54 @@ export class RepositoryInfoSyncOrchestrator {
         return issues;
     }
 
+    /**
+     * Logs the write-pass outcome of a {@link writeRepositoryFiles} call: a
+     * `warning` entry listing `result.skipped` (refused write targets and
+     * untouched unsafe entries) when non-empty, and an `info` entry listing
+     * `result.removed` (files deleted because they left the data set) when
+     * non-empty. Does nothing when both lists are empty, or when no
+     * `errorLogManager` was injected.
+     *
+     * Logging the write transition itself (rather than a health issue's
+     * first appearance) needs no persisted "last seen" fingerprint and
+     * naturally covers both a sync and an import write from the same choke
+     * point.
+     *
+     * @param operation `'sync-files'` from {@link syncRepository}, `'import'`
+     *   from {@link applyImport} — both call sites of this helper.
+     */
+    private logFilesWriteOutcome(
+        repositoryId: string,
+        result: WriteRepositoryFilesResult,
+        operation: 'sync-files' | 'import',
+    ): void {
+        if (!this.errorLogManager) {
+            return;
+        }
+
+        if (result.skipped.length > 0) {
+            this.errorLogManager.append({
+                Severity: 'warning',
+                Source: 'workspace-info',
+                Operation: operation,
+                Context: { RepositoryId: repositoryId },
+                Message: `${result.skipped.length} file(s) under the \`files/\` folder could not be written for ` +
+                    `repository "${repositoryId}": ${result.skipped.join(', ')}.`,
+            });
+        }
+
+        if (result.removed.length > 0) {
+            this.errorLogManager.append({
+                Severity: 'info',
+                Source: 'workspace-info',
+                Operation: operation,
+                Context: { RepositoryId: repositoryId },
+                Message: `${result.removed.length} file(s) removed from the \`files/\` folder for repository ` +
+                    `"${repositoryId}": ${result.removed.join(', ')}.`,
+            });
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Synchronous, filesystem-only sync — safe to call from the artefact choke-point
     // -------------------------------------------------------------------------
@@ -664,7 +731,8 @@ export class RepositoryInfoSyncOrchestrator {
             const informationalUrl = buildInformationalUrl(repo);
             const content = renderRepositoryInfoFile(dataPayload, informationalUrl, folderRead.raw);
             written = writeRepositoryInfoFile(mainFolder, content).written;
-            writeRepositoryFiles(mainFolder, localFiles);
+            const filesWriteResult = writeRepositoryFiles(mainFolder, localFiles);
+            this.logFilesWriteOutcome(repositoryId, filesWriteResult, 'sync-files');
             this.repositoryManager.recordInfoSyncWrite(repositoryId, dataHash);
         } else if (state === 'in-sync' && repo.InfoSync.LastWrittenHash !== dataHash) {
             // Stale or missing baseline on an otherwise-matching file: record
@@ -775,10 +843,11 @@ export class RepositoryInfoSyncOrchestrator {
     async saveSettings(
         repositoryId: string,
         input: RepositoryInfoSyncSettingsInput,
-    ): Promise<RepositoryInfoSyncStatus> {
+    ): Promise<RepositoryInfoSyncRemoteStatus> {
         return this.runLocked(repositoryId, async () => {
             const repo = this.getRepoOrThrow(repositoryId);
             const currentlyEnabled = repo.InfoSync?.Enabled ?? false;
+            let filterFallback = false;
 
             if (!input.enabled) {
                 if (currentlyEnabled) {
@@ -810,7 +879,6 @@ export class RepositoryInfoSyncOrchestrator {
                     throw new RemoteOperationError(authResolution.message);
                 }
 
-                let filterFallback = false;
                 try {
                     const cloneResult = await createManagedClone(this.config, repo, authResolution.url);
                     filterFallback = cloneResult.filterFallback;
@@ -846,7 +914,8 @@ export class RepositoryInfoSyncOrchestrator {
             }
 
             this.syncRepository(repositoryId);
-            return this.getStatus(repositoryId);
+            const status = await this.getStatus(repositoryId);
+            return filterFallback ? { ...status, filterFallback: true } : status;
         });
     }
 
@@ -863,12 +932,13 @@ export class RepositoryInfoSyncOrchestrator {
      * @throws {SyncPreconditionError} Sync is not enabled, or the main folder is unusable.
      * @throws {RemoteOperationError} No credential resolves, or the fetch/fast-forward fails.
      */
-    async refresh(repositoryId: string): Promise<RepositoryInfoSyncStatus> {
+    async refresh(repositoryId: string): Promise<RepositoryInfoSyncRemoteStatus> {
         return this.runLocked(repositoryId, async () => {
             const repo = this.getRepoOrThrow(repositoryId);
             if (!repo.InfoSync?.Enabled) {
                 throw new SyncPreconditionError(`Info sync is not enabled for repository "${repositoryId}".`);
             }
+            let filterFallback = false;
 
             const mainFolder = resolveMainFolderPath(this.config, repositoryId);
             const inspectionBefore = await inspectMainFolder(mainFolder, repo.Url);
@@ -905,6 +975,7 @@ export class RepositoryInfoSyncOrchestrator {
             }
 
             if (fetchResult.stderr.includes(FILTER_UNSUPPORTED_WARNING)) {
+                filterFallback = true;
                 this.errorLogManager?.append({
                     Severity: 'warning',
                     Source: 'workspace-info',
@@ -936,7 +1007,8 @@ export class RepositoryInfoSyncOrchestrator {
                 Message: `Refreshed the managed main folder for repository "${repositoryId}".`,
             });
 
-            return this.getStatus(repositoryId);
+            const status = await this.getStatus(repositoryId);
+            return filterFallback ? { ...status, filterFallback: true } : status;
         });
     }
 
@@ -1001,17 +1073,31 @@ export class RepositoryInfoSyncOrchestrator {
      * rewrites the file from Paralizer's data, and resolves the state to
      * `in-sync`.
      *
+     * Files are resolved per diff via `resolveFileImportAction()`
+     * (`repository-info.ts`) — a path in `input.files` not omitted from the
+     * request, or defaulted otherwise. `filesMutated` is `true` when at least
+     * one resolved action is `'add'`, `'overwrite'` or `'delete'`; `'discard'`/
+     * `'keep'` alone leave it `false`. Only when `filesMutated` is the
+     * resulting file set validated via `validateRepositoryFileSet()` — before
+     * any mutation (including the fields update below), so a rejected set
+     * leaves nothing behind, and its normalised output is what gets applied
+     * and written. A field-only import (`filesMutated` is `false`) therefore
+     * never validates the untouched stored set — a legacy row that already
+     * breaks a rule does not block an unrelated field import.
+     *
      * Fields are applied through `RepositoryManager.update()`, which
-     * enforces the description length limit. Files are resolved per diff via
-     * `resolveFileImportAction()` (`repository-info.ts`) — a path in
-     * `input.files` not omitted from the request, or defaulted otherwise —
-     * then applied in one `RepositoryFileManager.replaceAll()` call:
-     * `'add'` creates a new file from the incoming folder content,
-     * `'overwrite'` replaces an existing file's content/metadata in place
-     * (keeping its `Id`), `'delete'` removes a local-only file, and
-     * `'discard'`/`'keep'` are no-ops on Paralizer's own data (the discarded
-     * or superseded file is removed from the managed clone by the merged
-     * write below, exactly like M1's `write-required` delete pass).
+     * enforces the description length limit, and runs after file validation
+     * so a rejected file set never leaves a partial import (fields applied,
+     * files not) behind. Files are then applied in one
+     * `RepositoryFileManager.replaceAll()` call — only when `filesMutated` —
+     * with `'add'` creating a new file from the incoming folder content,
+     * `'overwrite'` replacing an existing file's content/metadata in place
+     * (keeping its `Id`), `'delete'` removing a local-only file, and
+     * `'discard'`/`'keep'` no-ops on Paralizer's own data (the discarded or
+     * superseded file is removed from the managed clone by the merged write
+     * below, exactly like M1's `write-required` delete pass, and the file
+     * store is left unwritten). Any refused or removed `files/` write from
+     * the merged write is logged via `logFilesWriteOutcome()`.
      *
      * Never touches `Url`, `CredentialId`, or the managed clone directly —
      * `Url` is informational only and is not an importable field.
@@ -1023,6 +1109,11 @@ export class RepositoryInfoSyncOrchestrator {
      * @throws {Error} `input.files` names a path outside the current import
      *   diff, or requests an action `resolveFileImportAction()` rejects
      *   (unsupported for the diff's kind, or disallowed on a `problem` file).
+     * @throws {Error} The resulting file set fails `validateRepositoryFileSet()`
+     *   (the 64-file count cap, case-insensitive path uniqueness, or any
+     *   per-file rule) when the import adds, overwrites or deletes a file —
+     *   including when the offending file is an untouched, already-stored
+     *   one; the message names it. Nothing is mutated.
      */
     async applyImport(
         repositoryId: string,
@@ -1089,14 +1180,6 @@ export class RepositoryInfoSyncOrchestrator {
                 action: resolveFileImportAction(diff, selectionByPath.get(diff.path.toLowerCase())),
             }));
 
-            let updatedRepo = repo;
-            if (selectedName || selectedDescription) {
-                updatedRepo = this.repositoryManager.update(repositoryId, {
-                    name: selectedName ? incoming.Name : repo.Name,
-                    description: selectedDescription ? incoming.Description : (repo.Description ?? ''),
-                });
-            }
-
             const folderFilesByPath = new Map<string, RepositoryFolderFile>();
             for (const file of folderFiles) {
                 folderFilesByPath.set(file.path.toLowerCase(), file);
@@ -1106,7 +1189,7 @@ export class RepositoryInfoSyncOrchestrator {
                 localFilesByPath.set(repositoryFileRelativePath(file).toLowerCase(), file);
             }
 
-            const resultFiles: RepositoryFile[] = [...localFiles];
+            let resultFiles: RepositoryFile[] = [...localFiles];
             const now = new Date().toISOString();
 
             for (const { diff, action } of resolvedActions) {
@@ -1149,7 +1232,35 @@ export class RepositoryInfoSyncOrchestrator {
                 // 'discard' and 'keep' leave resultFiles untouched.
             }
 
-            if (resolvedActions.length > 0) {
+            // `filesMutated` gates both the pre-check below and the
+            // `replaceAll()` choke point further down, so the two always agree
+            // on when the resulting set needs validating: an import that adds,
+            // overwrites or deletes a file can introduce new/changed file data
+            // and must be validated before anything is mutated; a field-only
+            // import (every action `'keep'`/`'discard'`) leaves `resultFiles`
+            // identical to the stored set and must not fail on a legacy row it
+            // never touches.
+            const filesMutated = resolvedActions.some(
+                ({ action }) => action === 'add' || action === 'overwrite' || action === 'delete',
+            );
+
+            if (filesMutated) {
+                // Validate and normalise before any mutation (including the
+                // fields update below) — a validation failure here must leave
+                // the repository's fields, file store, managed clone and
+                // recorded hash all untouched.
+                resultFiles = validateRepositoryFileSet(resultFiles);
+            }
+
+            let updatedRepo = repo;
+            if (selectedName || selectedDescription) {
+                updatedRepo = this.repositoryManager.update(repositoryId, {
+                    name: selectedName ? incoming.Name : repo.Name,
+                    description: selectedDescription ? incoming.Description : (repo.Description ?? ''),
+                });
+            }
+
+            if (filesMutated) {
                 this.repositoryFileManager.replaceAll(repositoryId, resultFiles);
             }
 
@@ -1158,7 +1269,8 @@ export class RepositoryInfoSyncOrchestrator {
             const informationalUrl = buildInformationalUrl(updatedRepo);
             const content = renderRepositoryInfoFile(mergedPayload, informationalUrl, folderRead.raw);
             writeRepositoryInfoFile(mainFolder, content);
-            writeRepositoryFiles(mainFolder, resultFiles);
+            const filesWriteResult = writeRepositoryFiles(mainFolder, resultFiles);
+            this.logFilesWriteOutcome(repositoryId, filesWriteResult, 'import');
             writeRepositoryInfoReadme(mainFolder);
             this.repositoryManager.recordInfoSyncWrite(repositoryId, mergedHash);
 
@@ -1454,7 +1566,7 @@ export class RepositoryInfoSyncOrchestrator {
     async recreateManagedClone(
         repositoryId: string,
         options: { discardPendingChanges?: boolean } = {},
-    ): Promise<RepositoryInfoSyncStatus> {
+    ): Promise<RepositoryInfoSyncRemoteStatus> {
         return this.runLocked(repositoryId, async () => {
             const repo = this.getRepoOrThrow(repositoryId);
             if (!repo.InfoSync?.Enabled) {
@@ -1515,7 +1627,8 @@ export class RepositoryInfoSyncOrchestrator {
             });
 
             this.syncRepository(repositoryId);
-            return this.getStatus(repositoryId);
+            const status = await this.getStatus(repositoryId);
+            return filterFallback ? { ...status, filterFallback: true } : status;
         });
     }
 

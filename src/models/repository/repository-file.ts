@@ -186,3 +186,76 @@ export function validateRepositoryFileInput(
         ListInAgents: input.ListInAgents === true,
     };
 }
+
+/**
+ * Validates and normalises a complete repository file set in one pass, by
+ * folding `validateRepositoryFileInput()` over `files` in order — each file is
+ * validated against the already-normalised files that precede it, so the
+ * count cap, case-insensitive path uniqueness, and every per-file rule
+ * (segment/reserved-name, label/description length, content) all run exactly
+ * as they do for a single `add()`/`update()` call. This is the one function
+ * every set-level mutator (currently only `RepositoryFileManager.replaceAll()`)
+ * must validate through, so the per-file rules can never drift between a
+ * single add/update and a bulk replace.
+ *
+ * @param files The full candidate file set (e.g. the result of resolving an
+ *   import diff), in any order. Order matters only for which file "wins" the
+ *   offending-path slot in a duplicate-path error message.
+ * @returns The normalised files, in the same order as `files`, with each
+ *   file's `Id` and `DateModified` preserved unchanged from the input.
+ * @throws {Error} On the first violation, with the message from
+ *   `validateRepositoryFileInput()` prefixed with `File "<path>": `, where
+ *   `<path>` is the offending file's own (pre-normalisation) relative path.
+ */
+export function validateRepositoryFileSet(files: readonly RepositoryFile[]): RepositoryFile[] {
+    const normalised: RepositoryFile[] = [];
+
+    for (const file of files) {
+        const rawPath = repositoryFileRelativePath(file);
+        try {
+            const input: RepositoryFileInput = {
+                Directory: file.Directory,
+                FileName: file.FileName,
+                Label: file.Label,
+                Description: file.Description,
+                Content: file.Content,
+                Executable: file.Executable,
+                ListInAgents: file.ListInAgents,
+            };
+            const valid = validateRepositoryFileInput(input, normalised);
+            normalised.push({
+                Id: file.Id,
+                ...valid,
+                DateModified: file.DateModified,
+            });
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            throw new Error(`File "${rawPath}": ${message}`);
+        }
+    }
+
+    return normalised;
+}
+
+/**
+ * Checks a file's `Label`/`Description` against the same rules
+ * `validateRepositoryFileInput()` enforces, without the path/content/count
+ * checks that require the full input and the sibling file list.
+ *
+ * Reuses `validateLabel()`/`validateDescription()` directly (rather than
+ * re-deriving their rules) so this helper can never drift from the rules
+ * `validateRepositoryFileInput()` and `validateRepositoryFileSet()` enforce.
+ *
+ * @param meta The metadata fields to check.
+ * @returns `undefined` when both fields are valid, otherwise the first
+ *   violation's error message (label is checked before description).
+ */
+export function repositoryFileMetadataProblem(meta: { Label: string; Description: string }): string | undefined {
+    try {
+        validateLabel(meta.Label, REPOSITORY_FILE_MAX_LABEL_LENGTH);
+        validateDescription(meta.Description, REPOSITORY_FILE_MAX_DESCRIPTION_LENGTH);
+        return undefined;
+    } catch (err) {
+        return err instanceof Error ? err.message : String(err);
+    }
+}

@@ -10,6 +10,7 @@ import { isValidKebabCase } from '../../utils/slug.js';
 import { isLexicallyContained } from '../../utils/path-guard.js';
 import {
     validateRepositoryFileInput,
+    validateRepositoryFileSet,
     type RepositoryFile,
     type RepositoryFileInput,
 } from './repository-file.js';
@@ -221,16 +222,22 @@ export class RepositoryFileManager {
 
     /**
      * Replaces the entire file list for a repository in one write, used by
-     * the import flow after a diff has been resolved. No per-field validation
-     * is performed — callers are responsible for ensuring `files` is already
-     * consistent (unique paths, size limits, etc.) before calling this method.
+     * the import flow after a diff has been resolved. The full set is
+     * validated and normalised via `validateRepositoryFileSet()` before
+     * anything is written, so this is the one choke point every caller — the
+     * import flow today, and any future caller — goes through; a rejected set
+     * leaves the on-disk store untouched.
      *
      * @throws {NotFoundError} If the repository does not exist.
+     * @throws {Error} If `files` fails `validateRepositoryFileSet()` (the
+     *   64-file count cap, case-insensitive path uniqueness, or any per-file
+     *   rule), with a user-presentable message naming the offending file.
      */
     replaceAll(repoId: string, files: RepositoryFile[]): void {
         this.assertRepositoryExists(repoId, 'replace files');
+        const validated = validateRepositoryFileSet(files);
         const store = this.load(repoId);
-        store.Files = files;
+        store.Files = validated;
         this.save(repoId, store);
     }
 

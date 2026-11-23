@@ -360,6 +360,112 @@ test('replaceAll throws NotFoundError for an unknown repository', () => {
     assert.throws(() => files.replaceAll('nonexistent', []), NotFoundError);
 });
 
+test('replaceAll normalises the stored files (e.g. trims Label) via validateRepositoryFileSet()', () => {
+    const { repos, files } = makeManagers(makeTempDir());
+    const repoId = addRepo(repos);
+
+    const replacement: RepositoryFile[] = [
+        {
+            Id: 'fixed-id',
+            Directory: '',
+            FileName: 'new.txt',
+            Label: '  New  ',
+            Description: '',
+            Content: 'hello',
+            Executable: false,
+            ListInAgents: true,
+            DateModified: '2026-11-20T00:00:00.000Z',
+        },
+    ];
+    files.replaceAll(repoId, replacement);
+
+    const listed = files.list(repoId);
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].Label, 'New');
+    assert.equal(listed[0].Id, 'fixed-id');
+    assert.equal(listed[0].DateModified, '2026-11-20T00:00:00.000Z');
+});
+
+test('replaceAll throws on a set exceeding REPOSITORY_FILE_MAX_COUNT and leaves the store file bytes unchanged', () => {
+    const { repos, files, storageFolder } = makeManagers(makeTempDir());
+    const repoId = addRepo(repos);
+    files.add(repoId, input());
+
+    const storePath = path.join(storageFolder, 'repository-files', `${repoId}.json`);
+    const before = fs.readFileSync(storePath, 'utf8');
+
+    const tooMany: RepositoryFile[] = Array.from({ length: REPOSITORY_FILE_MAX_COUNT + 1 }, (_, i) => ({
+        Id: `id-${i}`,
+        Directory: '',
+        FileName: `f${i}.txt`,
+        Label: 'L',
+        Description: '',
+        Content: '',
+        Executable: false,
+        ListInAgents: false,
+        DateModified: '2026-11-18T00:00:00.000Z',
+    }));
+
+    assert.throws(
+        () => files.replaceAll(repoId, tooMany),
+        new RegExp(String(REPOSITORY_FILE_MAX_COUNT)),
+    );
+    assert.equal(fs.readFileSync(storePath, 'utf8'), before);
+});
+
+test('replaceAll throws on a case-insensitive path duplicate within the replacement set', () => {
+    const { repos, files } = makeManagers(makeTempDir());
+    const repoId = addRepo(repos);
+
+    const duplicate: RepositoryFile[] = [
+        {
+            Id: 'id-1',
+            Directory: 'scripts',
+            FileName: 'Run.sh',
+            Label: 'A',
+            Description: '',
+            Content: '',
+            Executable: false,
+            ListInAgents: false,
+            DateModified: '2026-11-18T00:00:00.000Z',
+        },
+        {
+            Id: 'id-2',
+            Directory: 'scripts',
+            FileName: 'run.sh',
+            Label: 'B',
+            Description: '',
+            Content: '',
+            Executable: false,
+            ListInAgents: false,
+            DateModified: '2026-11-18T00:00:00.000Z',
+        },
+    ];
+
+    assert.throws(() => files.replaceAll(repoId, duplicate), /already uses the path/);
+});
+
+test('replaceAll throws on an over-length Label, with the offending path in the message', () => {
+    const { repos, files } = makeManagers(makeTempDir());
+    const repoId = addRepo(repos);
+
+    const invalid: RepositoryFile[] = [
+        {
+            Id: 'id-1',
+            Directory: '',
+            FileName: 'bad.txt',
+            Label: 'x'.repeat(200),
+            Description: '',
+            Content: '',
+            Executable: false,
+            ListInAgents: false,
+            DateModified: '2026-11-18T00:00:00.000Z',
+        },
+    ];
+
+    assert.throws(() => files.replaceAll(repoId, invalid), /File "bad\.txt": Label must be at most/);
+});
+
 // ---------------------------------------------------------------------------
 // RepositoryFileManager — removeStore
 // ---------------------------------------------------------------------------

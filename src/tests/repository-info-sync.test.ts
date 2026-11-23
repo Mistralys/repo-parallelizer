@@ -19,6 +19,7 @@ import { ErrorLogManager } from '../error-log/error-log.manager.js';
 import { NotFoundError } from '../errors.js';
 import { makeTestConfig } from './test-helpers.js';
 import { INFO_COMMIT_AUTHOR_EMAIL, INFO_COMMIT_AUTHOR_NAME } from '../config/config.constants.js';
+import { REPOSITORY_FILE_MAX_COUNT } from '../models/repository/repository-file.js';
 
 // ─── Fixture setup ────────────────────────────────────────────────────────────
 
@@ -157,6 +158,27 @@ function readManagedInfoJson(config: ReturnType<typeof makeTestConfig>, repoId: 
     const mainFolder = resolveMainFolderPath(config, repoId);
     const raw = fs.readFileSync(path.join(mainFolder, '.workspace', 'info.json'), 'utf8');
     return JSON.parse(raw) as Record<string, unknown>;
+}
+
+/** Absolute path to a repository's `repository-files/{repoId}.json` store file. */
+function fileStorePath(config: ReturnType<typeof makeTestConfig>, repoId: string): string {
+    return path.join(config.storageFolder, 'repository-files', `${repoId}.json`);
+}
+
+/**
+ * Writes a repository's file store directly, bypassing `RepositoryFileManager`
+ * (and therefore `validateRepositoryFileSet()`) entirely — simulates a legacy
+ * row written by M2's unvalidated `replaceAll()` before WP-001 added
+ * validation there.
+ */
+function seedLegacyFileStore(
+    config: ReturnType<typeof makeTestConfig>,
+    repoId: string,
+    files: Array<Record<string, unknown>>,
+): void {
+    const storePath = fileStorePath(config, repoId);
+    fs.mkdirSync(path.dirname(storePath), { recursive: true });
+    fs.writeFileSync(storePath, `${JSON.stringify({ SchemaVersion: 1, Files: files }, null, 4)}\n`);
 }
 
 // ─── buildDefaultInfoCommitMessage() ──────────────────────────────────────────
@@ -317,6 +339,43 @@ test('saveSettings({enabled: true}) flags filterFallback when the server does no
     // The health report itself doesn't carry filterFallback, but the sync must
     // still have succeeded via a full clone rather than failing outright.
     assert.ok(status.mainFolder?.isGitRepository);
+    assert.strictEqual(status.filterFallback, true);
+});
+
+test('saveSettings({enabled: true}) omits filterFallback when the server supports partial-clone filtering', async () => {
+    const { repositoryManager, orchestrator } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+
+    const status = await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    assert.strictEqual(status.filterFallback, undefined);
+    assert.ok(!Object.prototype.hasOwnProperty.call(status, 'filterFallback'));
+});
+
+test('saveSettings({enabled: false}) omits filterFallback (no clone/fetch performed)', async () => {
+    const { repositoryManager, orchestrator } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    const status = await orchestrator.saveSettings(repoId, { enabled: false, discardPendingChanges: true });
+
+    assert.strictEqual(status.filterFallback, undefined);
+});
+
+test('getStatus() never includes filterFallback', async () => {
+    const { repositoryManager, orchestrator } = makeHarness();
+    const originPath = buildOrigin({ withFilter: false, infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    const status = await orchestrator.getStatus(repoId);
+
+    assert.ok(!Object.prototype.hasOwnProperty.call(status, 'filterFallback'));
 });
 
 // ─── syncRepository(): decision table (AC-02b, AC-07, AC-07b) ────────────────
@@ -357,6 +416,37 @@ test('a file deleted upstream after an earlier sync is recreated silently on the
     assert.strictEqual(status.state, 'in-sync');
     assert.ok(fs.existsSync(path.join(mainFolder, '.workspace', 'info.json')), 'the file should have been recreated');
     assert.ok(status.pendingChanges.length > 0, 'the recreated file should show as a pending change');
+});
+
+test('refresh() flags filterFallback when the server stops supporting partial-clone filtering between enable and refresh', async () => {
+    const { repositoryManager, orchestrator } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    // Disable partial-clone filter support on the "server" and make an
+    // upstream change so refresh() actually performs a fetch.
+    git('config uploadpack.allowFilter false', originPath);
+    commitInfoJsonChange(originPath, {
+        SchemaVersion: 1, Id: repoId, Name: 'Changed Upstream', Url: 'https://example.invalid/x.git', Description: 'desc', Settings: {},
+    });
+
+    const status = await orchestrator.refresh(repoId);
+
+    assert.strictEqual(status.filterFallback, true);
+});
+
+test('refresh() omits filterFallback when the server supports partial-clone filtering', async () => {
+    const { repositoryManager, orchestrator } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    const status = await orchestrator.refresh(repoId);
+
+    assert.strictEqual(status.filterFallback, undefined);
 });
 
 test('an incoming-only change yields state "incoming" with an info-sync-import-available issue and no write', async () => {
@@ -715,6 +805,217 @@ test('applyImport() refuses "add" on a binary incoming-only file (a problem file
     assert.ok(!fs.existsSync(path.join(mainFolder, '.workspace', 'files', 'binary.dat')));
 });
 
+// ─── applyImport(): atomic set validation (WP-004) ───────────────────────────
+
+test('applyImport() atomically rejects a mutating import that would exceed the 64-file cap, leaving fields, the file store, the managed clone and the recorded hash all untouched (AC-05)', async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}`, name: 'Local Name', description: 'Local description' });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    for (let i = 0; i < REPOSITORY_FILE_MAX_COUNT; i++) {
+        repositoryFileManager.add(repoId, {
+            Directory: '', FileName: `f${i}.txt`, Label: `L${i}`, Description: '', Content: `content ${i}\n`, Executable: false, ListInAgents: false,
+        });
+    }
+    orchestrator.syncRepository(repoId);
+    await landInitialSync(orchestrator, repoId);
+
+    commitFilesFolderChange(originPath, 'extra.sh', 'echo extra\n');
+    await orchestrator.refresh(repoId);
+
+    const storePath = fileStorePath(config, repoId);
+    const storeBefore = fs.readFileSync(storePath, 'utf8');
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    const cloneFilesBefore = fs.readdirSync(path.join(mainFolder, '.workspace', 'files')).sort();
+    const hashBefore = repositoryManager.getById(repoId)!.InfoSync!.LastWrittenHash;
+
+    await assert.rejects(
+        () => orchestrator.applyImport(repoId, { fields: [], files: [{ path: 'extra.sh', action: 'add' }] }),
+        new RegExp(String(REPOSITORY_FILE_MAX_COUNT)),
+    );
+
+    const afterRepo = repositoryManager.getById(repoId)!;
+    assert.strictEqual(afterRepo.Name, 'Local Name');
+    assert.strictEqual(afterRepo.Description, 'Local description');
+    assert.strictEqual(fs.readFileSync(storePath, 'utf8'), storeBefore, 'the file store must be byte-identical');
+    assert.deepStrictEqual(
+        fs.readdirSync(path.join(mainFolder, '.workspace', 'files')).sort(),
+        cloneFilesBefore,
+        'the managed clone\'s files/ folder must be untouched',
+    );
+    assert.strictEqual(afterRepo.InfoSync!.LastWrittenHash, hashBefore, 'the recorded hash must be untouched');
+});
+
+test('applyImport() refuses "add" on an incoming file whose declared Label exceeds the limit (a problem file, like the existing binary/path-segment cases)', async () => {
+    const { repositoryManager, orchestrator } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+    await landInitialSync(orchestrator, repoId);
+
+    const overLongLabel = 'L'.repeat(200);
+    commitFilesFolderChange(originPath, 'labeled.sh', 'echo hi\n');
+    commitInfoJsonChange(originPath, {
+        SchemaVersion: 1,
+        Id: repoId,
+        Name: 'Repo',
+        Url: 'https://example.invalid/upstream.git',
+        Description: '',
+        Settings: {},
+        Files: [{ Path: 'labeled.sh', Label: overLongLabel, Description: '', Executable: false, ListInAgents: false }],
+    });
+    await orchestrator.refresh(repoId);
+
+    const preview = await orchestrator.getImportPreview(repoId);
+    assert.strictEqual(preview.files.length, 1);
+    assert.ok(preview.files[0]!.problem, 'an over-length Label must surface as a problem, like a binary or oversized file');
+
+    await assert.rejects(
+        () => orchestrator.applyImport(repoId, { fields: [], files: [{ path: 'labeled.sh', action: 'add' }] }),
+        /cannot be imported as-is/,
+    );
+});
+
+test('applyImport() skips replaceAll() and set validation for a field-only import, even when the store already holds a rule-breaking legacy file, but a mutating import on that same store fails and names the legacy file (AC-06, AC-14)', async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}`, name: 'Local Name' });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    const overLongLabel = 'L'.repeat(200);
+    seedLegacyFileStore(config, repoId, [{
+        Id: 'legacy-id',
+        Directory: '',
+        FileName: 'legacy.sh',
+        Label: overLongLabel,
+        Description: '',
+        Content: 'echo legacy\n',
+        Executable: false,
+        ListInAgents: false,
+        DateModified: '2026-01-01T00:00:00.000Z',
+    }]);
+
+    // `syncRepository()` is the only choke point that reads the file store
+    // via `RepositoryFileManager.list()` (a plain read, not a validating
+    // mutator) and writes the legacy file into the managed clone.
+    orchestrator.syncRepository(repoId);
+    await landInitialSync(orchestrator, repoId);
+
+    commitInfoJsonChange(originPath, {
+        SchemaVersion: 1, Id: repoId, Name: 'Upstream Name', Url: 'https://example.invalid/upstream.git', Description: '', Settings: {},
+    });
+    await orchestrator.refresh(repoId);
+
+    const storePath = fileStorePath(config, repoId);
+    const storeBefore = fs.readFileSync(storePath, 'utf8');
+
+    const status = await orchestrator.applyImport(repoId, { fields: ['Name'] });
+    assert.strictEqual(status.state, 'in-sync');
+    assert.strictEqual(repositoryManager.getById(repoId)!.Name, 'Upstream Name', 'the field-only import must still apply');
+    assert.strictEqual(
+        fs.readFileSync(storePath, 'utf8'),
+        storeBefore,
+        'a field-only import must not call replaceAll() or rewrite the file store',
+    );
+    assert.strictEqual(repositoryFileManager.list(repoId)[0]!.Label, overLongLabel, 'the legacy row itself must be untouched');
+
+    // Land the field-only import so the managed clone has no pending changes
+    // of its own, which is what lets the next `refresh()` fast-forward onto
+    // the upcoming upstream commit below.
+    await landInitialSync(orchestrator, repoId);
+
+    commitFilesFolderChange(originPath, 'new.sh', 'echo new\n');
+    await orchestrator.refresh(repoId);
+
+    const storeBeforeMutatingImport = fs.readFileSync(storePath, 'utf8');
+    await assert.rejects(
+        () => orchestrator.applyImport(repoId, { fields: [], files: [{ path: 'new.sh', action: 'add' }] }),
+        /legacy\.sh/,
+    );
+    assert.strictEqual(
+        fs.readFileSync(storePath, 'utf8'),
+        storeBeforeMutatingImport,
+        'the rejected mutating import must leave the file store untouched',
+    );
+});
+
+// ─── syncRepository() / applyImport(): files write-pass logging (AC-08) ─────
+
+test('syncRepository() logs an info entry for a removed file and a warning entry for a refused write', { skip: process.platform === 'win32' }, async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator, errorLogManager, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    const keepFile = repositoryFileManager.add(repoId, {
+        Directory: '', FileName: 'keep.sh', Label: 'Keep', Description: '', Content: 'echo keep\n', Executable: false, ListInAgents: false,
+    });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    const filesRoot = path.join(mainFolder, '.workspace', 'files');
+    const outside = fs.mkdtempSync(path.join(tmpDir, 'outside-'));
+    fs.symlinkSync(outside, path.join(filesRoot, 'linked'));
+    repositoryFileManager.add(repoId, {
+        Directory: 'linked', FileName: 'a.sh', Label: 'A', Description: '', Content: 'echo a\n', Executable: false, ListInAgents: false,
+    });
+    repositoryFileManager.remove(repoId, keepFile.Id);
+
+    orchestrator.syncRepository(repoId);
+
+    const entries = errorLogManager.list({ source: 'workspace-info' }).entries.filter((e) => e.Operation === 'sync-files');
+    const infoEntry = entries.find((e) => e.Severity === 'info');
+    const warningEntry = entries.find((e) => e.Severity === 'warning');
+    assert.ok(infoEntry, 'expected an info entry for the removed file');
+    assert.ok(infoEntry!.Message.includes('keep.sh'));
+    assert.ok(warningEntry, 'expected a warning entry for the refused write');
+    assert.ok(warningEntry!.Message.includes('linked'));
+});
+
+test('syncRepository() logs nothing when the files write skips and removes nothing', async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator, errorLogManager } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    repositoryFileManager.add(repoId, {
+        Directory: '', FileName: 'build.sh', Label: 'Build', Description: '', Content: 'echo build\n', Executable: false, ListInAgents: false,
+    });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    const entries = errorLogManager.list({ source: 'workspace-info' }).entries.filter((e) => e.Operation === 'sync-files');
+    assert.deepStrictEqual(entries, []);
+});
+
+test('syncRepository() does not throw when a files write skips/removes files but no error-log manager was injected', { skip: process.platform === 'win32' }, async () => {
+    const base = fs.mkdtempSync(path.join(tmpDir, 'case-no-log-'));
+    const config = makeTestConfig(base);
+    const repositoryManager = new RepositoryManager(config);
+    const repositoryFileManager = new RepositoryFileManager(config, repositoryManager);
+    const orchestrator = new RepositoryInfoSyncOrchestrator(config, repositoryManager, repositoryFileManager);
+
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    const keepFile = repositoryFileManager.add(repoId, {
+        Directory: '', FileName: 'keep.sh', Label: 'Keep', Description: '', Content: 'echo keep\n', Executable: false, ListInAgents: false,
+    });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    const filesRoot = path.join(mainFolder, '.workspace', 'files');
+    const outside = fs.mkdtempSync(path.join(tmpDir, 'outside-'));
+    fs.symlinkSync(outside, path.join(filesRoot, 'linked'));
+    repositoryFileManager.add(repoId, {
+        Directory: 'linked', FileName: 'a.sh', Label: 'A', Description: '', Content: 'echo a\n', Executable: false, ListInAgents: false,
+    });
+    repositoryFileManager.remove(repoId, keepFile.Id);
+
+    assert.doesNotThrow(() => orchestrator.syncRepository(repoId));
+});
+
 // ─── commitAndPush() (AC-11) ──────────────────────────────────────────────────
 
 test('commitAndPush() commits the staged .workspace changes with the fixed Paralizer identity, pushes to the default branch, and writes an audit entry', async () => {
@@ -895,6 +1196,19 @@ test('recreateManagedClone() refuses with pending changes unless discarded, and 
     // (unchanged) upstream file, so the first post-recreate sync re-records a
     // fresh baseline rather than leaving the state as an unresolved conflict.
     assert.ok(status.state === 'in-sync' || status.state === 'write-required');
+    assert.strictEqual(status.filterFallback, undefined);
+});
+
+test('recreateManagedClone() flags filterFallback when the server does not support partial-clone filtering', async () => {
+    const { repositoryManager, orchestrator } = makeHarness();
+    const originPath = buildOrigin({ withFilter: false, infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    const status = await orchestrator.recreateManagedClone(repoId, { discardPendingChanges: true });
+
+    assert.strictEqual(status.filterFallback, true);
 });
 
 // ─── Serialisation (AC-14) ────────────────────────────────────────────────────

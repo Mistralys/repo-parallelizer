@@ -640,6 +640,7 @@ export function buildRepositoryInfoSyncSection(repo, options = {}) {
             busy = false;
             busyKind = null;
             showToast(nextEnabled ? 'Sync enabled' : 'Sync disabled', 'success');
+            if (nextEnabled) notifyFilterFallback(status, 'clone');
             safeRender();
             maybeAutoOpenConflict();
         } catch (err) {
@@ -667,6 +668,7 @@ export function buildRepositoryInfoSyncSection(repo, options = {}) {
             busy = false;
             busyKind = null;
             showToast(describeRefreshOutcome(before, status), 'success');
+            notifyFilterFallback(status, 'fetch');
             safeRender();
             maybeAutoOpenConflict();
         } catch (err) {
@@ -715,6 +717,7 @@ export function buildRepositoryInfoSyncSection(repo, options = {}) {
             busy = false;
             busyKind = null;
             showToast('Main folder recreated.', 'success');
+            notifyFilterFallback(status, 'clone');
             safeRender();
             maybeAutoOpenConflict();
         } catch (err) {
@@ -775,6 +778,22 @@ export function buildRepositoryInfoSyncSection(repo, options = {}) {
     }
 
     /**
+     * Shows the shared partial-clone-filtering fallback notice when `result`
+     * reports it, replacing what would otherwise be a fourth inline copy of
+     * the same toast (Enable, Refresh, Recreate, and Commit & Push each call
+     * this after their own success toast, rather than duplicating the text
+     * and condition locally).
+     *
+     * @param {{ filterFallback?: boolean }|null|undefined} result
+     * @param {'clone'|'fetch'} transfer - which git operation the fallback applied to.
+     */
+    function notifyFilterFallback(result, transfer) {
+        if (result && result.filterFallback) {
+            showToast(`The remote does not support partial-clone filtering — a full ${transfer} was used.`, 'info');
+        }
+    }
+
+    /**
      * Builds the success toast text for a Commit & Push outcome.
      *
      * Names the pushed commit when both a `commitSha` and the main folder's
@@ -812,9 +831,7 @@ export function buildRepositoryInfoSyncSection(repo, options = {}) {
 
         if (outcome !== null) {
             showToast(describeCommitOutcome(outcome.result), 'success');
-            if (outcome.result && outcome.result.filterFallback) {
-                showToast('The remote does not support partial-clone filtering — a full fetch was used.', 'info');
-            }
+            notifyFilterFallback(outcome.result, 'fetch');
             await reloadStatusSilently();
         }
 

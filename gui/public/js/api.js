@@ -123,6 +123,17 @@ async function request(method, url, body) {
  * @property {Object} health - Health report (see `HealthReport` in `src/orchestration/health.types.ts`).
  */
 
+/**
+ * `InfoSyncStatus` plus an optional partial-clone filter fallback flag.
+ * Returned by `saveSettings()` (on enable), `refresh()` and
+ * `recreateMainFolder()` — each of these performs its own clone/fetch of the
+ * managed main folder and so can detect and surface the fallback, unlike
+ * `status()`/`importPreview()`, which never clone or fetch. Mirrors
+ * `RepositoryInfoSyncRemoteStatus` in `src/orchestration/repository-info-sync.ts`.
+ *
+ * @typedef {InfoSyncStatus & { filterFallback?: boolean }} InfoSyncRemoteStatus
+ */
+
 // ---------------------------------------------------------------------------
 // API namespaces
 // ---------------------------------------------------------------------------
@@ -283,7 +294,7 @@ const repositories = {
          *
          * @param {string} id - Repository ID.
          * @param {{ enabled: boolean, discardPendingChanges?: boolean }} data
-         * @returns {Promise<InfoSyncStatus>}
+         * @returns {Promise<InfoSyncRemoteStatus>}
          */
         saveSettings(id, data) {
             return request('PUT', `/api/repositories/${encodeURIComponent(id)}/info-sync`, data);
@@ -293,7 +304,7 @@ const repositories = {
          * Re-evaluate the sync state against the managed main folder on disk.
          *
          * @param {string} id - Repository ID.
-         * @returns {Promise<InfoSyncStatus>}
+         * @returns {Promise<InfoSyncRemoteStatus>}
          */
         refresh(id) {
             return request('POST', `/api/repositories/${encodeURIComponent(id)}/info-sync/refresh`);
@@ -304,7 +315,7 @@ const repositories = {
          *
          * @param {string} id - Repository ID.
          * @param {boolean} [discardPendingChanges] - Opt in to discarding pending changes.
-         * @returns {Promise<InfoSyncStatus>}
+         * @returns {Promise<InfoSyncRemoteStatus>}
          */
         recreateMainFolder(id, discardPendingChanges) {
             return request(

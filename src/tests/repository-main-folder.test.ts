@@ -187,6 +187,29 @@ test('createManagedClone() throws MainFolderGitError (without touching the files
     assert.ok(fs.existsSync(path.join(destination, 'marker.txt')), 'pre-existing destination content must be left untouched');
 });
 
+test('createManagedClone() refuses a destination pre-planted as a symlink escaping the managed root, without invoking git', { skip: process.platform === 'win32' ? 'symlinks need elevated privileges on Windows' : false }, async () => {
+    const originPath = buildOrigin(true);
+    const config = makeTestConfig(tmpDir);
+    const repo = fakeRepo(nextRepoId(), `file://${originPath}`);
+
+    const outsideTarget = path.join(tmpDir, 'create-symlink-victim');
+    fs.mkdirSync(outsideTarget, { recursive: true });
+    fs.writeFileSync(path.join(outsideTarget, 'keepme.txt'), 'must survive');
+
+    const managedRoot = getManagedMainFolderRoot(config);
+    fs.mkdirSync(managedRoot, { recursive: true });
+    const destination = resolveMainFolderPath(config, repo.Id);
+    fs.symlinkSync(outsideTarget, destination, 'dir');
+
+    await assert.rejects(
+        () => createManagedClone(config, repo, `file://${originPath}`),
+        MainFolderPreconditionError,
+    );
+    // The guard must refuse before touching git or the symlink target.
+    assert.ok(fs.existsSync(path.join(outsideTarget, 'keepme.txt')), 'the symlink target must be left untouched');
+    assert.ok(fs.lstatSync(destination).isSymbolicLink(), 'the planted symlink itself must be left untouched');
+});
+
 // ─── removeManagedClone() (AC-13 / plan AC-13) ────────────────────────────────
 
 test('removeManagedClone() removes an existing managed main folder and returns true', () => {

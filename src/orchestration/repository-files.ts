@@ -6,6 +6,7 @@ import { checkPathSegment, isExecutableFile, applyLineEndingPolicy } from '../mo
 import {
     REPOSITORY_FILE_MAX_CONTENT_BYTES,
     RESERVED_REPOSITORY_FILE_SEGMENTS,
+    repositoryFileMetadataProblem,
     repositoryFileRelativePath,
     type RepositoryFile,
 } from '../models/repository/repository-file.js';
@@ -30,6 +31,9 @@ export const REPOSITORY_FILES_FOLDER_NAME = 'files';
 
 /** Fixed problem marker used when a regular file cannot be read at all. */
 const PROBLEM_UNREADABLE = 'File could not be read.';
+
+/** Problem message used when two folder files share the same path once lowercased. */
+const PROBLEM_CASE_COLLISION = 'Another file under `files/` uses the same path with different letter case.';
 
 /** Metadata fields read from `info.json`'s `Files` entries, keyed by `Path` (case-insensitive). */
 export interface RepositoryFileMetadataEntry {
@@ -57,13 +61,25 @@ export interface RepositoryFolderFile {
     path: string;
 
     /**
-     * The file's content. UTF-8 decoded text when `problem` is unset. When
-     * `problem` is set (and is not the unreadable marker), this holds the raw
-     * bytes decoded as latin1 — a lossless, 1-byte-per-character encoding —
-     * so {@link canonicalFilesForHash} can reconstruct the exact original
-     * bytes for hashing. Empty when the file could not be read at all.
+     * The file's content. UTF-8 decoded text when `contentKind` is `'text'`.
+     * When `contentKind` is `'raw'`, this holds the raw bytes decoded as
+     * latin1 — a lossless, 1-byte-per-character encoding — so
+     * {@link canonicalFilesForHash} can reconstruct the exact original bytes
+     * for hashing. Empty when `contentKind` is `'unreadable'`.
      */
     content: string;
+
+    /**
+     * How `content` was decoded from disk — independent of whether the file
+     * can be imported (`problem`). `'text'` is utf8-decoded (set even when a
+     * `'text'` file also carries a metadata or case-collision `problem`,
+     * since those problems do not change how the bytes were read);
+     * `'raw'` is latin1-decoded (path-segment, oversized, or binary
+     * problems); `'unreadable'` means the file could not be read at all and
+     * `content` is empty. {@link canonicalFilesForHash} branches on this
+     * field, not on `problem`.
+     */
+    contentKind: 'text' | 'raw' | 'unreadable';
 
     metadata: RepositoryFolderFileMetadata;
 
@@ -199,6 +215,15 @@ function defaultMetadataFor(
  *   read at all is still returned, with `problem` set — never dropped. This
  *   is what keeps {@link canonicalFilesForHash} able to detect that the file
  *   changed, rather than silently treating it as absent.
+ * - A `'text'` file (one with no path/size/binary/unreadable problem) whose
+ *   joined or defaulted metadata fails `repositoryFileMetadataProblem()`
+ *   (an over-length or empty `Label`, or an over-length `Description`) is
+ *   also returned with `problem` set — `content`/`contentKind` are left as
+ *   `'text'`, since the bytes themselves were read fine.
+ * - A `'text'` file with no earlier problem whose path collides with another
+ *   folder file's path once both are lowercased also gets `problem` set,
+ *   for the same reason — the file system allows both to exist
+ *   side by side, but they cannot both be imported as the same `Path`.
  * - Symlinks and any other non-regular entry are reported only in
  *   `unsafeEntries`, never read and never followed.
  *
@@ -217,6 +242,12 @@ export function readRepositoryFilesFolder(
         metadataByPath.set(entry.Path.toLowerCase(), entry);
     }
 
+    const lowercasedPathCounts = new Map<string, number>();
+    for (const relPath of regularFiles) {
+        const key = relPath.toLowerCase();
+        lowercasedPathCounts.set(key, (lowercasedPathCounts.get(key) ?? 0) + 1);
+    }
+
     const files: RepositoryFolderFile[] = regularFiles.map((relPath): RepositoryFolderFile => {
         const meta = metadataByPath.get(relPath.toLowerCase());
         const fileName = relPath.split('/').pop() as string;
@@ -229,6 +260,7 @@ export function readRepositoryFilesFolder(
             return {
                 path: relPath,
                 content: '',
+                contentKind: 'unreadable',
                 metadata: defaultMetadataFor(fileName, '', meta),
                 problem: PROBLEM_UNREADABLE,
             };
@@ -237,7 +269,13 @@ export function readRepositoryFilesFolder(
         const segmentProblem = pathProblem(relPath);
         if (segmentProblem) {
             const rawContent = raw.toString('latin1');
-            return { path: relPath, content: rawContent, metadata: defaultMetadataFor(fileName, rawContent, meta), problem: segmentProblem };
+            return {
+                path: relPath,
+                content: rawContent,
+                contentKind: 'raw',
+                metadata: defaultMetadataFor(fileName, rawContent, meta),
+                problem: segmentProblem,
+            };
         }
 
         if (raw.length > REPOSITORY_FILE_MAX_CONTENT_BYTES) {
@@ -245,6 +283,7 @@ export function readRepositoryFilesFolder(
             return {
                 path: relPath,
                 content: rawContent,
+                contentKind: 'raw',
                 metadata: defaultMetadataFor(fileName, rawContent, meta),
                 problem: `File exceeds the maximum size of ${REPOSITORY_FILE_MAX_CONTENT_BYTES / 1024} KB.`,
             };
@@ -255,13 +294,25 @@ export function readRepositoryFilesFolder(
             return {
                 path: relPath,
                 content: rawContent,
+                contentKind: 'raw',
                 metadata: defaultMetadataFor(fileName, rawContent, meta),
                 problem: 'File must be plain text (binary data is not supported).',
             };
         }
 
         const content = raw.toString('utf8');
-        return { path: relPath, content, metadata: defaultMetadataFor(fileName, content, meta) };
+        const fileMetadata = defaultMetadataFor(fileName, content, meta);
+
+        const metadataProblem = repositoryFileMetadataProblem(fileMetadata);
+        if (metadataProblem) {
+            return { path: relPath, content, contentKind: 'text', metadata: fileMetadata, problem: metadataProblem };
+        }
+
+        if ((lowercasedPathCounts.get(relPath.toLowerCase()) ?? 0) > 1) {
+            return { path: relPath, content, contentKind: 'text', metadata: fileMetadata, problem: PROBLEM_CASE_COLLISION };
+        }
+
+        return { path: relPath, content, contentKind: 'text', metadata: fileMetadata };
     });
 
     return { files, unsafeEntries };
@@ -277,7 +328,14 @@ export interface WriteRepositoryFilesResult {
     written: string[];
     /** Regular files deleted because they were no longer in the data set. */
     removed: string[];
-    /** Targets refused by the guard chain, and existing entries the delete pass declined to touch (symlinks, other non-regular entries, or anything it could not safely re-check). */
+    /**
+     * Targets refused by the guard chain, and existing entries the delete
+     * pass declined to touch (symlinks, other non-regular entries, or
+     * anything it could not safely re-check). Each path appears at most
+     * once, in first-encountered order, even when more than one pass (e.g.
+     * the write loop's guard refusal and the delete pass's `unsafeEntries`)
+     * would otherwise report the same path.
+     */
     skipped: string[];
 }
 
@@ -313,6 +371,12 @@ export function writeRepositoryFiles(
 ): WriteRepositoryFilesResult {
     const root = filesFolderPath(mainFolder);
     const result: WriteRepositoryFilesResult = { written: [], removed: [], skipped: [] };
+    const skippedSeen = new Set<string>();
+    const pushSkipped = (rel: string): void => {
+        if (skippedSeen.has(rel)) return;
+        skippedSeen.add(rel);
+        result.skipped.push(rel);
+    };
     const expectedAbsolutePaths = new Set<string>();
 
     for (const file of files) {
@@ -332,7 +396,7 @@ export function writeRepositoryFiles(
 
             const target = guardedFileTarget(root, rel);
             if (target === null) {
-                result.skipped.push(rel);
+                pushSkipped(rel);
                 continue;
             }
 
@@ -370,13 +434,13 @@ export function writeRepositoryFiles(
                 result.written.push(rel);
             }
         } catch {
-            result.skipped.push(rel);
+            pushSkipped(rel);
         }
     }
 
     // Delete pass: remove every regular file under `files/` not in the data set.
     const { regularFiles, unsafeEntries } = walkFilesFolder(root);
-    result.skipped.push(...unsafeEntries);
+    for (const rel of unsafeEntries) pushSkipped(rel);
 
     const parentsToPrune: string[] = [];
     for (const relPath of regularFiles) {
@@ -386,14 +450,14 @@ export function writeRepositoryFiles(
         try {
             const stat = fs.lstatSync(absPath);
             if (!stat.isFile()) {
-                result.skipped.push(relPath);
+                pushSkipped(relPath);
                 continue;
             }
             fs.rmSync(absPath);
             result.removed.push(relPath);
             parentsToPrune.push(path.dirname(absPath));
         } catch {
-            result.skipped.push(relPath);
+            pushSkipped(relPath);
         }
     }
 
@@ -418,14 +482,17 @@ export function writeRepositoryFiles(
  * always changes the hash and surfaces as `incoming` (or `conflict`) rather
  * than being silently treated as unchanged (and, because the delete pass
  * only ever runs in a `write-required` state, never reaching deletion without
- * an explicit import decision):
- * - A normal file hashes `sha256` of its LF-normalised content, so a
+ * an explicit import decision). The hash branches on `contentKind` — how the
+ * content was decoded — rather than on whether `problem` is set, so that a
+ * `'text'` file which also carries a metadata or case-collision `problem`
+ * hashes identically to the same file without that problem:
+ * - `contentKind: 'text'` hashes `sha256` of the LF-normalised content, so a
  *   Windows `core.autocrlf` checkout never looks like an incoming change.
- * - A `problem` file (other than unreadable) hashes `sha256` of its raw
- *   bytes — no line-ending normalisation, since the content is not
+ * - `contentKind: 'raw'` hashes `sha256` of the raw bytes (`content` decoded
+ *   as latin1) — no line-ending normalisation, since the content is not
  *   necessarily text.
- * - An unreadable file contributes the fixed string `'unreadable'` in place
- *   of a content hash, since its bytes could not be read at all.
+ * - `contentKind: 'unreadable'` contributes the fixed string `'unreadable'`
+ *   in place of a content hash, since its bytes could not be read at all.
  *
  * `files` must already exclude symlinks and other non-regular entries (see
  * {@link readRepositoryFilesFolder}'s `unsafeEntries`) — they cannot be
@@ -437,9 +504,9 @@ export function writeRepositoryFiles(
 export function canonicalFilesForHash(files: readonly RepositoryFolderFile[]): RepositoryFileHashEntry[] {
     const entries: RepositoryFileHashEntry[] = files.map((file) => {
         let contentHash: string;
-        if (file.problem === PROBLEM_UNREADABLE) {
+        if (file.contentKind === 'unreadable') {
             contentHash = 'unreadable';
-        } else if (file.problem !== undefined) {
+        } else if (file.contentKind === 'raw') {
             contentHash = crypto.createHash('sha256').update(Buffer.from(file.content, 'latin1')).digest('hex');
         } else {
             const normalised = file.content.replace(/\r\n|\r/g, '\n');

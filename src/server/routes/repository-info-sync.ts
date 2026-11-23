@@ -39,8 +39,10 @@ const VALID_FILE_IMPORT_ACTIONS: readonly RepositoryFileImportAction[] = ['add',
  * | anything else                                                            | 500    |
  *
  * `POST /import` is the one exception to the "anything else → 500" row: a
- * plain `Error` thrown by `applyImport()` there (an unknown `files` path, or
- * an action disallowed for that diff's kind) is a client input mistake, not
+ * plain `Error` thrown by `applyImport()` there (an unknown `files` path, an
+ * action disallowed for that diff's kind, or a resulting file set that fails
+ * `validateRepositoryFileSet()` — the 64-file cap, path uniqueness, or a
+ * per-file rule, naming the offending file) is a client input mistake, not
  * a server fault, and is mapped to 400 instead — see that handler.
  *
  * | Method | Path                                                | Success |
@@ -421,10 +423,12 @@ export function registerRepositoryInfoSyncRoutes(
         } catch (err) {
             // `applyImport()` throws a plain `Error` (not one of the named
             // error classes mapped by `sendMappedError()`) when `input.files`
-            // names a path outside the current diff, or requests an action
-            // disallowed for that diff's kind/problem state — both are client
-            // input mistakes, not server faults, so they resolve to 400
-            // rather than `sendMappedError()`'s 500 fallback.
+            // names a path outside the current diff, requests an action
+            // disallowed for that diff's kind/problem state, or the resulting
+            // file set fails `validateRepositoryFileSet()` (e.g. the 64-file
+            // cap, including on an untouched, already-stored file) — all are
+            // client input mistakes, not server faults, so they resolve to
+            // 400 rather than `sendMappedError()`'s 500 fallback.
             if (
                 err instanceof NotFoundError ||
                 err instanceof PendingChangesError ||

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 
 import {
@@ -12,7 +13,12 @@ import {
     type RepositoryFolderFile,
 } from '../orchestration/repository-files.js';
 import { REPOSITORY_INFO_FOLDER_NAME } from '../orchestration/repository-info.js';
-import { REPOSITORY_FILE_MAX_CONTENT_BYTES, type RepositoryFile } from '../models/repository/repository-file.js';
+import {
+    REPOSITORY_FILE_MAX_CONTENT_BYTES,
+    REPOSITORY_FILE_MAX_LABEL_LENGTH,
+    REPOSITORY_FILE_MAX_DESCRIPTION_LENGTH,
+    type RepositoryFile,
+} from '../models/repository/repository-file.js';
 import { createTempDirTracker } from './test-helpers.js';
 
 const makeTempDir = createTempDirTracker('paralizer-repository-files-test-');
@@ -47,6 +53,25 @@ function repoFile(overrides?: Partial<RepositoryFile>): RepositoryFile {
         ...overrides,
     };
 }
+
+/**
+ * Whether the filesystem backing this test run distinguishes case in file
+ * names. macOS's default APFS volume (and Windows) is case-insensitive, so
+ * writing both `Notes.txt` and `notes.txt` under the same directory collapses
+ * to a single on-disk file — the case-collision problem this module reports
+ * can never be exercised there via two real files on disk. Computed once,
+ * synchronously, so it can gate `test(..., { skip })` options at file-load
+ * time.
+ */
+const isCaseSensitiveFilesystem: boolean = (() => {
+    const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'paralizer-case-probe-'));
+    try {
+        fs.writeFileSync(path.join(probeDir, 'probe.txt'), 'a');
+        return !fs.existsSync(path.join(probeDir, 'PROBE.txt'));
+    } finally {
+        fs.rmSync(probeDir, { recursive: true, force: true });
+    }
+})();
 
 function findFile(files: readonly RepositoryFolderFile[], relPath: string): RepositoryFolderFile {
     const found = files.find((f) => f.path === relPath);
@@ -143,6 +168,74 @@ test('reader: a symlink is reported only in unsafeEntries, never in files', { sk
     const { files, unsafeEntries } = readRepositoryFilesFolder(main, []);
     assert.deepStrictEqual(files.map((f) => f.path).sort(), ['real.txt']);
     assert.deepStrictEqual(unsafeEntries, ['link.txt']);
+});
+
+test('reader: flags a file whose metadata entry has an over-length Label, keeping contentKind text and its utf8 content', () => {
+    const main = makeMainFolder();
+    writeRaw(main, 'run.sh', '#!/bin/sh\necho hi\n');
+    const tooLongLabel = 'x'.repeat(REPOSITORY_FILE_MAX_LABEL_LENGTH + 1);
+    const metadata: RepositoryFileMetadataEntry[] = [
+        { Path: 'run.sh', Label: tooLongLabel, Description: '', Executable: true, ListInAgents: false },
+    ];
+    const { files } = readRepositoryFilesFolder(main, metadata);
+    const f = findFile(files, 'run.sh');
+    assert.match(f.problem ?? '', /Label/);
+    assert.equal(f.contentKind, 'text');
+    assert.equal(f.content, '#!/bin/sh\necho hi\n');
+});
+
+test('reader: flags a file whose metadata entry has an over-length Description', () => {
+    const main = makeMainFolder();
+    writeRaw(main, 'run.sh', '#!/bin/sh\necho hi\n');
+    const tooLongDescription = 'x'.repeat(REPOSITORY_FILE_MAX_DESCRIPTION_LENGTH + 1);
+    const metadata: RepositoryFileMetadataEntry[] = [
+        { Path: 'run.sh', Label: 'Run', Description: tooLongDescription, Executable: true, ListInAgents: false },
+    ];
+    const { files } = readRepositoryFilesFolder(main, metadata);
+    const f = findFile(files, 'run.sh');
+    assert.match(f.problem ?? '', /Description/);
+    assert.equal(f.contentKind, 'text');
+});
+
+test('reader: flags a file without metadata whose defaulted Label (the file name) is empty', () => {
+    // Defaults use the file name as Label; a name over the max length still
+    // exercises the same defaulted-metadata path through
+    // `repositoryFileMetadataProblem()`.
+    const main = makeMainFolder();
+    const tooLongName = `${'x'.repeat(REPOSITORY_FILE_MAX_LABEL_LENGTH + 1)}.txt`;
+    writeRaw(main, tooLongName, 'hello');
+    const { files } = readRepositoryFilesFolder(main, []);
+    const f = findFile(files, tooLongName);
+    assert.match(f.problem ?? '', /Label/);
+    assert.equal(f.contentKind, 'text');
+});
+
+test('reader: two files whose paths differ only by case each carry the case-collision problem', { skip: !isCaseSensitiveFilesystem }, () => {
+    const main = makeMainFolder();
+    writeRaw(main, 'Notes.txt', 'one');
+    writeRaw(main, 'notes.txt', 'two');
+    const { files } = readRepositoryFilesFolder(main, []);
+    const upper = findFile(files, 'Notes.txt');
+    const lower = findFile(files, 'notes.txt');
+    assert.match(upper.problem ?? '', /same path with different letter case/);
+    assert.match(lower.problem ?? '', /same path with different letter case/);
+    assert.equal(upper.contentKind, 'text');
+    assert.equal(lower.contentKind, 'text');
+    assert.equal(upper.content, 'one');
+    assert.equal(lower.content, 'two');
+});
+
+test('reader: an earlier problem (e.g. oversized) takes precedence over the case-collision check', { skip: !isCaseSensitiveFilesystem }, () => {
+    const main = makeMainFolder();
+    writeRaw(main, 'Big.txt', 'a'.repeat(REPOSITORY_FILE_MAX_CONTENT_BYTES + 1));
+    writeRaw(main, 'big.txt', 'small');
+    const { files } = readRepositoryFilesFolder(main, []);
+    const oversized = findFile(files, 'Big.txt');
+    const small = findFile(files, 'big.txt');
+    assert.match(oversized.problem ?? '', /maximum size/);
+    assert.equal(oversized.contentKind, 'raw');
+    // The still-colliding, non-oversized file gets the case-collision problem.
+    assert.match(small.problem ?? '', /same path with different letter case/);
 });
 
 test('reader: a symlinked directory is reported in unsafeEntries and never descended into', { skip: process.platform === 'win32' }, () => {
@@ -291,6 +384,25 @@ test('write: leaves a symlink to a directory under files/ in place and reports i
     assert.equal(fs.existsSync(path.join(filesRoot(main), 'link-to-dir')), true);
 });
 
+test('write: a symlink at a write-target leaf escaping the root is reported in skipped exactly once', { skip: process.platform === 'win32' }, () => {
+    const main = makeMainFolder();
+    const outside = makeTempDir();
+    const outsideTarget = path.join(outside, 'escaped.txt');
+    fs.writeFileSync(outsideTarget, 'nope');
+    fs.mkdirSync(filesRoot(main), { recursive: true });
+    // Plant a symlink at the exact leaf the write targets, pointing outside
+    // `files/` — the write loop's guard refuses it (reported in `skipped`),
+    // and the delete pass's `walkFilesFolder()` separately classifies the
+    // same leaf as a symlink in `unsafeEntries` (also reported in
+    // `skipped`) — the two passes must not double-report the same path.
+    fs.symlinkSync(outsideTarget, path.join(filesRoot(main), 'run.sh'));
+
+    const res = writeRepositoryFiles(main, [repoFile({ Directory: '', FileName: 'run.sh' })]);
+    const occurrences = res.skipped.filter((rel) => rel === 'run.sh').length;
+    assert.equal(occurrences, 1);
+    assert.equal(fs.readFileSync(outsideTarget, 'utf8'), 'nope');
+});
+
 // ---------------------------------------------------------------------------
 // canonicalFilesForHash
 // ---------------------------------------------------------------------------
@@ -299,6 +411,7 @@ function folderFile(overrides?: Partial<RepositoryFolderFile>): RepositoryFolder
     return {
         path: 'a.txt',
         content: 'hello\n',
+        contentKind: 'text',
         metadata: { Label: 'A', Description: '', Executable: false, ListInAgents: false },
         ...overrides,
     };
@@ -326,13 +439,13 @@ test('hash: a problem file contributes a hash of its raw bytes (changes when it 
     const base = canonicalFilesForHash([folderFile()]);
     const withProblem = canonicalFilesForHash([
         folderFile(),
-        folderFile({ path: 'bin.dat', content: Buffer.from([0x41, 0x00, 0x42]).toString('latin1'), problem: 'File must be plain text (binary data is not supported).' }),
+        folderFile({ path: 'bin.dat', content: Buffer.from([0x41, 0x00, 0x42]).toString('latin1'), contentKind: 'raw', problem: 'File must be plain text (binary data is not supported).' }),
     ]);
     assert.notDeepStrictEqual(base, withProblem);
 });
 
 test('hash: an unreadable file contributes the fixed "unreadable" marker', () => {
-    const result = canonicalFilesForHash([folderFile({ path: 'secret.txt', content: '', problem: 'File could not be read.' })]);
+    const result = canonicalFilesForHash([folderFile({ path: 'secret.txt', content: '', contentKind: 'unreadable', problem: 'File could not be read.' })]);
     assert.equal(result[0][5], 'unreadable');
 });
 
@@ -340,7 +453,7 @@ test('hash: changing an oversized file still changes the hash (via its raw-byte 
     const base = canonicalFilesForHash([folderFile()]);
     const oversized = canonicalFilesForHash([
         folderFile(),
-        folderFile({ path: 'big.txt', content: 'x'.repeat(10), problem: 'File exceeds the maximum size of 256 KB.' }),
+        folderFile({ path: 'big.txt', content: 'x'.repeat(10), contentKind: 'raw', problem: 'File exceeds the maximum size of 256 KB.' }),
     ]);
     assert.notDeepStrictEqual(base, oversized);
 });
@@ -352,6 +465,23 @@ test('hash: does not change when only a symlink is added (symlinks are never pas
     const withoutSymlink = canonicalFilesForHash([folderFile()]);
     const withSymlinkIgnored = canonicalFilesForHash([folderFile()]);
     assert.deepStrictEqual(withoutSymlink, withSymlinkIgnored);
+});
+
+test('hash: a text file with a metadata problem hashes identically to the same file without the problem', () => {
+    const withoutProblem = canonicalFilesForHash([folderFile({ content: 'a\r\nb\r\nc\r\n' })]);
+    const withProblem = canonicalFilesForHash([
+        folderFile({ content: 'a\r\nb\r\nc\r\n', problem: 'Label is required.' }),
+    ]);
+    assert.deepStrictEqual(withoutProblem, withProblem);
+});
+
+test('hash: a text file with a case-collision problem hashes identically to the same file without the problem, including characters above U+00FF', () => {
+    const content = 'café ☃\r\n';
+    const withoutProblem = canonicalFilesForHash([folderFile({ content })]);
+    const withProblem = canonicalFilesForHash([
+        folderFile({ content, problem: 'Another file under `files/` uses the same path with different letter case.' }),
+    ]);
+    assert.deepStrictEqual(withoutProblem, withProblem);
 });
 
 test('end-to-end: reader output feeds canonicalFilesForHash and a symlink addition does not change the hash', { skip: process.platform === 'win32' }, () => {

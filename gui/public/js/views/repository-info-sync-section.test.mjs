@@ -598,6 +598,105 @@ test('AC-18: cancelling the commit dialog shows no toast and does not re-fetch s
 });
 
 // ---------------------------------------------------------------------------
+// AC-10 (WP-006) — Shared partial-clone fallback notice for Enable, Refresh
+// and Recreate (Commit & Push's own filterFallback toast is covered above).
+// ---------------------------------------------------------------------------
+
+test('AC-10: Enable shows the clone fallback toast when saveSettings() reports filterFallback', async () => {
+    const repoId = uniqueRepoId();
+    api.repositories.infoSync.status = async () => makeStatus({ enabled: false, state: 'disabled' });
+    api.repositories.infoSync.saveSettings = async (_id, input) => makeStatus({ enabled: input.enabled, filterFallback: true });
+
+    const { element } = buildRepositoryInfoSyncSection({ id: repoId, name: 'Repo' });
+    document.body.appendChild(element);
+    await wait();
+
+    dispatchChange(element.querySelector('input[role="switch"]'), true);
+    dispatchClick(findButton(element, 'Save'));
+    await wait();
+
+    const texts = toastTexts();
+    assert.ok(texts.includes('Sync enabled'));
+    assert.ok(texts.some((t) => t.includes('partial-clone filtering') && t.includes('full clone')));
+});
+
+test('AC-10: Disable never shows the fallback toast, even when saveSettings() reports filterFallback', async () => {
+    const repoId = uniqueRepoId();
+    api.repositories.infoSync.status = async () => makeStatus({ enabled: true, state: 'in-sync' });
+    api.repositories.infoSync.saveSettings = async (_id, input) => makeStatus({ enabled: input.enabled, filterFallback: true });
+
+    const { element } = buildRepositoryInfoSyncSection({ id: repoId, name: 'Repo' });
+    document.body.appendChild(element);
+    await wait();
+
+    dispatchChange(element.querySelector('input[role="switch"]'), false);
+    dispatchClick(findButton(element, 'Save'));
+    await wait();
+
+    const texts = toastTexts();
+    assert.ok(texts.includes('Sync disabled'));
+    assert.ok(!texts.some((t) => t.includes('partial-clone filtering')));
+});
+
+test('AC-10: Refresh shows the fetch fallback toast when refresh() reports filterFallback', async () => {
+    const repoId = uniqueRepoId();
+    api.repositories.infoSync.status = async () => makeStatus({ state: 'in-sync' });
+    api.repositories.infoSync.refresh = async () => makeStatus({ filterFallback: true });
+
+    const { element } = buildRepositoryInfoSyncSection({ id: repoId, name: 'Repo' });
+    document.body.appendChild(element);
+    await wait();
+
+    dispatchClick(findButton(element, 'Refresh'));
+    await wait();
+
+    assert.ok(toastTexts().some((t) => t.includes('partial-clone filtering') && t.includes('full fetch')));
+});
+
+test('AC-10: Refresh shows no fallback toast when filterFallback is absent', async () => {
+    const repoId = uniqueRepoId();
+    api.repositories.infoSync.status = async () => makeStatus({ state: 'in-sync' });
+    api.repositories.infoSync.refresh = async () => makeStatus();
+
+    const { element } = buildRepositoryInfoSyncSection({ id: repoId, name: 'Repo' });
+    document.body.appendChild(element);
+    await wait();
+
+    dispatchClick(findButton(element, 'Refresh'));
+    await wait();
+
+    assert.ok(!toastTexts().some((t) => t.includes('partial-clone filtering')));
+});
+
+test('AC-10: Recreate shows the clone fallback toast when recreateMainFolder() reports filterFallback', async () => {
+    const repoId = uniqueRepoId();
+    api.repositories.infoSync.status = async () => makeStatus({
+        state: 'in-sync',
+        health: {
+            healthy: false,
+            issues: [{
+                type: 'main-folder-missing',
+                severity: 'warning',
+                message: 'The managed main folder does not exist.',
+                fixAction: 'recreate-main-folder',
+            }],
+        },
+    });
+    api.repositories.infoSync.recreateMainFolder = async () => makeStatus({ filterFallback: true });
+
+    const { element } = buildRepositoryInfoSyncSection({ id: repoId, name: 'Repo' });
+    document.body.appendChild(element);
+    await wait();
+
+    dispatchClick(findButton(element, 'Recreate main folder'));
+    await wait();
+
+    const texts = toastTexts();
+    assert.ok(texts.includes('Main folder recreated.'));
+    assert.ok(texts.some((t) => t.includes('partial-clone filtering') && t.includes('full clone')));
+});
+
+// ---------------------------------------------------------------------------
 // AC-18 (WP-016) — Button matrix for the remaining documented states
 // ---------------------------------------------------------------------------
 

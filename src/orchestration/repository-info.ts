@@ -356,8 +356,11 @@ function readmeFilePath(mainFolder: string): string {
  * - **absent** — the file does not exist. Never an error; sync creates it.
  * - **invalid** — unparseable JSON, a non-object/array top level, a
  *   non-numeric `SchemaVersion`, a missing/non-string `Id`/`Name`/`Description`,
- *   or a malformed `Files` (not an array, or an entry missing a string
- *   `Path`/`Label`/`Description` or boolean `Executable`/`ListInAgents`).
+ *   a malformed `Files` (not an array, or an entry missing a string
+ *   `Path`/`Label`/`Description` or boolean `Executable`/`ListInAgents`), or
+ *   two `Files` entries sharing the same lowercased `Path` (a case-only
+ *   duplicate, which would otherwise collapse silently in every downstream
+ *   lowercased-path map).
  * - **unsupported-schema** — `SchemaVersion` exceeds
  *   {@link REPOSITORY_INFO_SCHEMA_VERSION} (written by a newer Paralizer).
  * - **ok** — `payload` (the synced fields) and `raw` (the full parsed
@@ -442,6 +445,19 @@ export function readRepositoryInfoFile(mainFolder: string): RepositoryInfoReadRe
                 ListInAgents: e['ListInAgents'],
                 ContentHash: '',
             });
+        }
+
+        const seenByLowerPath = new Map<string, string>();
+        for (const entry of files) {
+            const lowerPath = entry.Path.toLowerCase();
+            const previousPath = seenByLowerPath.get(lowerPath);
+            if (previousPath !== undefined) {
+                return {
+                    status: 'invalid',
+                    error: `info.json's "Files" entries "${previousPath}" and "${entry.Path}" collide on the same path, differing only by case.`,
+                };
+            }
+            seenByLowerPath.set(lowerPath, entry.Path);
         }
     }
 

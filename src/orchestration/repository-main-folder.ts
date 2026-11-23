@@ -263,6 +263,70 @@ export interface CreateManagedCloneResult {
     filterFallback: boolean;
 }
 
+/**
+ * Guards a repository's managed main folder destination against path
+ * traversal, by the same two-layer check (strict-descendant lexical
+ * containment, then a realpath symlink-escape check) as
+ * `removeRepositoryFromProject()` in `repository-orchestrator.ts` — shared by
+ * {@link createManagedClone} and {@link removeManagedClone} so a planted
+ * symlink (or a `repoId` that resolves outside the managed root) cannot
+ * redirect either a clone destination or a deletion target outside it.
+ *
+ * Deliberately does NOT permit equality with the managed root (unlike the
+ * shared `isLexicallyContained()` helper's equality-permitting contract,
+ * which suits a writer path but not this create/delete path).
+ *
+ * `resolveRootRealPath()` falls back to a non-realpath'd form when the root
+ * does not exist yet, which would otherwise disagree with the target's own
+ * realpath resolution (via its deepest *existing* ancestor) whenever that
+ * ancestor sits behind a symlink the still-missing root does not — exactly
+ * the case for a repository's very first `createManagedClone()` call, before
+ * `{storageFolder}/repositories/` has ever been created. `ensureRootExists`
+ * creates the managed root first so its own realpath resolves consistently
+ * with the target's; `createManagedClone()` passes `true` (the clone is
+ * about to create a folder under it anyway), `removeManagedClone()` leaves
+ * it `false` to preserve its "no filesystem touch on refusal" contract.
+ *
+ * @param config           Supplies `storageFolder` (via {@link getManagedMainFolderRoot}).
+ * @param repoId           The repository whose managed main folder destination to guard.
+ * @param ensureRootExists When `true`, creates the managed root directory
+ *                         first (`mkdirSync(..., { recursive: true })`) so
+ *                         the realpath check is accurate even before any
+ *                         repository has ever been cloned.
+ * @returns The resolved destination path when the guard passes, or `null`
+ *   when either layer rejects it.
+ */
+function guardedManagedFolderDestination(
+    config: Pick<AppConfig, 'storageFolder'>,
+    repoId: string,
+    ensureRootExists = false,
+): string | null {
+    const managedRoot = getManagedMainFolderRoot(config);
+    if (ensureRootExists) {
+        fs.mkdirSync(managedRoot, { recursive: true });
+    }
+    const destination = resolveMainFolderPath(config, repoId);
+
+    const resolvedRoot = path.resolve(managedRoot);
+    const realRoot = resolveRootRealPath(managedRoot);
+    const resolvedDestination = path.resolve(destination);
+
+    // Path-traversal guard, layer 1: strict-descendant lexical check.
+    if (!isLexicallyContained(resolvedDestination, resolvedRoot) || resolvedDestination === resolvedRoot) {
+        return null;
+    }
+
+    // Path-traversal guard, layer 2: realpath symlink-escape check. Catches a
+    // planted symlink (including a broken one) at the destination's leaf
+    // position that resolves outside the managed root even though the
+    // lexical check above passed.
+    if (escapesRootViaRealpath(resolvedDestination, realRoot)) {
+        return null;
+    }
+
+    return destination;
+}
+
 /** Removes `destination` if it exists, swallowing any filesystem error — used to clean up a partially created clone before an error propagates. */
 function removeIfExists(destination: string): void {
     try {
@@ -280,10 +344,12 @@ function removeIfExists(destination: string): void {
  * with cone-mode sparse-checkout restricted to the `.workspace/` info
  * folder, checked out on the repository's default branch.
  *
- * Sequence: guard the destination (reject if something already exists there)
- * → `git clone --filter=blob:none --no-checkout` → `sparse-checkout set
- * --cone .workspace` → resolve the default branch → verify
- * `refs/remotes/origin/<default>` exists, throwing
+ * Sequence: guard the destination against path traversal (same two-layer
+ * check {@link removeManagedClone} applies — see
+ * {@link guardedManagedFolderDestination}), then reject if something already
+ * exists there → `git clone --filter=blob:none --no-checkout` →
+ * `sparse-checkout set --cone .workspace` → resolve the default branch →
+ * verify `refs/remotes/origin/<default>` exists, throwing
  * {@link MainFolderPreconditionError} when it does not (empty remote, or a
  * default branch that resolves to nothing fetchable) → `checkout <default>`.
  *
@@ -309,15 +375,22 @@ function removeIfExists(destination: string): void {
  *                itself returned or logged by this function.
  * @throws {MainFolderGitError} On any git failure other than an unresolvable
  *   default branch (e.g. an unreachable or rejected remote).
- * @throws {MainFolderPreconditionError} When the remote has no commits, or
- *   its resolved default branch does not exist as a remote-tracking ref.
+ * @throws {MainFolderPreconditionError} When the remote has no commits, its
+ *   resolved default branch does not exist as a remote-tracking ref, or the
+ *   destination fails the path-traversal guard (not a strict descendant of
+ *   the managed root, or escapes it through a symlink).
  */
 export async function createManagedClone(
     config: Pick<AppConfig, 'storageFolder'>,
     repo: Repository,
     authUrl: string,
 ): Promise<CreateManagedCloneResult> {
-    const destination = resolveMainFolderPath(config, repo.Id);
+    const destination = guardedManagedFolderDestination(config, repo.Id, true);
+    if (destination === null) {
+        throw new MainFolderPreconditionError(
+            `Cannot create managed main folder for repository "${repo.Id}": the resolved destination failed the path-traversal guard.`,
+        );
+    }
 
     if (fs.existsSync(destination)) {
         throw new MainFolderGitError(
@@ -375,10 +448,9 @@ export async function createManagedClone(
 
 /**
  * Removes the managed main folder for a repository, guarded by the same
- * two-layer check (strict-descendant lexical containment, then a realpath
- * symlink-escape check) as `removeRepositoryFromProject()` in
- * `repository-orchestrator.ts` — so a planted symlink at the destination's
- * leaf position cannot redirect the deletion outside the managed root.
+ * shared two-layer check ({@link guardedManagedFolderDestination}) as
+ * {@link createManagedClone} — so a planted symlink at the destination's leaf
+ * position cannot redirect the deletion outside the managed root.
  *
  * Refuses (returns `false` without touching the filesystem) rather than
  * throwing, since the only two failure modes here — a guard rejection or a
@@ -391,27 +463,8 @@ export async function createManagedClone(
  *   guard rejected the path or the folder did not exist.
  */
 export function removeManagedClone(config: Pick<AppConfig, 'storageFolder'>, repoId: string): boolean {
-    const managedRoot = getManagedMainFolderRoot(config);
-    const destination = resolveMainFolderPath(config, repoId);
-
-    const resolvedRoot = path.resolve(managedRoot);
-    const realRoot = resolveRootRealPath(managedRoot);
-    const resolvedDestination = path.resolve(destination);
-
-    // Path-traversal guard, layer 1: strict-descendant lexical check.
-    // Deliberately does NOT permit equality with resolvedRoot (unlike the
-    // shared isLexicallyContained() helper's equality-permitting contract,
-    // which suits a writer path but not this delete path) — mirrors
-    // removeRepositoryFromProject()'s layer 1 check.
-    if (!isLexicallyContained(resolvedDestination, resolvedRoot) || resolvedDestination === resolvedRoot) {
-        return false;
-    }
-
-    // Path-traversal guard, layer 2: realpath symlink-escape check. Catches a
-    // planted symlink (including a broken one) at the destination's leaf
-    // position that resolves outside the managed root even though the
-    // lexical check above passed.
-    if (escapesRootViaRealpath(resolvedDestination, realRoot)) {
+    const destination = guardedManagedFolderDestination(config, repoId);
+    if (destination === null) {
         return false;
     }
 

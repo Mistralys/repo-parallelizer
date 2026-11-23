@@ -637,6 +637,51 @@ test('readRepositoryInfoFile() returns invalid when a Files entry is missing a r
     assert.equal(result.status, 'invalid');
 });
 
+test('readRepositoryInfoFile() returns invalid, naming both paths, when two Files entries collide on a case-only duplicate path', () => {
+    const mainFolder = makeTempDir();
+    fs.mkdirSync(infoFolder(mainFolder), { recursive: true });
+    fs.writeFileSync(infoFile(mainFolder), JSON.stringify({
+        SchemaVersion: 1, Id: 'repo', Name: 'N', Description: 'D',
+        Files: [
+            { Path: 'a.sh', Label: 'A', Description: '', Executable: false, ListInAgents: false },
+            { Path: 'A.sh', Label: 'B', Description: '', Executable: false, ListInAgents: false },
+        ],
+    }));
+
+    const result = readRepositoryInfoFile(mainFolder);
+    assert.equal(result.status, 'invalid');
+    assert.ok(result.error);
+    assert.ok(result.error!.includes('a.sh'));
+    assert.ok(result.error!.includes('A.sh'));
+});
+
+test('readRepositoryInfoFile() does not flag two Files entries with distinct (non-colliding) paths', () => {
+    const mainFolder = makeTempDir();
+    fs.mkdirSync(infoFolder(mainFolder), { recursive: true });
+    fs.writeFileSync(infoFile(mainFolder), JSON.stringify({
+        SchemaVersion: 1, Id: 'repo', Name: 'N', Description: 'D',
+        Files: [
+            { Path: 'a.sh', Label: 'A', Description: '', Executable: false, ListInAgents: false },
+            { Path: 'b.sh', Label: 'B', Description: '', Executable: false, ListInAgents: false },
+        ],
+    }));
+
+    const result = readRepositoryInfoFile(mainFolder);
+    assert.equal(result.status, 'ok');
+});
+
+test('evaluateRepositoryInfoSync() yields invalid-file for a case-only duplicate Files path', () => {
+    const state = evaluateRepositoryInfoSync({
+        dataHash: 'h',
+        folder: {
+            status: 'invalid',
+            error: 'info.json\'s "Files" entries "a.sh" and "A.sh" collide on the same path, differing only by case.',
+        },
+        repositoryId: 'repo',
+    });
+    assert.equal(state, 'invalid-file');
+});
+
 // ─── Milestone 2: Files — diffRepositoryFiles() ───────────────────────────────
 
 test('diffRepositoryFiles(): a file present only in the folder (teammate-added) is incoming-only', () => {

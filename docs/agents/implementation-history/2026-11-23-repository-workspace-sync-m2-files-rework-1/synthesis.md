@@ -1,0 +1,61 @@
+# Synthesis — Repository Workspace Sync M2 Files - Rework 1
+
+### Outcome Summary
+
+This cycle closed the open `applyImport()` file-validation bypass left by milestone 2 of the repository workspace sync feature: imported files no longer skip the 64-file cap or the Label/Description length caps, because `RepositoryFileManager.replaceAll()` is now a guaranteed validation choke point and `applyImport()` validates the full resulting file set atomically before any mutation. Alongside this, the cycle added info.json case-duplicate rejection, a hash-stable folder-reader discriminator for new problem sources, write-pass logging, a `filterFallback` status field surfaced through three sync actions and a shared GUI notice for it, and a path-traversal guard on `createManagedClone()` matching the one `removeManagedClone()` already had — which, during implementation, surfaced and fixed a real latent bug in the root-realpath fallback for a repository's first clone. All 7 work packages completed with every pipeline stage passing (35/35 stage runs PASS), 0 blocking code-review issues and 0 security findings across the board.
+
+### Metrics
+
+- **Work packages:** 7/7 COMPLETE (WP-001 through WP-007), all pipeline stages PASS (`wps_with_all_stages_pass: 7`, 0 missing stages).
+- **Tests:** Full regression suite grew from 1629 (WP-001's first run) to 1655 passing / 2 skipped / 0 failing by WP-004's exit gate (the 2 skips are the WP-002 case-collision tests, environment-gated on a case-sensitive filesystem). `npm run test:gui` baseline: 359 → 556 passing, 0 failing. WP-004's recorded pre-change baseline (temporary worktree at merge-base): `npm test` 1166/0 fail, `npm run test:gui` 359/0 fail — post-change showed no new failures against it.
+- **Security:** 0 Critical/High/Medium findings across all 5 security-audit pipelines run (WP-001, WP-002, WP-003, WP-004, WP-007).
+- **Code review:** 0 Blocking, 0 Fix-Forward issues across all 6 code-review pipelines.
+- **Release engineering:** No version bump (WP-004, WP-006) — project convention keeps `package.json` and the CHANGELOG's `## Unreleased` heading unversioned until actual release; both WPs' CHANGELOG bullets verified present and accurate.
+- **Documentation:** 7/7 documentation pipelines PASS; three independent stale-doc fixes found and corrected during the documentation stage beyond the WP's own declared deliverables (see Code Insights).
+
+### Strategic Recommendations
+
+- **Validation choke points beat call-site checks.** WP-001's `validateRepositoryFileSet()` folds the existing per-file validator over the list rather than duplicating count/uniqueness logic, and is wired into `RepositoryFileManager.replaceAll()` itself — the one mutator, not just today's caller — so the guarantee holds for any future caller. This pattern (validate at the lowest shared mutator, not at each call site) is worth repeating whenever a new write path is added to a model layer that already has one unguarded mutator.
+- **Discriminate behavior by what actually drives it, not by a proxy that happens to coincide today.** WP-002 replaced a hash-branching rule that inferred encoding from `problem`'s presence (which only worked because every existing problem source happened to decode as latin1) with an explicit `contentKind` field. The next new problem source cannot silently pick the wrong hash branch, because the compiler forces every `RepositoryFolderFile` literal to declare it. This is a general lesson: when a derived behavior (hashing) depends on a hidden invariant (decoding method) that a side effect (validation problem) only coincidentally also implies, name the real dependency as its own field.
+- **Deferred-item notes need an owner to close them, or they silently rot.** WP-007 found and fixed a stale "Known Input Validation Gaps" bullet in `constraints.md` describing exactly the gap WP-007 itself closed; WP-005's documentation stage found a similarly stale "Remaining known gap" note in `gui-frontend.md` describing exactly what WP-005 had just fixed. Both were pre-existing from M1/M2 and would have stayed wrong indefinitely without the documentation pipeline's independent gap-scan. This is flagged in agent memory as a recurring pattern in this repo — worth a periodic sweep rather than relying solely on the WP that happens to touch the area.
+
+### Code Insights
+
+**Developer**
+- `replaceAll()` validates before `load()`/`save()`, so an invalid set never touches the filesystem at all — stronger than the literal AC-02 wording ("leaves bytes unchanged"), achieved for free since validation is pure (WP-001).
+- `contentKind` is set independently of `problem` at every `readRepositoryFilesFolder()` return point — a `'text'` file keeps `contentKind: 'text'` even when it also carries a metadata/case-collision problem, so no future caller can infer decoding from `problem`'s presence (WP-002).
+- `applyImport()` gates both `validateRepositoryFileSet()` and `replaceAll()` on the same `filesMutated` flag and validates before `RepositoryManager.update()`; `replaceAll()` still re-validates internally per WP-001's contract — accepted as harmless, deterministic double validation that keeps `replaceAll()` safe for any future caller that skips the pre-check (WP-004).
+- Extracting `removeManagedClone()`'s destination guard into `guardedManagedFolderDestination()` and applying it to `createManagedClone()` exposed a real latent bug: `resolveRootRealPath()`'s lexical fallback disagreed with the destination's realpath resolution for a repository's very first clone (root not yet existing), fixed via an `ensureRootExists` flag used only by `createManagedClone()`, verified by the Developer, QA, and Code Review independently, including a full end-to-end clone through a symlinked `storageFolder` (WP-007).
+
+**QA**
+- Flagged that `validateRepositoryFileSet()` does not check `Id` uniqueness across a set — not blocking for WP-001's stated AC scope (which covers path/count/label/description/content), but called out as a forward-looking coverage gap for WP-004's `applyImport()` work, since a future diff-resolution bug could produce duplicate `Id`s that silently mask data loss in `get()`/`update()`/`remove()` (which use `findIndex`). WP-004 did not add `Id`-uniqueness validation — remains open (see Deferred & Follow-Up Items).
+- The committed WP-002 case-collision tests are gated by a runtime case-sensitivity probe and will keep silently skipping on case-insensitive filesystems (macOS/Windows default); recommended a CI job on a case-sensitive filesystem (most Linux runners already qualify) so they are exercised somewhere other than manual QA runs.
+- WP-007's reported "real bug" discovery (the `ensureRootExists` fix) was independently reproduced by QA via a hand-built repro with a symlinked `storageFolder`, both at the internal-helper level and via a full end-to-end `createManagedClone()` call against a real git origin — confirmed as a legitimate, verified fix.
+- WP-006: Enable and Recreate test cases only cover the positive (`filterFallback: true`) path, not an explicit negative case each; Refresh covers both. Flagged as low-risk since the guard is a single shared one-line condition already exercised negatively via Refresh's test.
+
+**Security Auditor**
+- WP-001: path-traversal and reserved-segment protections in the new set validator are per-segment and position-independent; no bypass found.
+- WP-002: the new metadata/case-collision checks correctly treat incoming `info.json` content as untrusted and are scoped only to `'text'` files with no earlier problem, preserving the documented precedence order.
+- WP-004: the new write-pass logging exposes only workspace-relative paths (no filesystem-path disclosure, no log-injection vector); the 400 error path surfaces only the validator's repository-relative message.
+- WP-007: independently verified the `ensureRootExists` mkdir-then-guard ordering avoids the TOCTOU pattern that the sibling helper's own docstring in `path-guard.ts` warns about (mkdir completes before any guard check runs, not interleaved with it).
+
+**Reviewer**
+- WP-001: error-prefix in `validateRepositoryFileSet()` uses the raw (pre-normalisation) path, correctly handling the case where normalisation itself is what fails.
+- WP-007: independently traced through `resolveRootRealPath()`/`bestEffortRealpath()` in `path-guard.ts` and confirmed the `ensureRootExists` fix's mkdir-before-guard ordering, matching both the Developer's and QA's independent reproductions; confirmed the equality-rejecting contract from a prior insight is preserved verbatim in the extracted helper.
+
+**Documentation**
+- WP-002: found and corrected a doc gap where `info-sync-files-invalid-incoming` was described in four locations (two in `api-surface.md`, one each in `data-flows.md` and `rest-api.md`) as covering only binary/oversized/unreadable/invalid-path files, when `buildFilesHealthIssues()`'s actual filter also catches the two new WP-002 problem sources (metadata violations, case collisions).
+- WP-005: fixed a stale "Remaining known gap" note in `gui-frontend.md` that incorrectly claimed `RepositoryInfoSyncStatus` carries no `filterFallback` field at all, after WP-005 had already added it — rescoped the note to the actual remaining gap (the GUI layer not yet consuming it, closed by WP-006).
+- WP-007: closed a stale "Known Input Validation Gaps" bullet in `constraints.md` describing the exact pre-WP-007 gap (M1 deferred item 2) as still open, replacing it with a "Resolved:" callout while preserving the still-open logging-severity observation alongside it.
+
+### Deferred & Follow-Up Items
+
+- **Source:** WP-001 (carried forward through WP-004's scope, not picked up). **Originating agent:** QA. **Description:** `validateRepositoryFileSet()` does not detect duplicate `Id` values across a set — only the path is checked for uniqueness. Since `RepositoryFileManager.get()`/`update()`/`remove()` resolve by `findIndex(f => f.Id === fileId)`, a store containing duplicate `Id`s (e.g. from a future import-diff resolution bug) would silently mask data loss on subsequent reads/writes. **Priority/rationale:** Medium — not required by WP-001's stated AC scope, and WP-004 did not add `Id`-uniqueness validation to `applyImport()` either. **Status: deferred** — worth tracking for the next cycle that touches `applyImport()`'s diff-resolution logic or the file model's uniqueness rules.
+- **Source:** WP-002. **Originating agent:** QA. **Description:** The committed case-collision tests in `src/tests/repository-files.test.ts` are gated by a runtime case-sensitivity probe and are silently skipped on case-insensitive filesystems (macOS/Windows default dev machines). **Priority/rationale:** Low — recommend adding a CI job on a case-sensitive filesystem (most Linux runners already qualify) so these are exercised automatically rather than relying on manual QA runs like the one performed this cycle. **Status: deferred** (CI/infra follow-up, out of this plan's code scope).
+- **Source:** WP-006. **Originating agent:** QA. **Description:** Enable and Recreate test cases in `repository-info-sync-section.test.mjs` only cover the positive (`filterFallback: true`) path; an explicit negative case (field absent) exists only for Refresh. **Priority/rationale:** Low, non-blocking — the guard is a single shared one-line condition already exercised negatively via Refresh's test. **Status: deferred** — a follow-up could add the two missing negative tests for full per-call-site symmetry.
+
+### Next Steps
+
+- Consider closing the `Id`-uniqueness gap in `validateRepositoryFileSet()` (or in `applyImport()`'s diff-resolution logic) in a future cycle, since it is the one coverage gap flagged against this plan's own stated scope that neither WP-001 nor WP-004 picked up.
+- Consider adding the case-sensitive-filesystem CI job flagged by WP-002's QA pass, so the case-collision tests are exercised somewhere other than manual runs.
+- No other unfinished work remains; the Planner can treat this plan as fully delivered and start the next cycle fresh, informed by the Strategic Recommendations above (validation choke points, naming real dependencies explicitly, and periodically sweeping deferred-item notes for staleness).

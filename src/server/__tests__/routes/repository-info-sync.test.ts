@@ -8,6 +8,7 @@ import {
     SyncPreconditionError,
     RemoteOperationError,
     type RepositoryInfoSyncStatus,
+    type RepositoryInfoSyncRemoteStatus,
     type CommitPushResult,
 } from '../../../orchestration/repository-info-sync.js';
 import { MainFolderPreconditionError, MainFolderGitError } from '../../../orchestration/repository-main-folder.js';
@@ -56,6 +57,15 @@ class MockInfoSyncOrchestrator {
     calls: { method: string; args: unknown[] }[] = [];
     errors: Partial<Record<string, Error>> = {};
 
+    /**
+     * When set, merged onto the status returned by `saveSettings()`,
+     * `refresh()` and `recreateManagedClone()` — lets a test simulate the
+     * orchestrator detecting a partial-clone filter fallback, so the route
+     * handler's "pass filterFallback through unchanged" behaviour can be
+     * asserted without re-testing the orchestrator itself.
+     */
+    remoteStatusExtra: { filterFallback?: boolean } = {};
+
     private record(method: string, args: unknown[]): void {
         this.calls.push({ method, args });
         const err = this.errors[method];
@@ -70,22 +80,22 @@ class MockInfoSyncOrchestrator {
     async saveSettings(
         repositoryId: string,
         input: { enabled: boolean; discardPendingChanges?: boolean },
-    ): Promise<RepositoryInfoSyncStatus> {
+    ): Promise<RepositoryInfoSyncRemoteStatus> {
         this.record('saveSettings', [repositoryId, input]);
-        return DEFAULT_STATUS;
+        return { ...DEFAULT_STATUS, ...this.remoteStatusExtra };
     }
 
-    async refresh(repositoryId: string): Promise<RepositoryInfoSyncStatus> {
+    async refresh(repositoryId: string): Promise<RepositoryInfoSyncRemoteStatus> {
         this.record('refresh', [repositoryId]);
-        return DEFAULT_STATUS;
+        return { ...DEFAULT_STATUS, ...this.remoteStatusExtra };
     }
 
     async recreateManagedClone(
         repositoryId: string,
         options: { discardPendingChanges?: boolean },
-    ): Promise<RepositoryInfoSyncStatus> {
+    ): Promise<RepositoryInfoSyncRemoteStatus> {
         this.record('recreateManagedClone', [repositoryId, options]);
-        return DEFAULT_STATUS;
+        return { ...DEFAULT_STATUS, ...this.remoteStatusExtra };
     }
 
     async getImportPreview(
@@ -215,6 +225,15 @@ test('PUT /info-sync saves settings and returns the status shape', async () => {
     assert.deepEqual(infoSync.calls[0], { method: 'saveSettings', args: ['repo-1', { enabled: true }] });
 });
 
+test('PUT /info-sync passes filterFallback through unchanged when the orchestrator reports it', async () => {
+    const { router, infoSync } = setup();
+    infoSync.remoteStatusExtra = { filterFallback: true };
+
+    const res = await dispatch(router, 'PUT', '/api/repositories/repo-1/info-sync', { enabled: true });
+
+    assert.equal(JSON.parse(res.body).filterFallback, true);
+});
+
 test('PUT /info-sync forwards discardPendingChanges when provided', async () => {
     const { router, infoSync } = setup();
     await dispatch(router, 'PUT', '/api/repositories/repo-1/info-sync', {
@@ -342,6 +361,15 @@ test('POST /info-sync/refresh returns the status shape', async () => {
     assert.deepEqual(infoSync.calls[0], { method: 'refresh', args: ['repo-1'] });
 });
 
+test('POST /info-sync/refresh passes filterFallback through unchanged when the orchestrator reports it', async () => {
+    const { router, infoSync } = setup();
+    infoSync.remoteStatusExtra = { filterFallback: true };
+
+    const res = await dispatch(router, 'POST', '/api/repositories/repo-1/info-sync/refresh');
+
+    assert.equal(JSON.parse(res.body).filterFallback, true);
+});
+
 test('POST /info-sync/refresh returns 404 for an unknown repository', async () => {
     const { router, infoSync } = setup();
     infoSync.errors['refresh'] = new NotFoundError('Repository with ID "missing" does not exist.');
@@ -391,6 +419,15 @@ test('POST /info-sync/recreate-main-folder forwards discardPendingChanges', asyn
         method: 'recreateManagedClone',
         args: ['repo-1', { discardPendingChanges: true }],
     });
+});
+
+test('POST /info-sync/recreate-main-folder passes filterFallback through unchanged when the orchestrator reports it', async () => {
+    const { router, infoSync } = setup();
+    infoSync.remoteStatusExtra = { filterFallback: true };
+
+    const res = await dispatch(router, 'POST', '/api/repositories/repo-1/info-sync/recreate-main-folder', {});
+
+    assert.equal(JSON.parse(res.body).filterFallback, true);
 });
 
 test('POST /info-sync/recreate-main-folder rejects a non-boolean discardPendingChanges with 400', async () => {
@@ -563,6 +600,18 @@ test('POST /info-sync/import maps a rejected files selection (unknown path) from
 
     assert.equal(res.statusCode, 400);
     assert.match(JSON.parse(res.body).error, /not part of the current import diff/);
+});
+
+test('POST /info-sync/import maps an invalid resulting file set from applyImport() to 400 with the validator message (WP-004)', async () => {
+    const { router, infoSync } = setup();
+    infoSync.errors['applyImport'] = new Error('File "scripts/extra.sh": A repository can hold at most 64 files.');
+
+    const res = await dispatch(router, 'POST', '/api/repositories/repo-1/info-sync/import', {
+        files: [{ path: 'scripts/extra.sh', action: 'add' }],
+    });
+
+    assert.equal(res.statusCode, 400);
+    assert.match(JSON.parse(res.body).error, /A repository can hold at most 64 files/);
 });
 
 test('POST /info-sync/import rejects fields: ["Url"] with 400', async () => {
