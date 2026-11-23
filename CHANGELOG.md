@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.6.0 - **WIP; UNRELEASED**
+## v1.6.0 - Workspace Info & Custom Files
 
 **Projects can now define custom files that are written into every workspace.**
 Each file has a target folder, name, label, description, and text content, and stays in sync
