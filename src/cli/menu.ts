@@ -55,6 +55,8 @@ function getVersion(): string {
  *
  * Key bindings:
  *  - `s` / `S` — Run the setup wizard, then return to menu.
+ *  - `c` / `C` — Check the install (dependencies and build), repairing it
+ *                if stale, then return to menu.
  *  - `g` / `G` — Start the HTTP server and open the browser. Does **not**
  *                return to the menu — the event loop stays alive.
  *  - `d` / `D` — Generate documentation, then return to menu.
@@ -68,17 +70,23 @@ export async function showMenu(): Promise<void> {
         printHeader(`repo-parallelizer v${version}`);
         console.log();
         printOption('S', 'Setup — Run the setup wizard');
+        printOption('C', 'Check install — Update dependencies and rebuild if stale')
         printOption('G', 'Launch GUI — Start server and open browser');
         printOption('D', 'Generate Docs — Run CTX Generator');
         printOption('Q', 'Quit');
         console.log();
 
-        const key = await waitForKey(['s', 'g', 'd', 'q']);
+        const key = await waitForKey(['s', 'c', 'g', 'd', 'q']);
 
         switch (key) {
             case 's':
                 await checkAndRepairInstall();
                 await runSetup();
+                await pressAnyKeyToContinue();
+                break;
+
+            case 'c':
+                await checkAndRepairInstall();
                 await pressAnyKeyToContinue();
                 break;
 
