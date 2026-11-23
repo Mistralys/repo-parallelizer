@@ -1407,7 +1407,7 @@ Runs `ctx generate` from the tool root to produce the `.context/` documentation 
 function showMenu(): Promise<void>
 ```
 
-Runs the interactive four-option CLI menu in a `while(true)` loop until the user quits or launches the GUI.
+Runs the interactive five-option CLI menu in a `while(true)` loop until the user quits or launches the GUI.
 
 **Menu layout:**
 
@@ -1415,6 +1415,7 @@ Runs the interactive four-option CLI menu in a `while(true)` loop until the user
 repo-parallelizer vX.Y.Z
 
   [S] Setup — Run the setup wizard
+  [C] Check install — Update dependencies and rebuild if stale
   [G] Launch GUI — Start server and open browser
   [D] Generate Docs — Run CTX Generator
   [Q] Quit
@@ -1425,6 +1426,7 @@ repo-parallelizer vX.Y.Z
 | Key | Action | Loop behaviour |
 |-----|--------|----------------|
 | `s` | `await runSetup()` + `await pressAnyKeyToContinue()` | `break` → loops back to menu |
+| `c` | `await checkAndRepairInstall()` + `await pressAnyKeyToContinue()` | `break` → loops back to menu (a rebuild re-execs the process) |
 | `g` | `await launchGui()` | Does **not** return to menu — server keeps process alive |
 | `d` | `await generateDocs()` + `await pressAnyKeyToContinue()` | `break` → loops back to menu |
 | `q` | `return` | Exits `showMenu()` cleanly |
