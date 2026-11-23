@@ -1,0 +1,9 @@
+{
+    "SchemaVersion": 1,
+    "Id": "paralizer",
+    "Name": "Repo Parallelizer",
+    "Url": "https://github.com/Mistralys/repo-parallelizer.git",
+    "Description": "Library used to programmatically switch between Composer PROD and DEV dependencies to facilitate local multi-repo development by setting up symlinks in DEV mode.",
+    "Settings": {},
+    "Files": []
+}
