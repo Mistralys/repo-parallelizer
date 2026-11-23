@@ -1,39 +1,32 @@
 # Changelog
 
-## v1.7.0 - Repository Info Sync & Custom Files CLI
+## v1.6.0 - **WIP; UNRELEASED**
 
-**Repositories can now opt in to sync their name, description, and custom files through git.**
-Changes made in Paralizer or in the repository itself are detected, and the repository page
-offers an import or a commit and push. Agents and scripts can also manage a project's custom
-files from the command line, and the generated workspace AGENTS.md now explains how to use it.
+**Projects can now define custom files that are written into every workspace.**
+Each file has a target folder, name, label, description, and text content, and stays in sync
+with the project definition. Repositories can also opt in to sync their name, description, and
+custom files through git. Agents and scripts can manage custom files from the command line.
 
+- Custom Files: Projects can define files that are written into all of their workspaces.
+- Custom Files: Copies are kept in sync on save and removed from all workspaces on delete or move.
 - Repositories: Added an opt-in "Sync workspace info" setting backed by a managed clone.
 - Repositories: Repository-level custom files, such as wrapper scripts, can now be synced via git.
+- GUI: Added a Custom Files tab to the project view for adding, editing, and deleting files.
 - GUI: Repository detail page gained a Workspace Info Sync section with status, import, and push.
 - CLI: Added `paralizer custom-files` with list, show, add, update, and delete subcommands.
 - CLI: Added `paralizer help`, printing the full command documentation.
+- CLI: Added a "Check install" menu action that updates dependencies and rebuilds when stale.
+- Workspaces: Custom files can be listed in a "Custom Files" table in the generated AGENTS.md.
 - Workspaces: AGENTS.md now has a "Paralizer CLI" section with install path and help command.
 - GUI: Repositories list gained a Sync column showing whether sync is on or off.
 - GUI: Commit & push now names the pushed commit and branch in its confirmation toast.
 - GUI: Sync actions show an info notice when the remote lacks partial-clone filtering support.
 - GUI: Fix actions on health alerts no longer get stuck if the fix fails or is cancelled.
+- GUI: Project view now remembers the active tab after saving or deleting.
 - Repositories: Sync now logs files it skipped or removed.
+- Security: Custom file paths cannot escape the workspace or overwrite generated index files.
 - Security: Imported repository files are now validated like files added by hand.
 - Security: Synced files never store credentials; git error output strips credential-bearing URLs.
-
-## v1.6.0 - Project Custom Files
-
-**Projects can now define custom files that are written into every workspace.**
-Each file has a target folder, name, label, description, and text content, and stays in sync
-with the project definition. Files can optionally be listed in a dedicated section of the
-generated workspace AGENTS.md, and shell scripts are made executable automatically.
-
-- Custom Files: Projects can define files that are written into all of their workspaces.
-- Custom Files: Copies are kept in sync on save and removed from all workspaces on delete or move.
-- GUI: Added a Custom Files tab to the project view for adding, editing, and deleting files.
-- Workspaces: Custom files can be listed in a "Custom Files" table in the generated AGENTS.md.
-- GUI: Project view now remembers the active tab after saving or deleting.
-- Security: Custom file paths cannot escape the workspace or overwrite generated index files.
 
 ## v1.5.0 - Workspace Index Files
 

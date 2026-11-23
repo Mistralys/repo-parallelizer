@@ -1,6 +1,6 @@
 {
     "name": "repo-parallelizer",
-    "version": "1.7.0",
+    "version": "1.6.0",
     "description": "Parallelization of VS Code workspaces with multiple local git repositories",
     "main": "dist/index.js",
     "keywords": [
