@@ -4,7 +4,8 @@ import * as fs from 'node:fs';
 import * as os from 'os';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
-import { cloneRepository } from '../git/git-clone.js';
+import { cloneRepository, setSparseCheckout, FILTER_UNSUPPORTED_WARNING } from '../git/git-clone.js';
+import { setupFakeGit } from './test-helpers.js';
 
 // ─── Fixture setup (runs synchronously before any test) ──────────────────────
 
@@ -296,5 +297,139 @@ test('cloneRepository with bare:true produces a bare repository', async () => {
     assert.ok(
         !fs.existsSync(path.join(dest, '.git')),
         'bare clone should not have a .git subdirectory',
+    );
+});
+
+// ─── FILTER_UNSUPPORTED_WARNING ────────────────────────────────────────────────
+
+test('FILTER_UNSUPPORTED_WARNING is exported with the documented message', () => {
+    assert.equal(FILTER_UNSUPPORTED_WARNING, 'filtering not recognized by server');
+});
+
+// ─── AC 8: --filter / --no-checkout ────────────────────────────────────────────
+
+test('cloneRepository includes --filter=blob:none in the git arguments when filter option is provided', async () => {
+    const fakeGitDir = fs.mkdtempSync(path.join(tmpDir, 'fake-git-filter-'));
+    const capturedArgsFile = setupFakeGit(fakeGitDir);
+    const origPath = process.env.PATH ?? '';
+    process.env.PATH = `${fakeGitDir}:${origPath}`;
+    try {
+        await cloneRepository(originRepoPath, nextCloneDest(), { filter: 'blob:none' });
+    } finally {
+        process.env.PATH = origPath;
+    }
+    const captured = fs.existsSync(capturedArgsFile) ? fs.readFileSync(capturedArgsFile, 'utf8') : '';
+    assert.ok(
+        captured.includes('--filter=blob:none'),
+        `expected --filter=blob:none in captured args, got: "${captured}"`,
+    );
+});
+
+test('cloneRepository includes --no-checkout in the git arguments when noCheckout option is true', async () => {
+    const fakeGitDir = fs.mkdtempSync(path.join(tmpDir, 'fake-git-nocheckout-'));
+    const capturedArgsFile = setupFakeGit(fakeGitDir);
+    const origPath = process.env.PATH ?? '';
+    process.env.PATH = `${fakeGitDir}:${origPath}`;
+    try {
+        await cloneRepository(originRepoPath, nextCloneDest(), { noCheckout: true });
+    } finally {
+        process.env.PATH = origPath;
+    }
+    const captured = fs.existsSync(capturedArgsFile) ? fs.readFileSync(capturedArgsFile, 'utf8') : '';
+    assert.ok(
+        captured.includes('--no-checkout'),
+        `expected --no-checkout in captured args, got: "${captured}"`,
+    );
+});
+
+test('cloneRepository omits --filter and --no-checkout when neither option is provided', async () => {
+    const fakeGitDir = fs.mkdtempSync(path.join(tmpDir, 'fake-git-omit-'));
+    const capturedArgsFile = setupFakeGit(fakeGitDir);
+    const origPath = process.env.PATH ?? '';
+    process.env.PATH = `${fakeGitDir}:${origPath}`;
+    try {
+        await cloneRepository(originRepoPath, nextCloneDest(), {});
+    } finally {
+        process.env.PATH = origPath;
+    }
+    const captured = fs.existsSync(capturedArgsFile) ? fs.readFileSync(capturedArgsFile, 'utf8') : '';
+    assert.ok(!captured.includes('--filter'), `expected no --filter in captured args, got: "${captured}"`);
+    assert.ok(!captured.includes('--no-checkout'), `expected no --no-checkout in captured args, got: "${captured}"`);
+});
+
+test('cloneRepository with noCheckout:true produces a .git directory without a populated working tree', async () => {
+    const dest = nextCloneDest();
+    const result = await cloneRepository(originRepoPath, dest, { noCheckout: true });
+
+    assert.strictEqual(result.exitCode, 0, `clone failed: ${result.stderr}`);
+    assert.ok(fs.existsSync(path.join(dest, '.git')), 'expected .git directory to exist');
+    assert.ok(
+        !fs.existsSync(path.join(dest, 'README.md')),
+        'expected README.md to NOT be checked out with noCheckout:true',
+    );
+});
+
+test('cloneRepository with filter: blob:none produces a partial clone (partialclonefilter recorded in config)', async () => {
+    // Local-path clones ignore --filter entirely, so uploadpack.allowFilter
+    // must be enabled on the origin and the clone must use file:// so the
+    // smart-HTTP-equivalent upload-pack protocol (which honors the filter)
+    // is used instead of the local-path fast path.
+    execSync('git config uploadpack.allowFilter true', { cwd: originRepoPath });
+
+    const dest = nextCloneDest();
+    const result = await cloneRepository(`file://${originRepoPath}`, dest, { filter: 'blob:none' });
+
+    assert.strictEqual(result.exitCode, 0, `clone failed: ${result.stderr}`);
+    const config = fs.readFileSync(path.join(dest, '.git', 'config'), 'utf8');
+    assert.ok(
+        config.includes('partialclonefilter = blob:none'),
+        `expected partialclonefilter recorded in .git/config, got: ${config}`,
+    );
+});
+
+// ─── setSparseCheckout() ────────────────────────────────────────────────────────
+
+test('setSparseCheckout() rejects a path starting with "-" without invoking git', async () => {
+    const fakeGitDir = fs.mkdtempSync(path.join(tmpDir, 'fake-git-sparse-'));
+    const capturedArgsFile = setupFakeGit(fakeGitDir);
+    const origPath = process.env.PATH ?? '';
+    process.env.PATH = `${fakeGitDir}:${origPath}`;
+    let result;
+    try {
+        result = await setSparseCheckout(tmpDir, ['-malicious']);
+    } finally {
+        process.env.PATH = origPath;
+    }
+    assert.strictEqual(result.exitCode, 128);
+    assert.ok(!fs.existsSync(capturedArgsFile), 'git must not have been invoked for a "-"-prefixed path');
+});
+
+test('setSparseCheckout() restricts the working tree to the given top-level paths', async () => {
+    const sparseOriginPath = path.join(tmpDir, 'sparse-origin');
+    fs.mkdirSync(sparseOriginPath);
+    execSync('git init -b main', { cwd: sparseOriginPath });
+    execSync('git config user.email "test@test.local"', { cwd: sparseOriginPath });
+    execSync('git config user.name "Test"', { cwd: sparseOriginPath });
+    fs.mkdirSync(path.join(sparseOriginPath, 'keep'));
+    fs.mkdirSync(path.join(sparseOriginPath, 'drop'));
+    fs.writeFileSync(path.join(sparseOriginPath, 'keep', 'a.md'), 'a');
+    fs.writeFileSync(path.join(sparseOriginPath, 'drop', 'b.md'), 'b');
+    execSync('git add .', { cwd: sparseOriginPath });
+    execSync('git commit -m "initial"', { cwd: sparseOriginPath });
+
+    const dest = nextCloneDest();
+    const cloneResult = await cloneRepository(sparseOriginPath, dest);
+    assert.strictEqual(cloneResult.exitCode, 0, `clone failed: ${cloneResult.stderr}`);
+
+    const sparseResult = await setSparseCheckout(dest, ['keep']);
+    assert.strictEqual(sparseResult.exitCode, 0, `sparse-checkout failed: ${sparseResult.stderr}`);
+
+    assert.ok(
+        fs.existsSync(path.join(dest, 'keep', 'a.md')),
+        'expected keep/a.md to remain in the working tree',
+    );
+    assert.ok(
+        !fs.existsSync(path.join(dest, 'drop')),
+        'expected drop/ to be excluded from the working tree',
     );
 });

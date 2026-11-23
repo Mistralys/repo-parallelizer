@@ -3,6 +3,7 @@ import type { AppConfig } from '../config/config.types.js';
 import type { ProjectManager } from '../models/project/project.manager.js';
 import type { RepositoryManager } from '../models/repository/repository.manager.js';
 import type { ProjectWorkspace } from '../models/project/project.types.js';
+import type { Repository } from '../models/repository/repository.types.js';
 import { generateWorkspaceFile, removeWorkspaceFile, getWorkspaceFilePath } from './vscode-workspace.js';
 import {
     writeWorkspaceIndexFiles,
@@ -11,8 +12,12 @@ import {
 } from './workspace-index.js';
 import { writeCustomFiles, removeCustomFileCopy } from './custom-files.js';
 import { customFileRelativePath, type CustomFile } from '../models/project/custom-file.js';
+import { repositoryFileRelativePath } from '../models/repository/repository-file.js';
 import { getToolVersion } from '../utils/version.js';
 import { getToolRoot } from '../utils/paths.js';
+import type { RepositoryInfoSyncOrchestrator } from './repository-info-sync.js';
+import type { ErrorLogManager } from '../error-log/error-log.manager.js';
+import type { RepositoryFileManager } from '../models/repository/repository-file.manager.js';
 
 /**
  * Overrides accepted by {@link WorkspaceArtifactsOrchestrator.regenerateWorkspace}.
@@ -57,17 +62,61 @@ export interface RegenerateWorkspaceOverrides {
  * `regenerateWorkspace()` for a workspace whose folder has not yet been
  * created therefore still produces a `.code-workspace` file while silently
  * skipping the index files.
+ *
+ * **`.workspace/info.json` is a repository-level artefact, not a
+ * per-workspace one:** unlike the `.code-workspace` file and the three index
+ * files, the repository info file lives inside the repository's own managed
+ * main folder, independent of any particular project/workspace pairing. This
+ * orchestrator nonetheless triggers its sync from the same choke-point
+ * (`regenerateWorkspace()`, and directly from `regenerateForRepository()`),
+ * since every path that can mutate repository metadata already funnels
+ * through here. A thrown sync failure is caught and logged rather than
+ * propagated, so it never breaks the unrelated per-workspace artefacts.
  */
 export class WorkspaceArtifactsOrchestrator {
     constructor(
         private readonly config: AppConfig,
         private readonly projectManager: ProjectManager,
         private readonly repositoryManager: RepositoryManager,
+        private readonly repositoryInfoSync?: RepositoryInfoSyncOrchestrator,
+        private readonly errorLogManager?: ErrorLogManager,
+        /**
+         * Source of the `AGENTS.md` "Repository Files" table's `ListInAgents`
+         * rows (Milestone 2). Optional — kept at the end and defaulted so
+         * every existing construction site (most of this project's tests)
+         * keeps compiling unchanged; `repositoryFiles` in the rendered
+         * context is simply omitted (no section rendered) when not injected.
+         */
+        private readonly repositoryFileManager?: RepositoryFileManager,
     ) {}
 
     // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Runs {@link RepositoryInfoSyncOrchestrator.syncRepository} for a single
+     * repository, catching and logging any failure so a sync problem never
+     * breaks the artefact regeneration call that triggered it. A no-op when
+     * `repositoryInfoSync` was not injected.
+     */
+    private safeSync(repositoryId: string): void {
+        if (!this.repositoryInfoSync) {
+            return;
+        }
+        try {
+            this.repositoryInfoSync.syncRepository(repositoryId);
+        } catch (error) {
+            this.errorLogManager?.append({
+                Severity: 'warning',
+                Source: 'workspace-info',
+                Operation: 'sync',
+                Context: { RepositoryId: repositoryId },
+                Message: `Failed to sync repository info for "${repositoryId}": ` +
+                    `${error instanceof Error ? error.message : String(error)}`,
+            });
+        }
+    }
 
     private repoPath(projectId: string, workspaceId: string, repoId: string): string {
         return path.join(this.config.projectsFolder, projectId, workspaceId, repoId);
@@ -79,6 +128,33 @@ export class WorkspaceArtifactsOrchestrator {
 
     private guiUrl(projectId: string, workspaceId: string): string {
         return `http://localhost:${this.config.serverPort}/#/projects/${projectId}/workspaces/${workspaceId}`;
+    }
+
+    /**
+     * Builds the `AGENTS.md` "Repository Files" rows: `ListInAgents` files of
+     * sync-enabled repositories only, in `repositories`' own order (which is
+     * already `project.Repositories` order — see {@link regenerateWorkspace}).
+     * No filesystem check — sourced entirely from
+     * `RepositoryFileManager.list()`, Paralizer's own data. Returns `[]` when
+     * no `RepositoryFileManager` was injected (see the constructor doc).
+     */
+    private buildRepositoryFileRows(repositories: readonly Repository[]) {
+        if (!this.repositoryFileManager) {
+            return [];
+        }
+        const manager = this.repositoryFileManager;
+        return repositories
+            .filter((repo) => repo.InfoSync?.Enabled === true)
+            .flatMap((repo) =>
+                manager.list(repo.Id)
+                    .filter((file) => file.ListInAgents)
+                    .map((file) => ({
+                        repositoryId: repo.Id,
+                        path: repositoryFileRelativePath(file),
+                        label: file.Label,
+                        description: file.Description,
+                    })),
+            );
     }
 
     // -------------------------------------------------------------------------
@@ -157,6 +233,7 @@ export class WorkspaceArtifactsOrchestrator {
                     label: file.Label,
                     description: file.Description,
                 })),
+            repositoryFiles: this.buildRepositoryFileRows(repositories),
             guiUrl: this.guiUrl(projectId, workspaceId),
             toolVersion: getToolVersion(),
             toolRoot: getToolRoot(),
@@ -176,6 +253,13 @@ export class WorkspaceArtifactsOrchestrator {
             project.CustomFiles ?? [],
             repositories.map((repo) => repo.Id),
         );
+
+        // Repository info sync is a repository-level artefact — see the
+        // class-level doc comment. A failure here is logged and never
+        // propagates out of this call.
+        for (const repo of repositories) {
+            this.safeSync(repo.Id);
+        }
     }
 
     /**
@@ -222,8 +306,16 @@ export class WorkspaceArtifactsOrchestrator {
      *
      * Uses `ProjectManager.list()` + `getById()` to enumerate all projects;
      * projects that do not reference the repository are skipped without error.
+     *
+     * Also triggers a repository info sync for `repositoryId` once up front,
+     * independent of project membership — a repository with no project at
+     * all is still a valid repository-level sync target, since the info file
+     * is a repository-level artefact (see the class-level doc comment), not
+     * a per-project one.
      */
     regenerateForRepository(repositoryId: string): void {
+        this.safeSync(repositoryId);
+
         for (const entry of this.projectManager.list()) {
             const project = this.projectManager.getById(entry.Id);
             if (!project) continue;

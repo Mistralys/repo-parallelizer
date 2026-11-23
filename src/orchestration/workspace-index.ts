@@ -66,6 +66,24 @@ export interface WorkspaceIndexCustomFileRow {
 }
 
 /**
+ * A single repository file row rendered into the `AGENTS.md` "Repository
+ * Files" table (Milestone 2).
+ */
+export interface WorkspaceIndexRepositoryFileRow {
+    /** Repository ID — also the folder name under the workspace folder. */
+    repositoryId: string;
+
+    /** Path relative to the repository's `.workspace/files/` folder, using `/` separators. */
+    path: string;
+
+    /** Human-readable label. */
+    label: string;
+
+    /** Description. Empty string when none is set. */
+    description: string;
+}
+
+/**
  * Everything the renderers need to produce the three index files for one
  * workspace. Callers (the artefact choke-point in `workspace-artifacts.ts`)
  * are responsible for resolving this context from the data layer; this
@@ -101,6 +119,15 @@ export interface WorkspaceIndexContext {
      * `AGENTS.md` "Custom Files" section only; omitted when empty or absent.
      */
     customFiles?: WorkspaceIndexCustomFileRow[];
+
+    /**
+     * Repository files flagged `ListInAgents`, from sync-enabled repositories
+     * only, in `project.Repositories` order (Milestone 2). Rendered into the
+     * `AGENTS.md` "Repository Files" section only; omitted when empty or
+     * absent. Built with no filesystem check against the workspace clone —
+     * see {@link renderRepositoryFilesSection}.
+     */
+    repositoryFiles?: WorkspaceIndexRepositoryFileRow[];
 
     /** Absolute URL to this workspace's GUI page (built from `config.serverPort`). */
     guiUrl: string;
@@ -220,8 +247,10 @@ export function renderWorkspaceReadme(ctx: WorkspaceIndexContext): string {
  */
 export function renderWorkspaceAgents(ctx: WorkspaceIndexContext): string {
     const customSection = renderCustomFilesSection(ctx.customFiles ?? []);
+    const repositoryFilesSection = renderRepositoryFilesSection(ctx.repositoryFiles ?? []);
     const sections = [renderIndexBody(ctx)];
     if (customSection !== '') sections.push(customSection);
+    if (repositoryFilesSection !== '') sections.push(repositoryFilesSection);
     sections.push(renderCliSection(ctx), AGENT_DIRECTIVES_BLOCK);
     return sections.join('\n\n');
 }
@@ -229,19 +258,27 @@ export function renderWorkspaceAgents(ctx: WorkspaceIndexContext): string {
 /**
  * Renders the "Paralizer CLI" section for `AGENTS.md`: where the installation
  * lives and how to reach the built-in help. Deliberately does not document
- * the commands — `paralizer help` is the single source of truth.
+ * the commands — `paralizer help` is the single source of truth. Gains a
+ * `paralizer repo-files` pointer line only when `ctx.repositoryFiles` has at
+ * least one row, mirroring the existing `custom-files` pointer.
  */
 function renderCliSection(ctx: WorkspaceIndexContext): string {
     const root = ctx.toolRoot.replace(/`/g, '');
     const projectId = ctx.projectId.replace(/`/g, '');
-    return [
+    const lines = [
         '## Paralizer CLI',
         '',
         `This workspace is managed by Paralizer, installed at \`${root}\`. Project \`${projectId}\` is the project ID to pass to its commands.`,
         '',
         '- Run `paralizer help` for the available commands (if `paralizer` is not on the PATH: `node "' + root + '/dist/index.js" help`).',
         '- To change a custom file for all workspaces of this project, use `paralizer custom-files` — never edit the copy in this workspace, it is overwritten on every sync.',
-    ].join('\n');
+    ];
+    if ((ctx.repositoryFiles ?? []).length > 0) {
+        lines.push(
+            '- To change a repository file, use `paralizer repo-files` — never edit the copy in this workspace, it is overwritten on the next sync.',
+        );
+    }
+    return lines.join('\n');
 }
 
 /**
@@ -264,6 +301,51 @@ function renderCustomFilesSection(rows: WorkspaceIndexCustomFileRow[]): string {
     for (const row of rows) {
         const filePath = escapeMarkdownCell(row.path).replace(/`/g, '');
         lines.push(`| \`${filePath}\` | ${escapeMarkdownCell(row.label)} | ${escapeMarkdownCell(row.description)} |`);
+    }
+    return lines.join('\n');
+}
+
+/**
+ * Name of a repository's sync folder relative to the workspace root, mirrored
+ * from `repository-info.ts`'s `REPOSITORY_INFO_FOLDER_NAME` /
+ * `repository-files.ts`'s `REPOSITORY_FILES_FOLDER_NAME`. Not imported from
+ * either module — this renderer stays a pure, dependency-free function of its
+ * `WorkspaceIndexRepositoryFileRow[]` input, like the rest of this file.
+ */
+const WORKSPACE_RELATIVE_REPOSITORY_FILES_PATH = '.workspace/files';
+
+/**
+ * Renders the "Repository Files" table for `AGENTS.md` (Milestone 2), or an
+ * empty string when no repository file is flagged for listing.
+ *
+ * Built from Paralizer's own data (see `WorkspaceIndexContext.repositoryFiles`)
+ * with no filesystem check against the workspace clone, so the intro
+ * explicitly notes that a listed file may not be present locally yet if the
+ * repository has not been pulled since it was added. Every user-supplied cell
+ * goes through {@link escapeMarkdownCell}; the path is additionally wrapped in
+ * a code span and rendered workspace-relative (`{repoId}/.workspace/files/{path}`),
+ * so it can be followed directly from the workspace root.
+ */
+function renderRepositoryFilesSection(rows: WorkspaceIndexRepositoryFileRow[]): string {
+    if (rows.length === 0) return '';
+
+    const lines: string[] = [
+        '## Repository Files',
+        '',
+        'Per-repository files managed by Paralizer, delivered through git alongside each repository ' +
+        '(commit & push, then pull in this workspace) — a file listed here may not be present locally yet ' +
+        'if the repository has not been pulled since it was added or changed. A file marked executable can ' +
+        'be run directly, e.g. `sh <path>`, from the workspace root. Edit them only via `paralizer repo-files` ' +
+        'or the Paralizer GUI — never in this folder, they are overwritten on the next sync.',
+        '',
+        '| Repository | Path | Label | Description |',
+        '|---|---|---|---|',
+    ];
+    for (const row of rows) {
+        const repositoryId = escapeMarkdownCell(row.repositoryId);
+        const filePath = `${row.repositoryId}/${WORKSPACE_RELATIVE_REPOSITORY_FILES_PATH}/${row.path}`;
+        const escapedPath = escapeMarkdownCell(filePath).replace(/`/g, '');
+        lines.push(`| ${repositoryId} | \`${escapedPath}\` | ${escapeMarkdownCell(row.label)} | ${escapeMarkdownCell(row.description)} |`);
     }
     return lines.join('\n');
 }

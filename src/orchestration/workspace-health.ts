@@ -3,19 +3,11 @@ import * as path from 'node:path';
 import { getWorkspaceFilePath } from './vscode-workspace.js';
 import { checkIndexFileStatus } from './workspace-index.js';
 import type { ErrorLogManager } from '../error-log/error-log.manager.js';
+import type { HealthIssue, HealthReport } from './health.types.js';
 
-export interface WorkspaceHealthIssue {
-    type: string;
-    severity: 'error' | 'warning';
-    message: string;
-    fixAction: string;
-    repositoryId?: string;
-}
+export type WorkspaceHealthIssue = HealthIssue;
 
-export interface WorkspaceHealthReport {
-    healthy: boolean;
-    issues: WorkspaceHealthIssue[];
-}
+export type WorkspaceHealthReport = HealthReport;
 
 /**
  * Performs a side-effect-free health check on a workspace.

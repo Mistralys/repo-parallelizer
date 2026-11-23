@@ -2,12 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execSync } from 'node:child_process';
 import { initializeStorage } from '../storage/json-storage.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
+import { RepositoryFileManager } from '../models/repository/repository-file.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceArtifactsOrchestrator } from '../orchestration/workspace-artifacts.js';
+import { RepositoryInfoSyncOrchestrator } from '../orchestration/repository-info-sync.js';
+import { resolveMainFolderPath } from '../orchestration/repository-main-folder.js';
 import {
     runCustomFilesCommand,
+    createDefaultCustomFilesDeps,
     EXIT_OK,
     EXIT_ERROR,
     EXIT_SYNC_FAILED,
@@ -185,4 +190,139 @@ test('a sync failure after a successful save exits with the dedicated code', asy
     assert.strictEqual(code, EXIT_SYNC_FAILED);
     assert.match(h.stderr(), /disk full/);
     assert.strictEqual(h.deps.projectManager.listCustomFiles('demo').length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// createDefaultCustomFilesDeps(): repository info sync wiring (WP-008, AC-18)
+// ---------------------------------------------------------------------------
+
+function git(args: string, cwd: string): string {
+    return execSync(`git ${args}`, { cwd }).toString().trim();
+}
+
+/** Creates a minimal local "origin" git repository with one commit on `main`. */
+function buildInfoSyncOrigin(base: string): string {
+    const originPath = path.join(base, 'origin');
+    fs.mkdirSync(originPath, { recursive: true });
+    git('init -q -b main', originPath);
+    git('config user.email "origin@test.local"', originPath);
+    git('config user.name "Origin Author"', originPath);
+    fs.writeFileSync(path.join(originPath, 'README.md'), 'hello');
+    git('add .', originPath);
+    git('commit -q -m initial', originPath);
+    // Plain (non-bare) working copy checked out on "main" — updateInstead
+    // lets its own working tree follow a push, matching the fixture pattern
+    // used by repository-info-sync.test.ts.
+    git('config receive.denyCurrentBranch updateInstead', originPath);
+    return originPath;
+}
+
+/**
+ * Runs `fn` with `config.json` written to a fresh temp directory and
+ * `PARALIZER_CONFIG_PATH` pointed at it, so `createDefaultCustomFilesDeps()`
+ * (which calls the real `loadConfig()`) reads this isolated config instead
+ * of any real `config.json` on disk. Always restores/clears the env var.
+ */
+async function withDefaultDepsConfig<T>(
+    base: string,
+    fn: (config: ReturnType<typeof makeTestConfig>, configPath: string) => Promise<T>,
+): Promise<T> {
+    const config = makeTestConfig(base);
+    const configPath = path.join(base, 'config.json');
+    fs.mkdirSync(config.projectsFolder, { recursive: true });
+    fs.mkdirSync(config.storageFolder, { recursive: true });
+    fs.writeFileSync(configPath, `${JSON.stringify(config, null, 4)}\n`, 'utf8');
+
+    const previous = process.env['PARALIZER_CONFIG_PATH'];
+    process.env['PARALIZER_CONFIG_PATH'] = configPath;
+    try {
+        return await fn(config, configPath);
+    } finally {
+        if (previous === undefined) {
+            delete process.env['PARALIZER_CONFIG_PATH'];
+        } else {
+            process.env['PARALIZER_CONFIG_PATH'] = previous;
+        }
+    }
+}
+
+test('createDefaultCustomFilesDeps(): the constructed WorkspaceArtifactsOrchestrator also syncs repository info on regeneration', async () => {
+    const base = makeTempDir();
+    await withDefaultDepsConfig(base, async (config) => {
+        initializeStorage(config);
+
+        // Set up the repository and enable info sync using a throwaway
+        // orchestrator pointed at the same storage/projects folders that
+        // createDefaultCustomFilesDeps() will read from.
+        const setupRepoManager = new RepositoryManager(config);
+        const setupRepositoryFileManager = new RepositoryFileManager(config, setupRepoManager);
+        const setupProjectManager = new ProjectManager(config, setupRepoManager);
+        const setupSync = new RepositoryInfoSyncOrchestrator(config, setupRepoManager, setupRepositoryFileManager);
+
+        const originPath = buildInfoSyncOrigin(base);
+        const repoId = 'info-sync-repo';
+        setupRepoManager.add({ id: repoId, url: `file://${originPath}`, name: 'Original Name' });
+        await setupSync.saveSettings(repoId, { enabled: true });
+
+        setupProjectManager.create('Info Sync Project', [repoId], undefined, 'info-sync-project');
+
+        // Change the repository's Name so the next sync has something new
+        // to write — this is what proves the CLI's own orchestrator (built
+        // fresh inside createDefaultCustomFilesDeps(), not the setup one
+        // above) actually performs the sync.
+        setupRepoManager.update(repoId, { name: 'Updated Via CLI Wiring' });
+
+        const deps = createDefaultCustomFilesDeps();
+        deps.artifacts.regenerateProject('info-sync-project');
+
+        const mainFolder = resolveMainFolderPath(config, repoId);
+        const written = JSON.parse(
+            fs.readFileSync(path.join(mainFolder, '.workspace', 'info.json'), 'utf8'),
+        ) as Record<string, unknown>;
+        assert.strictEqual(written['Name'], 'Updated Via CLI Wiring');
+    });
+});
+
+test('createDefaultCustomFilesDeps(): regeneration leaves a repository\'s already-committed files untouched (no accidental delete pass)', async () => {
+    const base = makeTempDir();
+    await withDefaultDepsConfig(base, async (config) => {
+        initializeStorage(config);
+
+        const setupRepoManager = new RepositoryManager(config);
+        const setupRepositoryFileManager = new RepositoryFileManager(config, setupRepoManager);
+        const setupProjectManager = new ProjectManager(config, setupRepoManager);
+        const setupSync = new RepositoryInfoSyncOrchestrator(config, setupRepoManager, setupRepositoryFileManager);
+
+        const originPath = buildInfoSyncOrigin(base);
+        const repoId = 'info-sync-files-repo';
+        setupRepoManager.add({ id: repoId, url: `file://${originPath}`, name: 'Original Name' });
+        await setupSync.saveSettings(repoId, { enabled: true });
+
+        setupRepositoryFileManager.add(repoId, {
+            Directory: '',
+            FileName: 'run.sh',
+            Label: 'Run',
+            Description: 'Runs things.',
+            Content: '#!/bin/sh\necho hi\n',
+            Executable: true,
+            ListInAgents: false,
+        });
+        setupSync.syncRepository(repoId);
+
+        setupProjectManager.create('Info Sync Files Project', [repoId], undefined, 'info-sync-files-project');
+
+        const mainFolder = resolveMainFolderPath(config, repoId);
+        const filePath = path.join(mainFolder, '.workspace', 'files', 'run.sh');
+        assert.ok(fs.existsSync(filePath), 'the setup sync should have committed the file to the managed clone');
+
+        // The CLI's own orchestrator (built fresh inside
+        // createDefaultCustomFilesDeps(), not the setup one above) must be
+        // wired with a RepositoryFileManager on the same storage folder, so
+        // its regeneration run computes the same non-empty file set rather
+        // than an empty one that would trigger the delete pass.
+        const deps = createDefaultCustomFilesDeps();
+        deps.artifacts.regenerateProject('info-sync-files-project');
+
+        assert.ok(fs.existsSync(filePath), 'the already-committed file must not have been deleted by the regeneration run');
+    });
 });

@@ -14,6 +14,10 @@
  * 4. Per matching project: `api.workspaces.list(pid)` — list workspaces.
  * 5. Per workspace: `api.status.get(pid, wid)` — extract the single repo's status.
  * 6. `api.config.webserverUrl.get()` — fetch webserver URL once.
+ * 7. `api.repositories.infoSync.status(id)` — fetched once here (separately
+ *    from the info-sync section's own internal load) purely to decide
+ *    whether the Files section (Milestone 2) starts read-only. A failed
+ *    fetch is treated the same as "disabled", the safer default.
  *
  * Steps 2–5 use `Promise.allSettled` so individual project/workspace fetch
  * failures do not abort the entire load. Failed fetches are silently skipped;
@@ -39,6 +43,8 @@ import { buildRepoStatusCells, updateRepoStatusCells } from '../components/repo-
 import { normaliseRepo, normaliseProject, normaliseWorkspace } from '../utils/normalise.js';
 import { STABLE_WS_ID, APP_NAME_SHORT } from '../utils/constants.js';
 import { clearElement } from '../utils/dom.js';
+import { buildRepositoryInfoSyncSection } from './repository-info-sync-section.js';
+import { buildRepositoryFilesSection } from './repository-files-section.js';
 
 // ---------------------------------------------------------------------------
 // Router reference — injected from app.js via setRouter()
@@ -87,6 +93,7 @@ function buildCredentialSection(repoId, storedCredentialId) {
 
     const heading = document.createElement('h2');
     heading.className   = 'section-title';
+    heading.tabIndex    = -1;
     heading.textContent = 'Credential';
     section.appendChild(heading);
 
@@ -606,26 +613,44 @@ function updateStatusTable(tbody, repoId, freshRows, onBranchCellClick) {
  * Render the Repository Detail view.
  *
  * Fetches repository metadata, all projects, workspaces, and Git status in
- * parallel. Then renders the header and status table. The Refresh button
- * re-fetches all status data and updates existing rows in-place.
+ * parallel. Then renders the header, the Credential section, the Workspace
+ * info sync section, the Files section (Milestone 2), and the status table.
+ * The Refresh button re-fetches all status data and updates existing rows
+ * in-place.
  *
  * @param {HTMLElement}     container - The `#app` DOM element provided by the router.
  * @param {{ id: string }}  params    - Route parameters.
+ * @returns {function(): void} Cleanup function — tears down the info-sync
+ *   and files sections (cancels their in-flight work flags). The router
+ *   stores and calls this before rendering the next view.
  */
 export function renderRepositoryDetail(container, params) {
     const repoId = params.id;
 
+    // Cleanup for the info-sync and files sections, populated once they
+    // mount. Returned synchronously below so the router can call it even if
+    // the view is navigated away from before the initial data fetch resolves.
+    let infoSyncCleanup = null;
+    let filesSectionCleanup = null;
+
     // Show loading state immediately.
     showLoading(container, 'Loading repository overview…');
 
-    // Fetch repository metadata, all projects, and webserver URL in parallel.
+    // Fetch repository metadata, all projects, webserver URL, and the
+    // repository's info-sync status (for the Files section's initial
+    // read-only decision — see the "Data loading flow" doc comment above)
+    // in parallel.
     Promise.all([
         api.repositories.get(repoId),
         api.projects.list(),
         api.config.webserverUrl.get().catch(() => null),
-    ]).then(async ([rawRepo, allProjects, webserverUrlConfig]) => {
+        api.repositories.infoSync.status(repoId).catch(() => null),
+    ]).then(async ([rawRepo, allProjects, webserverUrlConfig, infoSyncStatus]) => {
         if (!container.isConnected) return;
 
+        // Mutated in place (not reassigned) by applyRepositoryUpdate() below,
+        // so every closure that reads repo.name / repo.description continues
+        // to see the latest values without needing to be rebuilt itself.
         const repo = normaliseRepo(rawRepo);
         document.title = `${repo.name || repoId} - ${APP_NAME_SHORT}`;
 
@@ -678,7 +703,7 @@ export function renderRepositoryDetail(container, params) {
         // Build DOM.
         clearElement(container);
 
-        const { header, refreshBtn, lastRefreshedEl } = buildHeader(repo);
+        let { header, refreshBtn, lastRefreshedEl } = buildHeader(repo);
         let { section: statusSection, tbody } = buildStatusSection(
             currentRows, repoId, repo.name || repoId, webserverUrl, onBranchCellClick,
         );
@@ -790,17 +815,91 @@ export function renderRepositoryDetail(container, params) {
             }
         }
 
-        refreshBtn.addEventListener('click', doRefresh);
-
-        // Set initial timestamp from persisted value if available, otherwise show "Never".
-        lastRefreshedEl.textContent = repo.LastRefreshedAt
-            ? `Last refreshed: ${formatRelativeTime(new Date(repo.LastRefreshedAt))}`
-            : 'Last refreshed: Never';
+        /** Wires the Refresh button and sets the "Last refreshed" label on the current `header`. */
+        function bindHeader() {
+            refreshBtn.addEventListener('click', doRefresh);
+            lastRefreshedEl.textContent = repo.LastRefreshedAt
+                ? `Last refreshed: ${formatRelativeTime(new Date(repo.LastRefreshedAt))}`
+                : 'Last refreshed: Never';
+        }
+        bindHeader();
 
         const credentialSection = buildCredentialSection(repoId, repo.credentialId);
 
+        /**
+         * Applies an updated repository (currently only reachable from a
+         * successful info-sync import, which can change Name/Description) to
+         * the already-rendered header, without a full navigation.
+         *
+         * `repo` itself is mutated in place rather than reassigned, so every
+         * other closure that reads `repo.name` / `repo.description` (the
+         * workspace table's row builders, `doRefresh`) keeps seeing current
+         * values without needing to be rebuilt.
+         *
+         * @param {Object} updatedRepo - Raw repository response (PascalCase).
+         */
+        function applyRepositoryUpdate(updatedRepo) {
+            Object.assign(repo, normaliseRepo(updatedRepo));
+            document.title = `${repo.name || repoId} - ${APP_NAME_SHORT}`;
+
+            const rebuilt = buildHeader(repo);
+            container.replaceChild(rebuilt.header, header);
+            header = rebuilt.header;
+            refreshBtn = rebuilt.refreshBtn;
+            lastRefreshedEl = rebuilt.lastRefreshedEl;
+            bindHeader();
+        }
+
+        /**
+         * Scrolls to and focuses the Credential section's heading — the
+         * `configure-credential` fix action in the info-sync section's health
+         * alert (plan step 16(d)).
+         */
+        function onConfigureCredential() {
+            const heading = credentialSection.querySelector('.section-title');
+            if (!heading) return;
+            // Not implemented by jsdom (the test environment); real browsers
+            // always provide it.
+            if (typeof heading.scrollIntoView === 'function') {
+                heading.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+            heading.focus();
+        }
+
+        let infoSyncSection = buildRepositoryInfoSyncSection(repo, {
+            onRepositoryChanged: applyRepositoryUpdate,
+            onConfigureCredential,
+        });
+        infoSyncCleanup = infoSyncSection.cleanup;
+
+        /**
+         * Rebuilds the info-sync section from scratch — its own internal
+         * `load()` re-fetches status as a side effect of construction — so
+         * that the Files section's `onChanged` callback can "ask the info
+         * sync section to refresh its status" (plan step 8) without this WP
+         * needing to add a public refresh method to that M1-owned module.
+         */
+        function refreshInfoSyncSection() {
+            if (!container.isConnected) return;
+            const previous = infoSyncSection;
+            infoSyncSection = buildRepositoryInfoSyncSection(repo, {
+                onRepositoryChanged: applyRepositoryUpdate,
+                onConfigureCredential,
+            });
+            infoSyncCleanup = infoSyncSection.cleanup;
+            container.replaceChild(infoSyncSection.element, previous.element);
+            previous.cleanup();
+        }
+
+        const filesSection = buildRepositoryFilesSection(repo, infoSyncStatus, {
+            onChanged: refreshInfoSyncSection,
+        });
+        filesSectionCleanup = filesSection.cleanup;
+
         container.appendChild(header);
         container.appendChild(credentialSection);
+        container.appendChild(infoSyncSection.element);
+        container.appendChild(filesSection.element);
         container.appendChild(statusSection);
 
         // Show a warning toast if some fetches failed (partial data).
@@ -840,4 +939,11 @@ export function renderRepositoryDetail(container, params) {
             container.appendChild(errorEl);
         }
     });
+
+    // Returned synchronously (the data load above is async) so the router
+    // can call it regardless of whether the info-sync section ever mounted.
+    return () => {
+        if (infoSyncCleanup) infoSyncCleanup();
+        if (filesSectionCleanup) filesSectionCleanup();
+    };
 }

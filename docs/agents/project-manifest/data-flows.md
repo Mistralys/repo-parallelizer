@@ -175,8 +175,17 @@ toast UI.
   ├── repositories.json              # { Repositories: [...], SchemaVersion: 1 }
   ├── projects-index.json            # { Projects: [{ Id, Name }], SchemaVersion: 1 }
   ├── error-log.json                 # { Entries: [...], SchemaVersion: 1 }
-  └── projects/
-       └── {project-id}.json         # Full ProjectData (workspaces embedded)
+  ├── projects/
+  │    └── {project-id}.json         # Full ProjectData (workspaces embedded)
+  ├── repository-files/              # Created lazily, one store per repository with ≥1 custom file
+  │    └── {repo-id}.json            # { Files: [...], SchemaVersion: 1 } — RepositoryFileManager, Milestone 2
+  └── repositories/                  # Created lazily, only for repositories with InfoSync.Enabled
+       └── {repo-id}/                # Managed main folder — a partial, sparse-checkout clone
+            └── .workspace/
+                 ├── info.json       # RepositoryInfoFile — see §16
+                 ├── README.md       # Generated, not data — see §16
+                 └── files/          # Committed-to-git file tree — see §17 (Milestone 2)
+                      └── {path}     # One entry per RepositoryFile.Path, write-only-if-changed
 
 {projectsFolder}/
   └── {project-id}/
@@ -195,6 +204,10 @@ toast UI.
 ```
 
 > **Generated index files:** as of `WorkspaceOrchestrator.createWorkspace()`'s migration onto `WorkspaceArtifactsOrchestrator` (the production-reachable path via `POST .../setup`), the three files above are written alongside the `.code-workspace` file for every workspace whose folder exists on disk. They are absent for a workspace that has not yet been set up. See the Orchestration section of `api-surface.md` (`workspace-index.ts`, `workspace-artifacts.ts`) for the rendering/merge/write-guard contract, and §12 below for how their status feeds into the health check.
+
+> **Repository custom files store:** `{storageFolder}/repository-files/{repo-id}.json` is `RepositoryFileManager`'s per-repository data document (Milestone 2) — the repository-level counterpart to project custom files, which live inline in `projects/{project-id}.json` (`CustomFiles`) instead of their own per-aggregate file. Keeping it as a separate per-repository JSON document, rather than embedding `Files` in `repositories.json`, keeps the frequently re-read `repositories.json` small. `repositories.json` itself is never read or written by this manager. See `api-surface.md`'s `repository-file.ts` / `repository-file.manager.ts` entries for the model and CRUD contract.
+
+> **Managed main folder:** unlike every path above, `{storageFolder}/repositories/{repo-id}/` is **not** a per-workspace artefact — it is a single, repository-level clone shared across every project/workspace that contains the repository (or none at all). It exists only while `Repository.InfoSync.Enabled` is `true` for that repository, and is removed when sync is disabled, the managed clone is recreated, or the repository itself is deleted (§15). See §16 for its full lifecycle.
 
 ---
 
@@ -281,6 +294,10 @@ The CLI (`paralizer custom-files add|update|delete`) runs the same chain in-proc
 
 The folder-must-exist rule applies: an uninitialised workspace receives nothing until it is set up (setup regenerates artefacts). Local edits to a copy are overwritten; removal is driven by the stored definition, not a separate ledger of written files.
 
+> **Repository info sync shares the same choke-point.** Every `regenerateWorkspace()`/`regenerateProject()`/`regenerateForRepository()` call above also runs `RepositoryInfoSyncOrchestrator.syncRepository()` for each resolved repository (`regenerateForRepository()` runs it once up front, independent of project membership) — so a custom-files add/update/delete, a project/workspace/repository edit, or a manual regenerate all keep `.workspace/info.json` current as a side effect, with no separate trigger wiring. See §16.
+
+> **Repository Files listing in `AGENTS.md` (Milestone 2):** `writeWorkspaceIndexFiles()` now also renders a "Repository Files" table into `AGENTS.md` from `WorkspaceIndexContext.repositoryFiles` — `ListInAgents` files from sync-enabled repositories only, built with no filesystem check (so it stays accurate regardless of whether a teammate has pulled the file yet). `WorkspaceArtifactsOrchestrator` takes an optional, last constructor parameter (`repositoryFileManager?: RepositoryFileManager`) to populate this; as of WP-011, `src/cli/custom-files.ts` and the new `src/cli/repo-files.ts` both pass one through their `createDefault*Deps()` factories, so the section renders for both CLI paths' regeneration calls. `src/server/index.ts` still does not pass one, so the section does not yet render for GUI-triggered regeneration. See `api-surface.md`'s `workspace-index.ts`/`WorkspaceArtifactsOrchestrator` entries.
+
 ## 14. Credential Success Log Entry and Stale Badge Suppression
 
 When a workspace setup or repository addition completes a **credential-based clone** (i.e. a credential was resolved and injected), both `WorkspaceOrchestrator.createWorkspace()` and `RepositoryOrchestrator.addRepositoryToProject()` write a success entry to the error log. The `Operation` value differs by call site:
@@ -355,15 +372,180 @@ User → DELETE /api/repositories/:id
        │             │       # logged and swallowed — does not propagate, does not erase the audit entry above
        │             affectedProjectIds.push(projectId)      # recorded by the caller loop
        ├→ repositoryManager.remove(repositoryId)              # drop the global store entry
+       ├→ if repositoryInfoSync injected:
+       │      try: repositoryInfoSync.removeManagedFolder(repositoryId)   # plain filesystem removal, no settings mutation
+       │          managedFolderRemoved = true
+       │      catch: errorLogManager?.append({ Severity: 'warning', Source: 'workspace-info',
+       │          Operation: 'delete-repository-global', Context: { RepositoryId } })
+       │          # logged and swallowed — the repository record is already gone, so this is best-effort cleanup
+       ├→ if repositoryFileManager injected (Milestone 2):
+       │      try: repositoryFileManager.removeStore(repositoryId)   # deletes repository-files/{repoId}.json; no-op if absent
+       │          fileStoreRemoved = true
+       │      catch: errorLogManager?.append({ Severity: 'warning', Source: 'workspace-info',
+       │          Operation: 'delete-repository-global', Context: { RepositoryId } })
+       │          # same best-effort shape as the managed-folder step above
        └→ errorLogManager?.append({ Severity: 'audit', Source: 'repository-audit',
               Operation: 'delete-repository-global', Context: { RepositoryId },
+              Message: '... Managed main folder removed.' if managedFolderRemoved else '' +
+                       ' Repository file store removed.' if fileStoreRemoved else '',
               Details: JSON.stringify(affectedProjectIds) })
               # emitted ONLY after repositoryManager.remove() succeeds
   └→ sendNoContent 204
 ```
 
-**Completion boundaries:** the association check and the two path-traversal guard layers all throw *before* any mutation, so a guard failure or an unlisted repository leaves no `unlink-repository` entry behind (an incomplete project never gets a misleading "success" audit line). Once `projectManager.removeRepository()` succeeds, the audited event is complete and its `unlink-repository` entry is emitted **unconditionally** — a subsequent failure in `workspaceArtifacts.regenerateProject()` (best-effort downstream reconciliation) is caught and logged as a separate `Severity: 'warning'` entry instead of propagating, so it can no longer erase the audit record of a deletion that genuinely happened. If `repositoryManager.remove()` throws after the per-project cascade has already completed, `deleteRepositoryGlobally()` propagates the throw and writes no `delete-repository-global` summary entry — but the `unlink-repository` entries already emitted during the cascade are **not rolled back**, since they describe cascade steps that genuinely did complete.
+**Completion boundaries:** the association check and the two path-traversal guard layers all throw *before* any mutation, so a guard failure or an unlisted repository leaves no `unlink-repository` entry behind (an incomplete project never gets a misleading "success" audit line). Once `projectManager.removeRepository()` succeeds, the audited event is complete and its `unlink-repository` entry is emitted **unconditionally** — a subsequent failure in `workspaceArtifacts.regenerateProject()` (best-effort downstream reconciliation) is caught and logged as a separate `Severity: 'warning'` entry instead of propagating, so it can no longer erase the audit record of a deletion that genuinely happened. If `repositoryManager.remove()` throws after the per-project cascade has already completed, `deleteRepositoryGlobally()` propagates the throw and writes no `delete-repository-global` summary entry — but the `unlink-repository` entries already emitted during the cascade are **not rolled back**, since they describe cascade steps that genuinely did complete. The managed-main-folder removal step and the (Milestone 2) file-store removal step both run only after `repositoryManager.remove()` has succeeded; a removal failure in either is logged as a warning (`Source: 'workspace-info'`) rather than thrown, and the summary audit entry's message gains the corresponding trailing sentence only when that step actually succeeded (or, for the file-store step, did not throw — `removeStore()` no-ops silently when no store exists, so the sentence does not strictly imply a store was present).
 
 **Two distinct roots, same pattern as the write-guard chain (§13's sibling note in `api-surface.md`):** the lexical check compares against `path.resolve(projectsFolder)`; the realpath check compares against a separately-resolved `resolveRootRealPath(projectsFolder)`. Both checks and the shared symlink-resolution logic live in `src/utils/path-guard.ts` (see `api-surface.md`), the same module consumed by `workspace-index.ts`'s write-guard chain (§13).
 
 **Now shared with the project-level unlink route:** the project-level "unlink one repository from one project" route (`DELETE /api/projects/:id/repositories/:repoId`) now delegates directly to this same `removeRepositoryFromProject()` method (see `rest-api.md`'s **Repository Unlink Delegation** note), so it produces the identical clone-folder deletion, data-record update, and `unlink-repository` audit entry described above — it is no longer a separate, unaudited mutation path.
+
+---
+
+## 16. Repository Info Sync
+
+Opt-in, per-repository sync of `.workspace/info.json` (Id/Name/Description, plus an informational `Url`) into a Paralizer-managed main folder — a partial, sparse-checkout clone at `{storageFolder}/repositories/{repoId}/` (§11). See `api-surface.md` for `repository-info.ts`/`repository-main-folder.ts`/`repository-info-sync.ts` signatures, `rest-api.md` for the route table, and `constraints.md`'s "Repository Info Sync" section for the content/security rules.
+
+**Trigger (filesystem-only, synchronous):**
+
+```
+WorkspaceArtifactsOrchestrator.regenerateWorkspace()/regenerateProject()/regenerateForRepository()
+  └→ safeSync(repositoryId):  # per resolved repository; regenerateForRepository() also runs it
+                               # once up front, independent of project membership
+       try: repositoryInfoSync.syncRepository(repositoryId)
+              ├→ resolve main folder; absent/not-a-git-repo → state 'disabled' or 'main-folder-unavailable', no-op
+              ├→ readRepositoryInfoFile() + hashRepositoryInfoPayload() + evaluateRepositoryInfoSync()
+              ├→ on 'write-required': guard chain → mkdir .workspace/ → write info.json only if bytes differ
+              │      → recordInfoSyncWrite(hash)  # RepositoryManager.InfoSync.LastWrittenHash/LastSyncedAt
+              ├→ independently, write .workspace/README.md only if bytes differ — EXCEPT in states
+              │      'disabled' | 'main-folder-unavailable' | 'id-mismatch' | 'incoming' | 'conflict'
+              └→ on 'in-sync' with a stale/missing baseline: record the hash only, no write
+       catch: errorLogManager?.append({ Severity: 'warning', Source: 'workspace-info', Operation: 'sync' })
+              # logged and swallowed — a sync failure never makes artefact regeneration throw
+```
+
+**Decision table** (`evaluateRepositoryInfoSync()`, driven by a hash of `[Id, Name, Description]` only — `Url` never participates):
+
+| Folder file | Condition | State | Action |
+|---|---|---|---|
+| absent | — | `write-required` | write (create) — also when a previously-synced file was deleted upstream |
+| invalid | — | `invalid-file` | none; health issue |
+| unsupported-schema | — | `unsupported-schema` | none; health issue |
+| ok | `Id` ≠ repository `Id` | `id-mismatch` | none; health issue |
+| ok | folder hash = data hash | `in-sync` | none (record hash as baseline if it differs) |
+| ok | no baseline (`LastWrittenHash` unset), folder ≠ data | `conflict` | none; import dialog |
+| ok | folder = baseline, data ≠ baseline | `write-required` | write silently (local edit) |
+| ok | folder ≠ baseline, data = baseline | `incoming` | none; "Import available" |
+| ok | folder ≠ baseline, data ≠ baseline | `conflict` | none; import dialog |
+
+A missing `.workspace/info.json` is never an error — it is simply created on the next sync (including the first sync after enabling), and a file deleted upstream after an earlier sync is recreated silently. Both show up only as a pending change, never a health issue.
+
+**User-triggered flows (async, git-backed), all serialised per repository by an in-process mutex (`Map<repoId, Promise>`):**
+
+```
+PUT /api/repositories/:id/info-sync { enabled, discardPendingChanges? }   # saveSettings()
+  ├→ enabling:  createManagedClone()  →  guard the destination (same two-layer path-traversal
+  │              check removeManagedClone() already applies — throws MainFolderPreconditionError
+  │              on refusal, before touching git)  →  partial clone (--filter=blob:none) + cone
+  │              sparse-checkout of .workspace/ on the default branch  →  persist { InfoSync: { Enabled: true } }
+  │              → syncRepository()  # may land state 'conflict' if the clone already carries a
+  │                                   # differing file — see AC-17b
+  │              → clone's own filterFallback (server rejected the partial-clone filter) merged
+  │                 onto the returned status as filterFallback: true (omitted otherwise)
+  └→ disabling: refuse 409 (PendingChangesError) unless discardPendingChanges  →  removeManagedClone()
+                → persist InfoSync removed (LastWrittenHash does not survive the flip either way)
+                → no clone/fetch performed; filterFallback never set
+
+POST /api/repositories/:id/info-sync/refresh                              # refresh()
+  └→ re-set origin to the current authenticated URL → fetchBranch() → mergeFastForward() when
+     behind and nothing pending (on-demand only — no background polling, Open Question 4)
+     → fetchResult.stderr containing FILTER_UNSUPPORTED_WARNING merged onto the returned status
+       as filterFallback: true (omitted otherwise)
+     → syncRepository()
+
+POST /api/repositories/:id/info-sync/recreate-main-folder { discardPendingChanges? }  # recreateManagedClone()
+  └→ refuse 409 (PendingChangesError) unless discardPendingChanges → removeManagedClone()
+     → persist InfoSync with LastWrittenHash cleared (preserving LastSyncedAt) → createManagedClone()
+     → clone's own filterFallback merged onto the returned status as filterFallback: true (omitted
+       otherwise) → syncRepository()
+
+GET  /api/repositories/:id/info-sync/import                               # getImportPreview()
+  └→ requires state 'incoming'|'conflict', file status 'ok', Id match → diffRepositoryInfo() (fields)
+     + diffRepositoryFiles() joined with problem data (files, Milestone 2) → { state, fields, files }
+     (route forwards the preview object as-is, `files` included — `repository-info-import-modal.js`
+     renders a Files row per diff, see gui-frontend.md)
+
+POST /api/repositories/:id/info-sync/import { fields?, files? }           # applyImport()
+  └→ resolves every files: { path, action }[] selection via resolveFileImportAction() up front (both
+     parsed/forwarded by the route, Milestone 2) → builds the resulting file set
+     → filesMutated = true iff a resolved action is add/overwrite/delete (WP-004)
+          ├→ filesMutated: validateRepositoryFileSet() on the resulting set BEFORE any mutation — a
+          │     rejection (400, naming the offending file even when it is an untouched stored one)
+          │     leaves fields/store/clone/hash all untouched; its normalised output replaces the set
+          └→ apply selected fields via RepositoryManager.update() (Url/CredentialId/managed clone
+               untouched) — runs only after file validation
+     → filesMutated: RepositoryFileManager.replaceAll() with the (validated) resulting set — skipped
+       entirely for a field-only import (no validation, no store rewrite), even against a legacy
+       stored file that breaks a rule
+     → rewrite file, writeRepositoryFiles() (logFilesWriteOutcome(), operation 'import' — WP-004),
+       recordInfoSyncWrite()  → state becomes 'in-sync' (or 'write-required' if some local values
+       were kept) → audit log entry (fields + per-file actions) → route calls
+       regenerateForRepository() best-effort
+
+POST /api/repositories/:id/info-sync/commit-push { message? }             # commitAndPush()
+  └→ refuse 409 (SyncPreconditionError) when folder unavailable, remote mismatched, not on
+     default branch, or state is incoming/conflict/invalid-file/id-mismatch/unsupported-schema
+     → re-set origin → fetchBranch() → ff-only merge if behind and the info folder wasn't touched
+       upstream (else refuse 409 — "import first")
+     → stagePaths(infoFolderPathspec()) → getStagedPaths() guard (refuse 409 if anything staged lies
+       outside .workspace/, Milestone 2) → getIndexModes()/setIndexExecutable() fix up the executable
+       bit on staged repository files (Milestone 2 — commits the staged index, not a pathspec, so the
+       chmod survives under core.filemode=false) → commitStaged(…, INFO_COMMIT_AUTHOR_NAME/EMAIL)
+     → pushHead() → re-fetch → audit log entry
+```
+
+**Health issues** (`fixAction` in parentheses), surfaced only on the repository detail page and the repositories-list Sync badge — never in the per-workspace health report (Open Question 10): `info-sync-main-folder-missing` (`recreate-main-folder`), `info-sync-remote-mismatch` (`recreate-main-folder`), `info-sync-wrong-branch` (`recreate-main-folder`), `info-sync-behind-remote` (`refresh`), `info-sync-pending-changes` (`commit-push`), `info-sync-import-available` (`import`), `info-sync-conflict` (`import`), `info-sync-invalid-file` (`none`), `info-sync-id-mismatch` (`none`), `info-sync-unsupported-schema` (`none`), `info-sync-credential-missing` (`configure-credential`). Milestone 2 adds three files-folder issues, raised by a read-only sweep (`buildFilesHealthIssues()`) that runs only when the main folder is usable: `info-sync-files-unsafe-entry` (`none`) for a symlink or other non-regular entry under `files/`, `info-sync-files-invalid-incoming` (`import`) for an incoming file carrying any problem (binary, oversized, unreadable, invalid/reserved path segment, metadata violation, or case collision), and `info-sync-files-write-skipped` (`none`) when the shared write-target guard refuses one of the repository's own files.
+
+**Credential handling:** `resolveRemoteAuth()` (`src/orchestration/remote-auth.ts`) resolves and injects the credential; the managed clone's `origin` keeps the token-injected URL (matching every other workspace clone), re-set before every fetch/push so credential rotation takes effect. See `constraints.md`'s "Repository Info Sync" section for the full set of content/security rules (no credentials in the file, write-only-if-changed, pathspec-limited commit, default-branch-only push, the 502 convention).
+
+**Clone destination guard:** `createManagedClone()` and `removeManagedClone()` share one private guard (`guardedManagedFolderDestination()` in `repository-main-folder.ts`) — the same two-layer path-traversal check (strict-descendant lexical containment, then a realpath symlink-escape check) as `removeRepositoryFromProject()`'s clone-folder deletion guard (§15). `createManagedClone()` throws `MainFolderPreconditionError` on refusal before ever reaching git (mapped to `SyncPreconditionError`/409 the same way an empty-remote precondition is); `removeManagedClone()` keeps its pre-existing `false`-on-refusal, no-filesystem-touch behaviour. `createManagedClone()` additionally has the guard create the managed root directory first (it is about to create a folder under it anyway) — without that, the very first clone ever performed against a fresh `{storageFolder}/repositories/` would be falsely rejected whenever an ancestor directory sits behind a symlink (e.g. macOS's `/tmp` → `/private/tmp`), since `resolveRootRealPath()` cannot realpath a root that does not exist yet.
+
+---
+
+## 17. Repository Files
+
+Repository-level custom files (Milestone 2) — small per-repository files such as wrapper scripts — flow through the same managed main folder as Repository Info Sync (§16), but as their own committed-to-git subtree (`.workspace/files/`) rather than a single synced JSON file. Paralizer is the authority for *content and metadata*; delivery to a teammate's workspace clone happens only through git, never by Paralizer copying bytes into a workspace folder (contrast with project custom files, §13b).
+
+**Mutation (REST `/api/repositories/:id/files*` or `paralizer repo-files`, both behind the same per-repository lock as §16's routes):**
+
+```
+POST/PUT/DELETE .../files[/:fileId]  or  paralizer repo-files add|update|delete
+  └→ assertSyncEnabled(repoId)?                       # 409 / exit 1 if sync is off — no write, no CLI commit ever
+  └→ validateRepositoryFileInput()                    # same rules as project custom files, plus the file-count cap
+  └→ RepositoryFileManager.add()/update()/remove()    # repository-files/{repoId}.json — content + metadata, no commit
+  └→ workspaceArtifacts.regenerateForRepository(repoId)   # best-effort; logs a warning on failure, does not fail the call
+       └→ repositoryInfoSync.syncRepository(repoId)        # same trigger §16 uses for info.json
+            ├→ evaluateRepositoryInfoSync() now hashes [Id, Name, Description, Files] (§16's table, Files tuple appended
+            │      only when non-empty — hash-compatible with Milestone 1 when Files is empty)
+            └→ on 'write-required': writeRepositoryFiles(mainFolder, fileManager.list())   # repository-files.ts
+                 ├→ write content + POSIX executable bit for every file whose content or mode differs from disk
+                 ├→ delete every regular file under files/ no longer in the data set (set-difference pass)
+                 ├→ symlinks / other non-regular entries under files/ are never deleted — reported via skipped
+                 │     → surfaces later as an `info-sync-files-unsafe-entry` health issue (rest-api.md)
+                 └→ logFilesWriteOutcome(repoId, result, 'sync-files')   # WP-004, repository-info-sync.ts
+                       ├→ result.skipped non-empty → warning log entry (Source: 'workspace-info')
+                       ├→ result.removed non-empty → info log entry (Source: 'workspace-info')
+                       └→ both empty, or no errorLogManager injected → no entry appended
+       └→ regenerateWorkspace()/regenerateProject() also rebuild every workspace's AGENTS.md, whose "Repository
+            Files" table lists this repository's ListInAgents files from Paralizer's own data — no filesystem
+            check against the workspace clone (see api-surface.md's `workspace-index.ts` note)
+```
+
+**Publish (Commit & Push, same action and route as §16 — `POST .../commit-push`):** commits whatever is staged under `.workspace/` (`info.json`, `README.md`, and `files/` together, via `commitStaged()`), fixing up the staged index's executable bit first (`getIndexModes()`/`setIndexExecutable()`) so a wrapper script's `+x` bit survives the commit under `core.filemode=false`, then pushes to the repository's default branch. There is no separate "publish files" action — one Commit & Push covers every pending change under `.workspace/`.
+
+**Delivery (git only, outside Paralizer's control):** a teammate's workspace clone receives the new/changed/removed file only on its own next `git pull` of the repository. Paralizer never writes into a workspace clone's working tree for this feature — the managed main folder (`{storageFolder}/repositories/{repo-id}/`, §11) and every workspace clone are independent checkouts of the same remote. A project-level script in that workspace can then invoke the file (e.g. `sh .workspace/files/vendor-install.sh`) once it exists on disk; Paralizer's role ends at commit & push.
+
+**Import (incoming/conflict states, `GET`/`POST .../info-sync/import`):** `getImportPreview()` now also returns a `files` diff (`diffRepositoryFiles()` joined with problem-file data) alongside the `fields` diff §16 already describes; `applyImport()` accepts a parallel `files: { path, action }[]` selection resolved via `resolveFileImportAction()` and applied through `RepositoryFileManager.replaceAll()` before the merged info.json rewrite. Both the preview's `files` and the apply call's `files` selections are parsed/forwarded by the REST route; `repository-info-import-modal.js` always sends the `{ fields, files }` selections shape (sending `files: []` when the preview had no file diffs) and confirms via `showConfirm()` before submitting any `discard` action — see `gui-frontend.md`'s **Repository Info Import Modal Component** section.
+
+**Atomic validation and no-op write skip (WP-004):** `applyImport()` only calls `RepositoryFileManager.replaceAll()`, and only validates the resulting file set via `validateRepositoryFileSet()`, when at least one resolved file action is `add`/`overwrite`/`delete` (`filesMutated`) — see §16's apply flow above. That validation runs before the `Name`/`Description` field update, so a rejected set (400, naming the offending file — even one already stored and untouched by this import) leaves the repository's fields, file store, managed clone and recorded hash all unchanged. A field-only import (every file action `keep`/`discard`) never validates the stored set and never rewrites the file store, so a legacy row that already breaks a rule cannot block an unrelated field import.
+
+**Deletion cascade (§15):** `RepositoryOrchestrator.deleteRepositoryGlobally()` now also best-effort removes the repository's file store (`RepositoryFileManager.removeStore()`, `repository-files/{repoId}.json`) alongside the managed main folder, independently of whether sync was ever enabled — see §15's cascade diagram above.

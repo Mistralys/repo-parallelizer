@@ -36,6 +36,8 @@
 | Git | >= 2.28 | All repository operations — spawned via `child_process.spawn()` with `shell: false` |
 | npm | >= 9 | Package management |
 
+> **Repository info sync's managed main folder** uses partial clone (`--filter=blob:none`) and cone-mode sparse checkout (`sparse-checkout set --cone`) — both need git >= 2.25, already covered by the >= 2.28 minimum above. No new runtime npm dependency was added for this feature (`node:crypto`, used for the info-file hash, is built in).
+
 ## GUI Browser Requirements
 
 The web GUI uses `color-mix()` (CSS Color Level 5) in `gui/public/css/styles.css` for focus-state background blending. The following minimum browser versions are required:

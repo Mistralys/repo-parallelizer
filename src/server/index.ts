@@ -2,11 +2,13 @@ import * as http from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AppConfig } from '../config/config.types.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
+import { RepositoryFileManager } from '../models/repository/repository-file.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import { WorkspaceOrchestrator } from '../orchestration/workspace-orchestrator.js';
 import { WorkspaceArtifactsOrchestrator } from '../orchestration/workspace-artifacts.js';
 import { RepositoryOrchestrator } from '../orchestration/repository-orchestrator.js';
+import { RepositoryInfoSyncOrchestrator } from '../orchestration/repository-info-sync.js';
 import { BranchOrchestrator } from '../orchestration/branch-orchestrator.js';
 import { ErrorLogManager } from '../error-log/error-log.manager.js';
 import { PollingManager } from './pollingManager.js';
@@ -14,6 +16,8 @@ import { Router } from './router.js';
 import { serveStatic } from './staticServer.js';
 import { sendError } from './requestUtils.js';
 import { registerRepositoryRoutes } from './routes/repositories.js';
+import { registerRepositoryInfoSyncRoutes } from './routes/repository-info-sync.js';
+import { registerRepositoryFileRoutes } from './routes/repository-files.js';
 import { registerProjectRoutes } from './routes/projects.js';
 import { registerWorkspaceRoutes } from './routes/workspaces.js';
 import { registerBranchRoutes } from './routes/branches.js';
@@ -93,13 +97,22 @@ export function startServer(config: ServerConfig): Promise<void> {
     // Instantiate managers & orchestrators
     // ------------------------------------------------------------------
     const repoManager = new RepositoryManager(config.appConfig);
+    const repositoryFileManager = new RepositoryFileManager(config.appConfig, repoManager);
     const projectManager = new ProjectManager(config.appConfig, repoManager);
     const workspaceManager = new WorkspaceManager(projectManager);
     const errorLogManager = new ErrorLogManager(config.appConfig);
+    const repositoryInfoSyncOrchestrator = new RepositoryInfoSyncOrchestrator(
+        config.appConfig,
+        repoManager,
+        repositoryFileManager,
+        errorLogManager,
+    );
     const workspaceArtifactsOrchestrator = new WorkspaceArtifactsOrchestrator(
         config.appConfig,
         projectManager,
         repoManager,
+        repositoryInfoSyncOrchestrator,
+        errorLogManager,
     );
     const workspaceOrchestrator = new WorkspaceOrchestrator(
         config.appConfig,
@@ -115,6 +128,8 @@ export function startServer(config: ServerConfig): Promise<void> {
         repoManager,
         workspaceArtifactsOrchestrator,
         errorLogManager,
+        repositoryInfoSyncOrchestrator,
+        repositoryFileManager,
     );
     const branchOrchestrator = new BranchOrchestrator(
         config.appConfig,
@@ -148,6 +163,8 @@ export function startServer(config: ServerConfig): Promise<void> {
     const router = new Router();
     router.setErrorLogManager(errorLogManager);
     registerRepositoryRoutes(router, repoManager, config.appConfig, workspaceArtifactsOrchestrator, repositoryOrchestrator, errorLogManager);
+    registerRepositoryInfoSyncRoutes(router, repoManager, repositoryInfoSyncOrchestrator, workspaceArtifactsOrchestrator, errorLogManager);
+    registerRepositoryFileRoutes(router, repoManager, repositoryFileManager, repositoryInfoSyncOrchestrator, workspaceArtifactsOrchestrator, errorLogManager);
     registerProjectRoutes(router, projectManager, workspaceArtifactsOrchestrator, repositoryOrchestrator, errorLogManager);
     registerWorkspaceRoutes(router, workspaceManager, workspaceOrchestrator, config.appConfig, projectManager, errorLogManager, workspaceArtifactsOrchestrator);
     registerBranchRoutes(router, branchOrchestrator, workspaceManager);

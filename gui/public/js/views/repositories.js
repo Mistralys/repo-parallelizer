@@ -32,7 +32,7 @@ function buildTableHead() {
     const thead = document.createElement('thead');
     const tr    = document.createElement('tr');
 
-    ['ID', 'Name', 'URL', 'Description', 'Credential', 'Actions'].forEach((label) => {
+    ['ID', 'Name', 'URL', 'Description', 'Credential', 'Sync', 'Actions'].forEach((label) => {
         const th = document.createElement('th');
         th.textContent = label;
         tr.appendChild(th);
@@ -60,6 +60,32 @@ const DESCRIPTION_TRUNCATE_LENGTH = 60;
 function truncateDescription(text) {
     if (text.length <= DESCRIPTION_TRUNCATE_LENGTH) return text;
     return `${text.slice(0, DESCRIPTION_TRUNCATE_LENGTH).trimEnd()}…`;
+}
+
+/**
+ * Build the "Sync" column badge for a repository row, reflecting whether
+ * workspace info sync is enabled. Sourced entirely from the already-
+ * normalised `repo.infoSync?.enabled` field (see `utils/normalise.js`), so
+ * rendering the list never issues a per-row `info-sync` status request.
+ *
+ * State is never conveyed by colour alone: the badge carries the visible
+ * text "On"/"Off" in addition to its `aria-label`.
+ *
+ * @param {boolean} enabled
+ * @returns {HTMLSpanElement}
+ */
+function buildSyncBadge(enabled) {
+    const span = document.createElement('span');
+    if (enabled) {
+        span.className   = 'sync-badge sync-badge--on';
+        span.textContent = 'On';
+        span.setAttribute('aria-label', 'Workspace info sync enabled');
+    } else {
+        span.className   = 'sync-badge sync-badge--off';
+        span.textContent = 'Off';
+        span.setAttribute('aria-label', 'Workspace info sync off');
+    }
+    return span;
 }
 
 /**
@@ -124,6 +150,12 @@ function buildRepoRow(repo, onChanged) {
     credentialCell.className = 'repo-credential-cell';
     credentialCell.appendChild(buildCredentialBadge(repo.credentialId));
     tr.appendChild(credentialCell);
+
+    // ---- Sync status cell ----
+    const syncCell = document.createElement('td');
+    syncCell.className = 'repo-sync-cell';
+    syncCell.appendChild(buildSyncBadge(Boolean(repo.infoSync?.enabled)));
+    tr.appendChild(syncCell);
 
     // ---- Actions cell ----
     const actionsCell = document.createElement('td');

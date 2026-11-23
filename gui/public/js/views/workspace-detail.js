@@ -80,6 +80,7 @@ import { api }               from '../api.js';
 import { showToast }         from '../components/toast.js';
 import { showConfirm }       from '../components/confirm-dialog.js';
 import { buildRepoStatusCells, makeBranchTrigger, updateRepoStatusCells } from '../components/repo-status-cells.js';
+import { buildHealthAlert } from '../components/health-alert.js';
 import { createFormField, validateRequired, WORKSPACE_ID_PATTERN } from '../components/form-helpers.js';
 import { normaliseProject, normaliseWorkspace } from '../utils/normalise.js';
 import { STABLE_WS_ID, APP_NAME_SHORT, CREDENTIAL_MISSING_SENTINEL } from '../utils/constants.js';
@@ -843,6 +844,8 @@ function buildRefreshToolbar() {
  * Build a health alert section element from a workspace health report.
  * Returns `null` when the workspace is healthy (no issues to display).
  *
+ * Thin wrapper around the shared {@link buildHealthAlert} component: maps
+ * this view's three known fix actions onto the component's action registry.
  * Fix-action buttons are wired via the `callbacks` argument so the
  * caller can inject async handlers that match the surrounding view's
  * closure state (project/workspace IDs, toast helper, etc.).
@@ -853,7 +856,7 @@ function buildRefreshToolbar() {
  * access to IDs held in the view's closure, triggers a loading indicator, or
  * awaits a network request. Use direct navigation (e.g., `window.location.hash`)
  * when the action is self-contained and requires no view-level coordination.
- * The `configure-credential` branch is an example of the latter: it navigates
+ * The `configure-credential` entry is an example of the latter: it navigates
  * directly to `#/repositories` without involving `callbacks` at all.
  *
  * @param {{ healthy: boolean, issues: Array<{ type: string, severity: string, message: string, fixAction: string, repositoryId?: string }> }|null} healthReport
@@ -864,92 +867,24 @@ function buildRefreshToolbar() {
  * @returns {HTMLElement|null}
  */
 function buildHealthAlertSection(healthReport, callbacks) {
-    if (
-        !healthReport ||
-        healthReport.healthy ||
-        !Array.isArray(healthReport.issues) ||
-        healthReport.issues.length === 0
-    ) {
-        return null;
-    }
-
-    const section = document.createElement('div');
-    section.className = 'health-alert';
-
-    const title = document.createElement('div');
-    title.className = 'health-alert-title';
-    title.textContent = 'Workspace health issues detected';
-    section.appendChild(title);
-
-    for (const issue of healthReport.issues) {
-        const row = document.createElement('div');
-        row.className = 'health-alert-issue';
-
-        const msg = document.createElement('span');
-        msg.className = 'health-alert-issue__message';
-        msg.textContent = issue.message;
-        row.appendChild(msg);
-
-        if (issue.fixAction === 'regenerate-workspace-file') {
-            const actionWrap = document.createElement('span');
-            actionWrap.className = 'health-alert-issue__action';
-
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'btn btn-secondary btn-sm';
-            btn.textContent = 'Regenerate Files';
-            btn.addEventListener('click', async () => {
-                btn.disabled = true;
-                btn.textContent = 'Regenerating\u2026';
-                try {
-                    await callbacks.onRegenerate();
-                } finally {
-                    btn.disabled = false;
-                    btn.textContent = 'Regenerate Files';
-                }
-            });
-            actionWrap.appendChild(btn);
-            row.appendChild(actionWrap);
-        } else if (issue.fixAction === 'setup-workspace') {
-            const actionWrap = document.createElement('span');
-            actionWrap.className = 'health-alert-issue__action';
-
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'btn btn-secondary btn-sm';
-            btn.textContent = 'Fix Setup';
-            btn.addEventListener('click', async () => {
-                btn.disabled = true;
-                btn.textContent = 'Setting up\u2026';
-                try {
-                    await callbacks.onSetup();
-                } finally {
-                    btn.disabled = false;
-                    btn.textContent = 'Fix Setup';
-                }
-            });
-            actionWrap.appendChild(btn);
-            row.appendChild(actionWrap);
-        } else if (issue.fixAction === 'configure-credential') {
-            const actionWrap = document.createElement('span');
-            actionWrap.className = 'health-alert-issue__action';
-
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'btn btn-secondary btn-sm';
-            btn.textContent = 'Configure';
-            btn.addEventListener('click', () => {
-                window.location.hash = '#/repositories';
-            });
-            actionWrap.appendChild(btn);
-            row.appendChild(actionWrap);
-        }
-        // Issues with an unknown fixAction render the message row without a button.
-
-        section.appendChild(row);
-    }
-
-    return section;
+    return buildHealthAlert(healthReport, {
+        actions: {
+            'regenerate-workspace-file': {
+                label: 'Regenerate Files',
+                loadingLabel: 'Regenerating\u2026',
+                onClick: () => callbacks.onRegenerate(),
+            },
+            'setup-workspace': {
+                label: 'Fix Setup',
+                loadingLabel: 'Setting up\u2026',
+                onClick: () => callbacks.onSetup(),
+            },
+            'configure-credential': {
+                label: 'Configure',
+                onClick: () => { window.location.hash = '#/repositories'; },
+            },
+        },
+    });
 }
 
 // ---------------------------------------------------------------------------

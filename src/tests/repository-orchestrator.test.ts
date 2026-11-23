@@ -12,6 +12,8 @@ import { WorkspaceOrchestrator } from '../orchestration/workspace-orchestrator.j
 import { WorkspaceArtifactsOrchestrator } from '../orchestration/workspace-artifacts.js';
 import { RepositoryOrchestrator } from '../orchestration/repository-orchestrator.js';
 import { ErrorLogManager } from '../error-log/error-log.manager.js';
+import type { RepositoryInfoSyncOrchestrator } from '../orchestration/repository-info-sync.js';
+import type { RepositoryFileManager } from '../models/repository/repository-file.manager.js';
 import type { AppConfig } from '../config/config.types.js';
 import { setupFakeGit, makeTestConfig } from './test-helpers.js';
 
@@ -43,6 +45,40 @@ buildRepo(origin2RepoPath);
 
 function makeTempDir(): string {
     return fs.mkdtempSync(path.join(tmpRoot, 'test-'));
+}
+
+/**
+ * A fake `RepositoryInfoSyncOrchestrator` stand-in exposing only
+ * `removeManagedFolder()` — the only method the deletion cascade calls.
+ * Cast through `unknown` since the real class carries private fields that
+ * make it nominally (not just structurally) typed.
+ */
+function makeFakeInfoSync(impl: (repositoryId: string) => void): { calls: string[]; sync: RepositoryInfoSyncOrchestrator } {
+    const calls: string[] = [];
+    const fake = {
+        removeManagedFolder(repositoryId: string): void {
+            calls.push(repositoryId);
+            impl(repositoryId);
+        },
+    };
+    return { calls, sync: fake as unknown as RepositoryInfoSyncOrchestrator };
+}
+
+/**
+ * A fake `RepositoryFileManager` stand-in exposing only `removeStore()` —
+ * the only method the deletion cascade calls (Milestone 2). Cast through
+ * `unknown` since the real class carries private fields that make it
+ * nominally (not just structurally) typed.
+ */
+function makeFakeFileManager(impl: (repositoryId: string) => void): { calls: string[]; fileManager: RepositoryFileManager } {
+    const calls: string[] = [];
+    const fake = {
+        removeStore(repositoryId: string): void {
+            calls.push(repositoryId);
+            impl(repositoryId);
+        },
+    };
+    return { calls, fileManager: fake as unknown as RepositoryFileManager };
 }
 
 
@@ -779,6 +815,124 @@ test('deleteRepositoryGlobally does not throw and writes no audit entries when e
     const { orchestrator, repoManager } = await makeFixture(makeTempDir());
     assert.doesNotThrow(() => orchestrator.deleteRepositoryGlobally('repo-b'));
     assert.strictEqual(repoManager.getById('repo-b'), undefined, 'repo-b should still be removed from global store');
+});
+
+// ─── deleteRepositoryGlobally: managed main folder removal (WP-008, AC-13) ────
+
+test('deleteRepositoryGlobally calls removeManagedFolder() after the repository record is removed, and notes it in the summary message', async () => {
+    const { config, projectManager, repoManager } = await makeFixture(makeTempDir());
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const errorLogManager = new ErrorLogManager(config);
+    const seenAsRemovedAtCallTime: boolean[] = [];
+    const { calls, sync } = makeFakeInfoSync((repositoryId) => {
+        seenAsRemovedAtCallTime.push(repoManager.getById(repositoryId) === undefined);
+    });
+    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts, errorLogManager, sync);
+
+    orchestrator.deleteRepositoryGlobally('repo-b');
+
+    assert.deepStrictEqual(calls, ['repo-b']);
+    assert.deepStrictEqual(seenAsRemovedAtCallTime, [true], 'the repository record must already be gone when removeManagedFolder() runs');
+
+    const { entries } = errorLogManager.list({ source: 'repository-audit' });
+    const summaryEntry = entries.find((e) => e.Operation === 'delete-repository-global');
+    assert.ok(summaryEntry?.Message.includes('Managed main folder removed'));
+});
+
+test('deleteRepositoryGlobally logs a warning (not a throw) when removeManagedFolder() fails, and omits the removal note from the summary', async () => {
+    const { config, projectManager, repoManager } = await makeFixture(makeTempDir());
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const errorLogManager = new ErrorLogManager(config);
+    const { sync } = makeFakeInfoSync(() => { throw new Error('managed folder removal failed'); });
+    const orchestrator = new RepositoryOrchestrator(config, projectManager, repoManager, workspaceArtifacts, errorLogManager, sync);
+
+    assert.doesNotThrow(() => orchestrator.deleteRepositoryGlobally('repo-b'));
+
+    const { entries } = errorLogManager.list({});
+    const warningEntry = entries.find((e) => e.Source === 'workspace-info' && e.Operation === 'delete-repository-global');
+    assert.ok(warningEntry, 'expected a workspace-info warning entry for the failed removal');
+    assert.strictEqual(warningEntry.Severity, 'warning');
+    assert.ok(warningEntry.Message.includes('managed folder removal failed'));
+
+    const summaryEntry = entries.find((e) => e.Source === 'repository-audit' && e.Operation === 'delete-repository-global');
+    assert.ok(summaryEntry, 'the summary entry should still be written');
+    assert.ok(!summaryEntry.Message.includes('Managed main folder removed'), 'the removal note must be omitted on failure');
+});
+
+test('deleteRepositoryGlobally does not call removeManagedFolder() when no sync orchestrator is injected', async () => {
+    const { orchestrator, repoManager } = await makeFixture(makeTempDir());
+    assert.doesNotThrow(() => orchestrator.deleteRepositoryGlobally('repo-b'));
+    assert.strictEqual(repoManager.getById('repo-b'), undefined);
+});
+
+// ─── deleteRepositoryGlobally: file store removal (WP-010) ───────────────────
+
+test('deleteRepositoryGlobally calls removeStore() after the repository record is removed, and notes it in the summary message', async () => {
+    const { config, projectManager, repoManager } = await makeFixture(makeTempDir());
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const errorLogManager = new ErrorLogManager(config);
+    const seenAsRemovedAtCallTime: boolean[] = [];
+    const { calls, fileManager } = makeFakeFileManager((repositoryId) => {
+        seenAsRemovedAtCallTime.push(repoManager.getById(repositoryId) === undefined);
+    });
+    const orchestrator = new RepositoryOrchestrator(
+        config, projectManager, repoManager, workspaceArtifacts, errorLogManager, undefined, fileManager,
+    );
+
+    orchestrator.deleteRepositoryGlobally('repo-b');
+
+    assert.deepStrictEqual(calls, ['repo-b']);
+    assert.deepStrictEqual(seenAsRemovedAtCallTime, [true], 'the repository record must already be gone when removeStore() runs');
+
+    const { entries } = errorLogManager.list({ source: 'repository-audit' });
+    const summaryEntry = entries.find((e) => e.Operation === 'delete-repository-global');
+    assert.ok(summaryEntry?.Message.includes('Repository file store removed'));
+});
+
+test('deleteRepositoryGlobally logs a warning (not a throw) when removeStore() fails, and omits the removal note from the summary', async () => {
+    const { config, projectManager, repoManager } = await makeFixture(makeTempDir());
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const errorLogManager = new ErrorLogManager(config);
+    const { fileManager } = makeFakeFileManager(() => { throw new Error('file store removal failed'); });
+    const orchestrator = new RepositoryOrchestrator(
+        config, projectManager, repoManager, workspaceArtifacts, errorLogManager, undefined, fileManager,
+    );
+
+    assert.doesNotThrow(() => orchestrator.deleteRepositoryGlobally('repo-b'));
+
+    const { entries } = errorLogManager.list({});
+    const warningEntry = entries.find((e) => e.Source === 'workspace-info' && e.Operation === 'delete-repository-global');
+    assert.ok(warningEntry, 'expected a workspace-info warning entry for the failed removal');
+    assert.strictEqual(warningEntry.Severity, 'warning');
+    assert.ok(warningEntry.Message.includes('file store removal failed'));
+
+    const summaryEntry = entries.find((e) => e.Source === 'repository-audit' && e.Operation === 'delete-repository-global');
+    assert.ok(summaryEntry, 'the summary entry should still be written');
+    assert.ok(!summaryEntry.Message.includes('Repository file store removed'), 'the removal note must be omitted on failure');
+});
+
+test('deleteRepositoryGlobally does not call removeStore() when no file manager is injected, and existing 4/5/6-argument constructions behave unchanged', async () => {
+    const { orchestrator, repoManager } = await makeFixture(makeTempDir());
+    assert.doesNotThrow(() => orchestrator.deleteRepositoryGlobally('repo-b'));
+    assert.strictEqual(repoManager.getById('repo-b'), undefined);
+});
+
+test('deleteRepositoryGlobally notes both the managed folder and the file store removal when both are injected', async () => {
+    const { config, projectManager, repoManager } = await makeFixture(makeTempDir());
+    const workspaceArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const errorLogManager = new ErrorLogManager(config);
+    const { sync } = makeFakeInfoSync(() => {});
+    const { fileManager } = makeFakeFileManager(() => {});
+    const orchestrator = new RepositoryOrchestrator(
+        config, projectManager, repoManager, workspaceArtifacts, errorLogManager, sync, fileManager,
+    );
+
+    orchestrator.deleteRepositoryGlobally('repo-b');
+
+    const { entries } = errorLogManager.list({ source: 'repository-audit' });
+    const summaryEntry = entries.find((e) => e.Operation === 'delete-repository-global');
+    assert.ok(summaryEntry?.Message.includes('Managed main folder removed'));
+    assert.ok(summaryEntry?.Message.includes('Repository file store removed'));
 });
 
 // ─── Credential injection (addRepositoryToProject) ────────────────────────────

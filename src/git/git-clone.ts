@@ -2,6 +2,15 @@ import { runGit } from './git-cli.js';
 import type { CloneOptions, GitResult } from './git.types.js';
 
 /**
+ * Substring that appears in a server's error response when it does not
+ * support partial-clone filtering (`uploadpack.allowFilter` is unset or the
+ * server is too old). Callers that request `CloneOptions.filter` should check
+ * for this substring in a failed clone's `stderr` and retry without the
+ * filter rather than surfacing a confusing low-level git error.
+ */
+export const FILTER_UNSUPPORTED_WARNING = 'filtering not recognized by server';
+
+/**
  * Allowlist of URL prefixes/schemes that are safe to pass to `git clone`.
  *
  * This list explicitly excludes dangerous transport protocols such as `ext::`
@@ -78,7 +87,45 @@ export function cloneRepository(
         args.push('--bare');
     }
 
+    if (options.filter !== undefined) {
+        args.push(`--filter=${options.filter}`);
+    }
+
+    if (options.noCheckout === true) {
+        args.push('--no-checkout');
+    }
+
     args.push(url, destination);
 
     return runGit(args, undefined, options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : undefined);
+}
+
+/**
+ * Configures cone-mode sparse-checkout for a repository, restricting the
+ * working tree to the given top-level paths.
+ *
+ * Typically used after a `cloneRepository()` call made with
+ * `noCheckout: true`, so that only the desired paths are ever written to
+ * disk. Each path is validated against a `-`-prefix guard before being
+ * passed to git, since a `-`-prefixed value would otherwise be
+ * misinterpreted as a flag by `git sparse-checkout set`.
+ *
+ * @param repoPath - Absolute path to the local repository.
+ * @param paths    - Top-level paths (relative to the repository root) to
+ *                   include in the sparse working tree.
+ * @returns A `GitResult`; the promise resolves rather than throws for a
+ *   rejected (`-`-prefixed) path, mirroring the validation-failure pattern
+ *   used by `createBranch()`/`switchBranch()` in `git-branch.ts`.
+ */
+export function setSparseCheckout(repoPath: string, paths: string[]): Promise<GitResult> {
+    const invalidPath = paths.find((p) => p.startsWith('-'));
+    if (invalidPath !== undefined) {
+        return Promise.resolve({
+            exitCode: 128,
+            stdout: '',
+            stderr: `fatal: sparse-checkout path must not start with '-': '${invalidPath}'`,
+        });
+    }
+
+    return runGit(['sparse-checkout', 'set', '--cone', '--', ...paths], repoPath);
 }

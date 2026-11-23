@@ -118,6 +118,37 @@ let mockCredentialOptions = [];
 api.repositories.get = async () => mockRepoResponse;
 api.repositories.credentialOptions = async () => mockCredentialOptions;
 api.repositories.updateCredential  = async () => ({});
+
+// Default info-sync mocks (WP-013) — the section is mounted on every render
+// of this view, so every test needs these to resolve to *something*, not
+// just the tests that exercise the section directly.
+api.repositories.infoSync.status = async () => ({
+    enabled: false,
+    mainFolder: null,
+    state: 'disabled',
+    pendingChanges: [],
+    defaultCommitMessage: 'Update workspace info',
+    health: { healthy: true, issues: [] },
+});
+api.repositories.infoSync.saveSettings     = async (_id, input) => ({
+    enabled: input.enabled, mainFolder: null, state: 'disabled', pendingChanges: [],
+    defaultCommitMessage: 'Update workspace info', health: { healthy: true, issues: [] },
+});
+api.repositories.infoSync.refresh          = async () => api.repositories.infoSync.status(REPO_ID);
+api.repositories.infoSync.recreateMainFolder = async () => api.repositories.infoSync.status(REPO_ID);
+api.repositories.infoSync.importPreview    = async () => ({ state: 'incoming', fields: [] });
+api.repositories.infoSync.applyImport      = async () => api.repositories.infoSync.status(REPO_ID);
+api.repositories.infoSync.commitPush       = async () => ({ committed: true, pushed: true });
+
+// Default repository-files mocks (WP-014) — the Files section is mounted on
+// every render of this view, so every test needs these to resolve to
+// *something*, not just the tests that exercise the section directly.
+let mockRepositoryFiles = [];
+api.repositories.files.list   = async () => mockRepositoryFiles;
+api.repositories.files.create = async (_id, data) => ({ Id: 'new-file', ...data });
+api.repositories.files.update = async (_id, fileId, data) => ({ Id: fileId, ...data });
+api.repositories.files.remove = async () => {};
+
 api.projects.list    = async () => mockProjectsList;
 api.projects.get     = async () => mockProjectDetail;
 api.workspaces.list  = async () => mockWorkspacesList;
@@ -899,6 +930,194 @@ test('Credential section — changing dropdown calls api.repositories.updateCred
     } finally {
         api.repositories.updateCredential = originalUpdate;
         mockCredentialOptions = [];
+        cleanupContainers();
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Workspace info sync section — WP-013 (AC-17, AC-17b, AC-17c mounting integration)
+// ---------------------------------------------------------------------------
+
+test('AC-17: the "Workspace info sync" section is mounted after the Credential section and before the status table', async () => {
+    const container = await renderAndWait();
+    try {
+        const sections = Array.from(container.querySelectorAll(
+            '.repository-credential-section, .repository-info-sync-section, .repository-detail-status-section',
+        ));
+        const classNames = sections.map((el) => el.className);
+        assert.deepEqual(classNames, [
+            'repository-credential-section',
+            'repository-info-sync-section',
+            'repository-detail-status-section',
+        ]);
+
+        const heading = container.querySelector('.repository-info-sync-section .section-title');
+        assert.equal(heading.textContent, 'Workspace info sync');
+    } finally {
+        cleanupContainers();
+    }
+});
+
+test('AC-17: a successful import updates the header\'s name/description without a full navigation', async () => {
+    api.repositories.infoSync.status = async () => ({
+        enabled: true,
+        mainFolder: { path: '/data/repositories/my-repo', exists: true, isGitRepository: true, remoteUrl: REPO_URL, remoteMatches: true, currentBranch: 'main', defaultBranch: 'main', ahead: 0, behind: 0, pendingChanges: [] },
+        state: 'incoming',
+        pendingChanges: [],
+        defaultCommitMessage: 'Update workspace info',
+        health: { healthy: true, issues: [] },
+    });
+    api.repositories.infoSync.importPreview = async () => ({
+        state: 'incoming', fields: [{ field: 'Name', current: REPO_NAME, incoming: 'Imported Name' }],
+    });
+    const updatedRepo = { Id: REPO_ID, Name: 'Imported Name', Url: REPO_URL, Description: 'Imported description.' };
+    const originalGet = api.repositories.get;
+    api.repositories.get = async () => updatedRepo;
+    api.repositories.infoSync.applyImport = async () => ({
+        enabled: true, mainFolder: null, state: 'in-sync', pendingChanges: [],
+        defaultCommitMessage: 'Update workspace info', health: { healthy: true, issues: [] },
+    });
+
+    const container = await renderAndWait();
+    try {
+        const importBtn = Array.from(container.querySelectorAll('.repository-info-sync-section button'))
+            .find((b) => b.textContent === 'Import…');
+        assert.ok(importBtn, 'Import… button should be present in state "incoming"');
+
+        importBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const applyBtn = Array.from(document.querySelectorAll('.modal-actions button'))
+            .find((b) => b.textContent === 'Apply');
+        assert.ok(applyBtn, 'the import modal should be open');
+        applyBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const h1 = container.querySelector('h1');
+        assert.equal(h1.textContent, 'Imported Name');
+        const descEl = container.querySelector('.project-meta-description');
+        assert.equal(descEl.textContent, 'Imported description.');
+    } finally {
+        api.repositories.get = originalGet;
+        cleanupContainers();
+    }
+});
+
+test('AC-17: the "configure-credential" fix action focuses the Credential section heading', async () => {
+    api.repositories.infoSync.status = async () => ({
+        enabled: true,
+        mainFolder: null,
+        state: 'main-folder-unavailable',
+        pendingChanges: [],
+        defaultCommitMessage: 'Update workspace info',
+        health: {
+            healthy: false,
+            issues: [{ type: 'info-sync-credential-missing', severity: 'error', message: 'No credential resolves for this host.', fixAction: 'configure-credential' }],
+        },
+    });
+
+    const container = await renderAndWait();
+    try {
+        const configureBtn = Array.from(container.querySelectorAll('.health-alert button'))
+            .find((b) => b.textContent === 'Configure');
+        assert.ok(configureBtn, 'the configure-credential fix action button should be present');
+
+        configureBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const credentialHeading = container.querySelector('.repository-credential-section .section-title');
+        assert.equal(document.activeElement, credentialHeading);
+    } finally {
+        cleanupContainers();
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Files section — WP-014
+// ---------------------------------------------------------------------------
+
+test('WP-014 — the "Files" section is mounted after the info-sync section and before the status table', async () => {
+    const originalStatus = api.repositories.infoSync.status;
+    api.repositories.infoSync.status = async () => ({
+        enabled: true, mainFolder: null, state: 'disabled', pendingChanges: [],
+        defaultCommitMessage: 'Update workspace info', health: { healthy: true, issues: [] },
+    });
+
+    const container = await renderAndWait();
+    try {
+        const infoSyncSection = container.querySelector('.repository-info-sync-section');
+        const filesSection = container.querySelector('.repository-files-section');
+        const statusSection = container.querySelector('.repository-detail-status-section');
+        assert.ok(infoSyncSection, 'info-sync section should exist');
+        assert.ok(filesSection, 'files section should exist');
+        assert.ok(statusSection, 'status section should exist');
+
+        const order = [...container.children];
+        assert.ok(order.indexOf(infoSyncSection) < order.indexOf(filesSection), 'files section should come after info-sync section');
+        assert.ok(order.indexOf(filesSection) < order.indexOf(statusSection), 'files section should come before the status table');
+
+        assert.equal(filesSection.querySelector('h2').textContent, 'Files');
+    } finally {
+        api.repositories.infoSync.status = originalStatus;
+        cleanupContainers();
+    }
+});
+
+test('WP-014 — the files section is cleaned up when the router navigates away', async () => {
+    const container = document.createElement('div');
+    container.id = 'app';
+    document.body.appendChild(container);
+
+    const cleanupFn = renderRepositoryDetail(container, { id: REPO_ID });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    try {
+        assert.ok(container.querySelector('.repository-files-section'), 'files section should have mounted');
+        // Cleanup must not throw — this is the router's contract (tears down
+        // the files section's in-flight work flags alongside info-sync's).
+        assert.doesNotThrow(() => cleanupFn());
+    } finally {
+        cleanupContainers();
+    }
+});
+
+test('WP-014 — a save in the files section triggers an info-sync status refresh', async () => {
+    let statusCalls = 0;
+    const originalStatus = api.repositories.infoSync.status;
+    api.repositories.infoSync.status = async () => {
+        statusCalls += 1;
+        return {
+            enabled: true, mainFolder: null, state: 'disabled', pendingChanges: [],
+            defaultCommitMessage: 'Update workspace info', health: { healthy: true, issues: [] },
+        };
+    };
+
+    const container = await renderAndWait();
+    try {
+        const callsBeforeSave = statusCalls;
+
+        const filesSection = container.querySelector('.repository-files-section');
+        const addBtn = [...filesSection.querySelectorAll('button')].find((b) => b.textContent === '+ Add File');
+        assert.ok(addBtn, 'Add File button should be present and enabled while sync is enabled');
+        addBtn.click();
+
+        const form = filesSection.querySelector('form.custom-file-form');
+        assert.ok(form, 'editor form should open');
+        form.querySelector('[name="label"]').value = 'Install deps';
+        form.querySelector('[name="fileName"]').value = 'vendor-install.sh';
+        form.dispatchEvent(new window.Event('submit', { cancelable: true, bubbles: true }));
+
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.ok(statusCalls > callsBeforeSave, 'the info-sync section should have re-fetched its status after the save');
+    } finally {
+        api.repositories.infoSync.status = originalStatus;
         cleanupContainers();
     }
 });

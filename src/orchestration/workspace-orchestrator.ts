@@ -5,7 +5,8 @@ import type { ProjectManager } from '../models/project/project.manager.js';
 import type { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import type { RepositoryManager } from '../models/repository/repository.manager.js';
 import { cloneRepository } from '../git/git-clone.js';
-import { resolveCredential, injectCredentialToken, extractHost, stripEmbeddedCredentials } from '../git/git-credentials.js';
+import { stripEmbeddedCredentials } from '../git/git-credentials.js';
+import { resolveRemoteAuth } from './remote-auth.js';
 import type { WorkspaceArtifactsOrchestrator } from './workspace-artifacts.js';
 import { STABLE_WORKSPACE_ID } from '../models/workspace/workspace.types.js';
 import { isValidWorkspaceId } from '../utils/slug.js';
@@ -140,33 +141,27 @@ export class WorkspaceOrchestrator {
                 }
 
                 const credentials = this.config.gitCredentials ?? [];
-                const credential = resolveCredential(repo.Url, credentials, repo.CredentialId);
-                const host = extractHost(repo.Url);
+                const authResolution = resolveRemoteAuth(repo, credentials);
 
                 // When no credential resolves for an HTTPS URL, report a descriptive
                 // error rather than attempting an unauthenticated clone that would
                 // likely fail with an unhelpful git error message.
-                if (credential === null && host !== null) {
-                    const errorMessage =
-                        `Repository '${repo.Name}' requires a credential for host '${host}'. ` +
-                        `Please select a credential in the repository settings.`;
+                if (!authResolution.ok) {
                     this.errorLogManager?.append({
                         Severity: 'error',
                         Source: 'credentials',
                         Operation: 'workspace-setup',
                         Context: { ProjectId: projectId, WorkspaceId: workspaceId, RepositoryId: repoId },
-                        Message: errorMessage,
+                        Message: authResolution.message,
                     });
                     return {
                         repositoryId: repoId,
                         success: false,
-                        error: errorMessage,
+                        error: authResolution.message,
                     };
                 }
 
-                const cloneUrl = credential !== null
-                    ? injectCredentialToken(repo.Url, credential.token)
-                    : repo.Url;
+                const { url: cloneUrl, credential } = authResolution;
 
                 const gitResult = await cloneRepository(cloneUrl, destination, {
                     depth: this.config.cloneDepth > 0 ? this.config.cloneDepth : undefined,

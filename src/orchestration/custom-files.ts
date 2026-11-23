@@ -1,11 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import {
-    isLexicallyContained,
-    resolveRootRealPath,
-    escapesRootViaRealpath,
-    isDirectoryShaped,
-} from '../utils/path-guard.js';
+import { guardedFileTarget, pruneEmptyParents } from '../utils/path-guard.js';
 import {
     applyLineEndingPolicy,
     customFileRelativePath,
@@ -39,20 +34,6 @@ export interface CustomFilesResult {
 
 function workspaceFolderOf(projectsFolder: string, projectId: string, workspaceId: string): string {
     return path.join(projectsFolder, projectId, workspaceId);
-}
-
-/**
- * Runs the guard chain for one target. Returns the resolved absolute path
- * when the target is safe to write/delete, or `null` when it must be skipped.
- */
-function guardedTarget(workspaceFolder: string, file: CustomFile): string | null {
-    const target = path.resolve(workspaceFolder, ...customFileRelativePath(file).split('/'));
-    const resolvedRoot = path.resolve(workspaceFolder);
-
-    if (target === resolvedRoot || !isLexicallyContained(target, resolvedRoot)) return null;
-    if (escapesRootViaRealpath(target, resolveRootRealPath(workspaceFolder))) return null;
-    if (isDirectoryShaped(target)) return null;
-    return target;
 }
 
 /**
@@ -90,7 +71,7 @@ export function writeCustomFiles(
             continue;
         }
 
-        const target = guardedTarget(workspaceFolder, file);
+        const target = guardedFileTarget(workspaceFolder, rel);
         if (target === null) {
             result.skipped.push(rel);
             continue;
@@ -99,7 +80,7 @@ export function writeCustomFiles(
         try {
             fs.mkdirSync(path.dirname(target), { recursive: true });
             // Re-check after mkdir: a directory component may have been a symlink created in between.
-            if (guardedTarget(workspaceFolder, file) === null) {
+            if (guardedFileTarget(workspaceFolder, rel) === null) {
                 result.skipped.push(rel);
                 continue;
             }
@@ -132,7 +113,7 @@ export function removeCustomFileCopy(
     const workspaceFolder = workspaceFolderOf(projectsFolder, projectId, workspaceId);
     if (!fs.existsSync(workspaceFolder)) return false;
 
-    const target = guardedTarget(workspaceFolder, file);
+    const target = guardedFileTarget(workspaceFolder, customFileRelativePath(file));
     if (target === null) return false;
 
     let stat: fs.Stats;
@@ -146,16 +127,6 @@ export function removeCustomFileCopy(
     fs.rmSync(target);
 
     // Prune empty parents up to (not including) the workspace root.
-    const resolvedRoot = path.resolve(workspaceFolder);
-    let dir = path.dirname(target);
-    while (dir !== resolvedRoot && isLexicallyContained(dir, resolvedRoot)) {
-        try {
-            if (fs.readdirSync(dir).length > 0) break;
-            fs.rmdirSync(dir);
-        } catch {
-            break;
-        }
-        dir = path.dirname(dir);
-    }
+    pruneEmptyParents(path.dirname(target), workspaceFolder);
     return true;
 }

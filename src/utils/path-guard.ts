@@ -14,6 +14,9 @@ import * as path from 'node:path';
  *   guard chain, protecting generated index-file writes.
  * - `src/orchestration/repository-orchestrator.ts` — `removeRepositoryFromProject()`'s
  *   clone-folder deletion guard.
+ * - `src/orchestration/custom-files.ts` — `writeCustomFiles()` and
+ *   `removeCustomFileCopy()`, via the composite {@link guardedFileTarget} and
+ *   {@link pruneEmptyParents} helpers below.
  */
 
 // ---------------------------------------------------------------------------
@@ -151,5 +154,55 @@ export function isDirectoryShaped(targetPath: string): boolean {
         return fs.statSync(targetPath).isDirectory();
     } catch {
         return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Composite helpers (built on the guards above)
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs the full guard chain (lexical containment → realpath symlink-escape →
+ * directory-shape) for one file target, resolved from `root` and a
+ * `/`-separated workspace-relative path.
+ *
+ * Returns the resolved absolute path when the target is safe to write to or
+ * delete, or `null` when it must be skipped — the target sits outside
+ * `root` (lexically or via a symlink escape), equals `root` itself, or
+ * already exists on disk as a directory.
+ *
+ * Callers that create intermediate directories before writing (e.g. via
+ * `fs.mkdirSync(..., { recursive: true })`) should call this a second time
+ * after that `mkdir` — a directory component may have been replaced by a
+ * symlink in between the two calls.
+ */
+export function guardedFileTarget(root: string, relativePath: string): string | null {
+    const target = path.resolve(root, ...relativePath.split('/'));
+    const resolvedRoot = path.resolve(root);
+
+    if (target === resolvedRoot || !isLexicallyContained(target, resolvedRoot)) return null;
+    if (escapesRootViaRealpath(target, resolveRootRealPath(root))) return null;
+    if (isDirectoryShaped(target)) return null;
+    return target;
+}
+
+/**
+ * Prunes empty directories upward from `dir`, stopping at (not including)
+ * `stopAt`, which is never removed. Stops as soon as a directory is found to
+ * be non-empty, outside `stopAt`, or fails to read/remove (e.g. a permission
+ * error) — all treated as "nothing more to prune" rather than thrown.
+ */
+export function pruneEmptyParents(dir: string, stopAt: string): void {
+    const resolvedStop = path.resolve(stopAt);
+    let current = path.resolve(dir);
+
+    while (current !== resolvedStop && isLexicallyContained(current, resolvedStop)) {
+        try {
+            if (fs.readdirSync(current).length > 0) break;
+            fs.rmdirSync(current);
+        } catch {
+            break;
+        }
+        current = path.dirname(current);
     }
 }

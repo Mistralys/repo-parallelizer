@@ -12,16 +12,23 @@
  * Normalise a repository object from the backend.
  *
  * @param {Object} repo
- * @returns {{ id: string, name: string, url: string, description: string, credentialId: string|undefined, LastRefreshedAt: string|undefined }}
+ * @returns {{ id: string, name: string, url: string, description: string, credentialId: string|undefined, LastRefreshedAt: string|undefined, infoSync: { enabled: boolean, lastSyncedAt: string|undefined }|undefined }}
  *
  * @remarks
  * Unlike other normalised fields, `LastRefreshedAt` intentionally retains its
  * Go-capitalised casing in the returned object. This preserves compatibility
  * with existing consumers (e.g. `buildRepoStatusCells`) that already reference
  * it by that name. All other fields (`id`, `name`, `url`, `description`,
- * `credentialId`) use camelCase as the normalised form.
+ * `credentialId`, `infoSync`) use camelCase as the normalised form.
+ *
+ * `infoSync` is only populated with `enabled` and `lastSyncedAt` — the
+ * backend's `InfoSync.LastWrittenHash` is a machine-local sync-detection
+ * detail with no GUI use and is intentionally never exposed here. `infoSync`
+ * itself is `undefined` when the backend omits `InfoSync` (sync never
+ * configured for this repository).
  */
 export function normaliseRepo(repo) {
+    const rawInfoSync = repo.InfoSync || repo.infoSync;
     return {
         id:              repo.Id   || repo.id   || '',
         name:            repo.Name || repo.name || '',
@@ -29,6 +36,12 @@ export function normaliseRepo(repo) {
         description:     repo.Description || repo.description || '',
         credentialId:    repo.CredentialId || repo.credentialId || undefined,
         LastRefreshedAt: repo.LastRefreshedAt || repo.lastRefreshedAt || undefined,
+        infoSync: rawInfoSync
+            ? {
+                enabled:      rawInfoSync.Enabled != null ? rawInfoSync.Enabled : !!rawInfoSync.enabled,
+                lastSyncedAt: rawInfoSync.LastSyncedAt || rawInfoSync.lastSyncedAt || undefined,
+            }
+            : undefined,
     };
 }
 
@@ -140,5 +153,28 @@ export function normaliseErrorEntry(entry) {
         project:    entry.Project    || entry.project    || '',
         workspace:  entry.Workspace  || entry.workspace  || '',
         repository: entry.Repository || entry.repository || '',
+    };
+}
+
+/**
+ * Normalise a repository file object from the backend (PascalCase or
+ * camelCase `RepositoryFile`, Milestone 2). Mirrors `normaliseCustomFile()`
+ * in `views/project-custom-files.js`: fills every field's default and drops
+ * any unrecognised key from the input object.
+ *
+ * @param {Object} f
+ * @returns {{ id: string, directory: string, fileName: string, label: string, description: string, content: string, executable: boolean, listInAgents: boolean, dateModified: string }}
+ */
+export function normaliseRepositoryFile(f) {
+    return {
+        id:           f.Id           || f.id           || '',
+        directory:    f.Directory    ?? f.directory    ?? '',
+        fileName:     f.FileName     ?? f.fileName     ?? '',
+        label:        f.Label        ?? f.label        ?? '',
+        description:  f.Description  ?? f.description  ?? '',
+        content:      f.Content      ?? f.content      ?? '',
+        executable:   (f.Executable   ?? f.executable)   === true,
+        listInAgents: (f.ListInAgents ?? f.listInAgents) === true,
+        dateModified: f.DateModified  || f.dateModified  || '',
     };
 }

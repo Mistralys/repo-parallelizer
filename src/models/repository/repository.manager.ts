@@ -5,7 +5,7 @@ import { inferSlugFromUrl, isValidKebabCase } from '../../utils/slug.js';
 import { NotFoundError } from '../../errors.js';
 import { hasEmbeddedCredentials, stripEmbeddedCredentials } from '../../git/git-credentials.js';
 import { MAX_REPOSITORY_DESCRIPTION_LENGTH } from '../../config/config.constants.js';
-import type { Repository, RepositoryStore } from './repository.types.js';
+import type { Repository, RepositoryInfoSyncSettings, RepositoryStore } from './repository.types.js';
 
 const REPOSITORIES_FILE = 'repositories.json';
 
@@ -78,6 +78,42 @@ export class RepositoryManager {
 
     private save(store: RepositoryStore): void {
         writeJsonFile(this.filePath, store);
+    }
+
+    /**
+     * Shared `load → findIndex → NotFoundError → mutate → save` sequence used
+     * by every mutator that targets a single existing repository by ID.
+     *
+     * `fn` receives the existing repository record and the full store (the
+     * latter so a mutator can run a duplicate check or other cross-repository
+     * validation against `store.Repositories` before returning the replacement
+     * record) and returns the replacement record to persist in its place.
+     *
+     * @param id             The repository ID to mutate.
+     * @param operationLabel Short, lowercase phrase describing the operation,
+     *                       interpolated into the `NotFoundError` message as
+     *                       `Cannot ${operationLabel}: repository with ID "${id}" does not exist.`
+     *                       — matches the pre-existing per-method message text
+     *                       exactly, so every caller's error message is unchanged.
+     * @param fn             Produces the replacement repository record.
+     *
+     * @throws {NotFoundError} If no repository with the given ID exists.
+     */
+    private mutate(
+        id: string,
+        operationLabel: string,
+        fn: (existing: Repository, store: RepositoryStore) => Repository,
+    ): Repository {
+        const store = this.load();
+        const index = store.Repositories.findIndex((r) => r.Id === id);
+
+        if (index === -1) {
+            throw new NotFoundError(`Cannot ${operationLabel}: repository with ID "${id}" does not exist.`);
+        }
+
+        store.Repositories[index] = fn(store.Repositories[index], store);
+        this.save(store);
+        return store.Repositories[index];
     }
 
     // -------------------------------------------------------------------------
@@ -206,45 +242,40 @@ export class RepositoryManager {
      * @throws {Error} If the trimmed `description` exceeds `MAX_REPOSITORY_DESCRIPTION_LENGTH`.
      */
     update(id: string, params: { name: string; url?: string; description?: string }): Repository {
-        const store = this.load();
-        const index = store.Repositories.findIndex((r) => r.Id === id);
-
-        if (index === -1) {
-            throw new NotFoundError(`Cannot update: repository with ID "${id}" does not exist.`);
-        }
-
-        let updated: Repository = { ...store.Repositories[index], Name: params.name };
         let credentialsWereStripped = false;
 
-        if (params.description !== undefined) {
-            const description = normalizeDescription(params.description);
-            if (description) {
-                updated = { ...updated, Description: description };
-            } else {
-                const { Description: _removed, ...rest } = updated;
-                updated = rest as Repository;
-            }
-        }
+        const updated = this.mutate(id, 'update', (existing, store) => {
+            let next: Repository = { ...existing, Name: params.name };
 
-        if (params.url !== undefined) {
-            let cleanUrl = params.url.trim();
-            if (hasEmbeddedCredentials(cleanUrl)) {
-                cleanUrl = stripEmbeddedCredentials(cleanUrl);
-                credentialsWereStripped = true;
+            if (params.description !== undefined) {
+                const description = normalizeDescription(params.description);
+                if (description) {
+                    next = { ...next, Description: description };
+                } else {
+                    const { Description: _removed, ...rest } = next;
+                    next = rest as Repository;
+                }
             }
 
-            const duplicateUrl = store.Repositories.find((r) => r.Id !== id && r.Url === cleanUrl);
-            if (duplicateUrl) {
-                throw new Error(
-                    `A repository with URL "${redactUrl(cleanUrl)}" already exists (ID: "${duplicateUrl.Id}").`
-                );
+            if (params.url !== undefined) {
+                let cleanUrl = params.url.trim();
+                if (hasEmbeddedCredentials(cleanUrl)) {
+                    cleanUrl = stripEmbeddedCredentials(cleanUrl);
+                    credentialsWereStripped = true;
+                }
+
+                const duplicateUrl = store.Repositories.find((r) => r.Id !== id && r.Url === cleanUrl);
+                if (duplicateUrl) {
+                    throw new Error(
+                        `A repository with URL "${redactUrl(cleanUrl)}" already exists (ID: "${duplicateUrl.Id}").`
+                    );
+                }
+
+                next = { ...next, Url: cleanUrl };
             }
 
-            updated = { ...updated, Url: cleanUrl };
-        }
-
-        store.Repositories[index] = updated;
-        this.save(store);
+            return next;
+        });
 
         if (credentialsWereStripped) {
             return { ...updated, credentialsStripped: true };
@@ -289,24 +320,14 @@ export class RepositoryManager {
      * @see {@link Repository.CredentialId} for the auto-selection fallback behaviour when no credential is pinned.
      */
     updateCredential(id: string, credentialId: string | null): Repository {
-        const store = this.load();
-        const index = store.Repositories.findIndex((r) => r.Id === id);
-
-        if (index === -1) {
-            throw new NotFoundError(`Cannot update credential: repository with ID "${id}" does not exist.`);
-        }
-
-        const existing = store.Repositories[index];
-        if (credentialId === null) {
-            // Remove the CredentialId field entirely so the JSON stays clean.
-            const { CredentialId: _removed, ...rest } = existing;
-            store.Repositories[index] = rest as Repository;
-        } else {
-            store.Repositories[index] = { ...existing, CredentialId: credentialId };
-        }
-
-        this.save(store);
-        return store.Repositories[index];
+        return this.mutate(id, 'update credential', (existing) => {
+            if (credentialId === null) {
+                // Remove the CredentialId field entirely so the JSON stays clean.
+                const { CredentialId: _removed, ...rest } = existing;
+                return rest as Repository;
+            }
+            return { ...existing, CredentialId: credentialId };
+        });
     }
 
     /**
@@ -317,18 +338,64 @@ export class RepositoryManager {
      * @throws {NotFoundError} If no repository with the given ID exists.
      */
     touchRefreshTimestamp(id: string): Repository {
-        const store = this.load();
-        const index = store.Repositories.findIndex((r) => r.Id === id);
-
-        if (index === -1) {
-            throw new NotFoundError(`Cannot update refresh timestamp: repository with ID "${id}" does not exist.`);
-        }
-
-        store.Repositories[index] = {
-            ...store.Repositories[index],
+        return this.mutate(id, 'update refresh timestamp', (existing) => ({
+            ...existing,
             LastRefreshedAt: new Date().toISOString(),
-        };
-        this.save(store);
-        return store.Repositories[index];
+        }));
+    }
+
+    /**
+     * Sets or clears the `InfoSync` settings group on the specified repository.
+     *
+     * Pass `null` to remove the group entirely (destructured out), reverting
+     * the repository to the "info sync never configured" state.
+     *
+     * @param id       The repository ID.
+     * @param settings The `InfoSync` settings to store, or `null` to clear.
+     *
+     * @returns The updated `Repository` object.
+     *
+     * @throws {NotFoundError} If no repository with the given ID exists.
+     */
+    setInfoSyncSettings(id: string, settings: RepositoryInfoSyncSettings | null): Repository {
+        return this.mutate(id, 'update info sync settings', (existing) => {
+            if (settings === null) {
+                const { InfoSync: _removed, ...rest } = existing;
+                return rest as Repository;
+            }
+            return { ...existing, InfoSync: settings };
+        });
+    }
+
+    /**
+     * Records a successful `.workspace/info.json` sync write: sets
+     * `InfoSync.LastWrittenHash` to `hash` and `InfoSync.LastSyncedAt` to the
+     * current UTC timestamp.
+     *
+     * @param id   The repository ID.
+     * @param hash Hash of the `.workspace/info.json` content just written.
+     *
+     * @returns The updated `Repository` object.
+     *
+     * @throws {NotFoundError} If no repository with the given ID exists.
+     * @throws {Error} If the repository has no `InfoSync` settings configured
+     *   — info sync must be enabled via `setInfoSyncSettings()` first.
+     */
+    recordInfoSyncWrite(id: string, hash: string): Repository {
+        return this.mutate(id, 'record info sync write', (existing) => {
+            if (!existing.InfoSync) {
+                throw new Error(
+                    `Cannot record info sync write: repository with ID "${id}" has no InfoSync settings configured.`
+                );
+            }
+            return {
+                ...existing,
+                InfoSync: {
+                    ...existing.InfoSync,
+                    LastWrittenHash: hash,
+                    LastSyncedAt: new Date().toISOString(),
+                },
+            };
+        });
     }
 }

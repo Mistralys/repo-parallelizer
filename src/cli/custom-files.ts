@@ -11,28 +11,38 @@
  * The command logic is dependency-injected ({@link CustomFilesCliDeps}) so it
  * can be tested without a config file, a TTY, or the real process streams.
  */
-import * as fs from 'node:fs';
-import { parseArgs } from 'node:util';
 import { loadConfig } from '../config/config.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
+import { RepositoryFileManager } from '../models/repository/repository-file.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceArtifactsOrchestrator } from '../orchestration/workspace-artifacts.js';
+import { RepositoryInfoSyncOrchestrator } from '../orchestration/repository-info-sync.js';
 import {
     customFileRelativePath,
     isExecutableFile,
     type CustomFile,
     type CustomFileInput,
 } from '../models/project/custom-file.js';
+import {
+    EXIT_OK,
+    EXIT_ERROR,
+    EXIT_SYNC_FAILED,
+    UsageError,
+    parseCommandArgs,
+    requirePositionals,
+    FILE_FIELD_OPTIONS,
+    readContentSource,
+    readFlagPair,
+    resolveFileReference,
+    readStdin,
+} from './file-command-helpers.js';
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /** Exit codes returned by {@link runCustomFilesCommand}. */
-export const EXIT_OK = 0;
-export const EXIT_ERROR = 1;
-/** The definition was saved but syncing the workspaces failed. */
-export const EXIT_SYNC_FAILED = 2;
+export { EXIT_OK, EXIT_ERROR, EXIT_SYNC_FAILED };
 
 /** Collaborators of the command; replaced by fakes in tests. */
 export interface CustomFilesCliDeps {
@@ -142,8 +152,12 @@ export async function runCustomFilesCommand(args: string[], deps: CustomFilesCli
 export function createDefaultCustomFilesDeps(): CustomFilesCliDeps {
     const config = loadConfig();
     const repoManager = new RepositoryManager(config);
+    const repositoryFileManager = new RepositoryFileManager(config, repoManager);
     const projectManager = new ProjectManager(config, repoManager);
-    const artifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const repositoryInfoSync = new RepositoryInfoSyncOrchestrator(config, repoManager, repositoryFileManager);
+    const artifacts = new WorkspaceArtifactsOrchestrator(
+        config, projectManager, repoManager, repositoryInfoSync, undefined, repositoryFileManager,
+    );
     return {
         projectManager,
         artifacts,
@@ -157,38 +171,9 @@ export function createDefaultCustomFilesDeps(): CustomFilesCliDeps {
 // Subcommand handlers
 // ---------------------------------------------------------------------------
 
-/** Thrown for malformed command lines; reported as a plain error. */
-class UsageError extends Error {}
-
-const FIELD_OPTIONS = {
-    'file-name': { type: 'string' },
-    label: { type: 'string' },
-    directory: { type: 'string' },
-    description: { type: 'string' },
-    'list-in-agents': { type: 'boolean' },
-    'no-list-in-agents': { type: 'boolean' },
-    'content-file': { type: 'string' },
-    stdin: { type: 'boolean' },
-    content: { type: 'string' },
-} as const;
-
-function parse<T extends Record<string, { type: 'string' | 'boolean' }>>(args: string[], options: T) {
-    try {
-        return parseArgs({ args, options, allowPositionals: true, strict: true });
-    } catch (err) {
-        throw new UsageError(`${(err as Error).message} (see 'paralizer help')`);
-    }
-}
-
-function requirePositionals(positionals: string[], count: number, usage: string): void {
-    if (positionals.length !== count) {
-        throw new UsageError(`Usage: paralizer custom-files ${usage}`);
-    }
-}
-
 function handleList(args: string[], deps: CustomFilesCliDeps): number {
-    const { values, positionals } = parse(args, { json: { type: 'boolean' } });
-    requirePositionals(positionals, 1, 'list <project-id> [--json]');
+    const { values, positionals } = parseCommandArgs(args, { json: { type: 'boolean' } });
+    requirePositionals(positionals, 1, 'list <project-id> [--json]', 'custom-files');
 
     const files = deps.projectManager.listCustomFiles(positionals[0]);
     if (values.json === true) {
@@ -207,28 +192,41 @@ function handleList(args: string[], deps: CustomFilesCliDeps): number {
     return EXIT_OK;
 }
 
-function handleShow(args: string[], deps: CustomFilesCliDeps): number {
-    const { values, positionals } = parse(args, { json: { type: 'boolean' } });
-    requirePositionals(positionals, 2, 'show <project-id> <file> [--json]');
+/** Resolves a custom-file reference within `files`, with scope-specific messages. */
+function resolveCustomFile(files: readonly CustomFile[], ref: string): CustomFile {
+    return resolveFileReference(files, ref, {
+        relativePath: customFileRelativePath,
+        noun: 'custom file',
+        listHint: 'paralizer custom-files list <project-id>',
+    });
+}
 
-    const file = resolveFile(deps.projectManager.listCustomFiles(positionals[0]), positionals[1]);
+function handleShow(args: string[], deps: CustomFilesCliDeps): number {
+    const { values, positionals } = parseCommandArgs(args, { json: { type: 'boolean' } });
+    requirePositionals(positionals, 2, 'show <project-id> <file> [--json]', 'custom-files');
+
+    const file = resolveCustomFile(deps.projectManager.listCustomFiles(positionals[0]), positionals[1]);
     deps.out(values.json === true ? `${JSON.stringify(file, null, 2)}\n` : file.Content);
     return EXIT_OK;
 }
 
 async function handleAdd(args: string[], deps: CustomFilesCliDeps): Promise<number> {
-    const { values, positionals } = parse(args, FIELD_OPTIONS);
-    requirePositionals(positionals, 1, 'add <project-id> --file-name <name> --label <text> (--content-file <path> | --stdin | --content <text>)');
+    const { values, positionals } = parseCommandArgs(args, FILE_FIELD_OPTIONS);
+    requirePositionals(
+        positionals, 1,
+        'add <project-id> --file-name <name> --label <text> (--content-file <path> | --stdin | --content <text>)',
+        'custom-files',
+    );
     const projectId = positionals[0];
 
     if (values['file-name'] === undefined || values.label === undefined) {
         throw new UsageError('add requires --file-name and --label.');
     }
-    const content = await readContent(values, deps);
+    const content = await readContentSource(values, deps.readStdin);
     if (content === undefined) {
         throw new UsageError('add requires a content source: --content-file <path>, --stdin or --content <text>.');
     }
-    const listFlag = readListFlag(values);
+    const listFlag = readFlagPair(values, 'list-in-agents');
 
     const created = deps.projectManager.addCustomFile(projectId, {
         Directory: values.directory ?? '',
@@ -244,13 +242,13 @@ async function handleAdd(args: string[], deps: CustomFilesCliDeps): Promise<numb
 }
 
 async function handleUpdate(args: string[], deps: CustomFilesCliDeps): Promise<number> {
-    const { values, positionals } = parse(args, FIELD_OPTIONS);
-    requirePositionals(positionals, 2, 'update <project-id> <file> [options]');
+    const { values, positionals } = parseCommandArgs(args, FILE_FIELD_OPTIONS);
+    requirePositionals(positionals, 2, 'update <project-id> <file> [options]', 'custom-files');
     const projectId = positionals[0];
 
-    const current = resolveFile(deps.projectManager.listCustomFiles(projectId), positionals[1]);
-    const content = await readContent(values, deps);
-    const listFlag = readListFlag(values);
+    const current = resolveCustomFile(deps.projectManager.listCustomFiles(projectId), positionals[1]);
+    const content = await readContentSource(values, deps.readStdin);
+    const listFlag = readFlagPair(values, 'list-in-agents');
 
     const input: CustomFileInput = {
         Directory: values.directory ?? current.Directory,
@@ -269,11 +267,11 @@ async function handleUpdate(args: string[], deps: CustomFilesCliDeps): Promise<n
 }
 
 function handleDelete(args: string[], deps: CustomFilesCliDeps): number {
-    const { positionals } = parse(args, {});
-    requirePositionals(positionals, 2, 'delete <project-id> <file>');
+    const { positionals } = parseCommandArgs(args, {});
+    requirePositionals(positionals, 2, 'delete <project-id> <file>', 'custom-files');
     const projectId = positionals[0];
 
-    const file = resolveFile(deps.projectManager.listCustomFiles(projectId), positionals[1]);
+    const file = resolveCustomFile(deps.projectManager.listCustomFiles(projectId), positionals[1]);
     const removed = deps.projectManager.removeCustomFile(projectId, file.Id);
 
     let syncFailure: string | undefined;
@@ -289,70 +287,6 @@ function handleDelete(args: string[], deps: CustomFilesCliDeps): number {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Minimum length of an ID prefix accepted as a file reference. */
-const MIN_ID_PREFIX = 4;
-
-/**
- * Finds a custom file by exact ID, then by workspace-relative path
- * (case-insensitive, `\` accepted), then by unique ID prefix.
- *
- * @throws {Error} When nothing or more than one file matches.
- */
-function resolveFile(files: readonly CustomFile[], ref: string): CustomFile {
-    const normalised = ref.trim().replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
-
-    const byId = files.find((f) => f.Id.toLowerCase() === normalised);
-    if (byId) return byId;
-
-    const byPath = files.find((f) => customFileRelativePath(f).toLowerCase() === normalised);
-    if (byPath) return byPath;
-
-    if (normalised.length >= MIN_ID_PREFIX) {
-        const byPrefix = files.filter((f) => f.Id.toLowerCase().startsWith(normalised));
-        if (byPrefix.length === 1) return byPrefix[0];
-        if (byPrefix.length > 1) {
-            throw new Error(`"${ref}" matches several custom files — use a longer ID prefix or the path.`);
-        }
-    }
-    throw new Error(`No custom file matches "${ref}". Run 'paralizer custom-files list <project-id>' to see them.`);
-}
-
-/** Reads the content from whichever source option was given, or `undefined` if none. */
-async function readContent(
-    values: { 'content-file'?: string; stdin?: boolean; content?: string },
-    deps: CustomFilesCliDeps,
-): Promise<string | undefined> {
-    const sources = [
-        values['content-file'] !== undefined,
-        values.stdin === true,
-        values.content !== undefined,
-    ].filter(Boolean).length;
-    if (sources > 1) {
-        throw new UsageError('Use only one of --content-file, --stdin and --content.');
-    }
-
-    if (values.content !== undefined) return values.content;
-    if (values.stdin === true || values['content-file'] === '-') return deps.readStdin();
-    if (values['content-file'] !== undefined) {
-        try {
-            return fs.readFileSync(values['content-file'], 'utf8');
-        } catch (err) {
-            throw new Error(`Cannot read content file "${values['content-file']}": ${(err as Error).message}`);
-        }
-    }
-    return undefined;
-}
-
-/** `true` / `false` when a list flag was given, `undefined` when neither was. */
-function readListFlag(values: { 'list-in-agents'?: boolean; 'no-list-in-agents'?: boolean }): boolean | undefined {
-    if (values['list-in-agents'] === true && values['no-list-in-agents'] === true) {
-        throw new UsageError('Use only one of --list-in-agents and --no-list-in-agents.');
-    }
-    if (values['list-in-agents'] === true) return true;
-    if (values['no-list-in-agents'] === true) return false;
-    return undefined;
-}
 
 /**
  * Syncs all workspaces after a mutation (mirrors the REST handlers).
@@ -383,12 +317,4 @@ function report(deps: CustomFilesCliDeps, message: string, syncFailure: string |
     deps.out(`${message}\n`);
     deps.err(`Warning: the definition was saved, but syncing the workspaces failed: ${syncFailure}\n`);
     return EXIT_SYNC_FAILED;
-}
-
-async function readStdin(): Promise<string> {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
-    }
-    return Buffer.concat(chunks).toString('utf8');
 }
