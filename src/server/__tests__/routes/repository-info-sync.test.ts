@@ -11,7 +11,13 @@ import {
     type CommitPushResult,
 } from '../../../orchestration/repository-info-sync.js';
 import { MainFolderPreconditionError, MainFolderGitError } from '../../../orchestration/repository-main-folder.js';
-import type { RepositoryInfoImportField, RepositoryInfoFieldDiff, RepositoryInfoSyncState } from '../../../orchestration/repository-info.js';
+import type {
+    RepositoryInfoImportField,
+    RepositoryInfoFieldDiff,
+    RepositoryInfoSyncState,
+    RepositoryFileDiff,
+    RepositoryFileImportSelection,
+} from '../../../orchestration/repository-info.js';
 import { MAX_INFO_COMMIT_MESSAGE_LENGTH } from '../../../config/config.constants.js';
 import { mockRequest, mockResponse, flushAsync, type MockResponse } from '../helpers/mock-http.js';
 
@@ -28,9 +34,10 @@ const DEFAULT_STATUS: RepositoryInfoSyncStatus = {
     health: { healthy: true, issues: [] },
 };
 
-const DEFAULT_IMPORT_PREVIEW: { state: RepositoryInfoSyncState; fields: RepositoryInfoFieldDiff[] } = {
+const DEFAULT_IMPORT_PREVIEW: { state: RepositoryInfoSyncState; fields: RepositoryInfoFieldDiff[]; files: RepositoryFileDiff[] } = {
     state: 'incoming',
     fields: [{ field: 'Name', current: 'Old Name', incoming: 'New Name' }],
+    files: [],
 };
 
 const DEFAULT_COMMIT_RESULT: CommitPushResult = {
@@ -83,16 +90,16 @@ class MockInfoSyncOrchestrator {
 
     async getImportPreview(
         repositoryId: string,
-    ): Promise<{ state: RepositoryInfoSyncState; fields: RepositoryInfoFieldDiff[] }> {
+    ): Promise<{ state: RepositoryInfoSyncState; fields: RepositoryInfoFieldDiff[]; files: RepositoryFileDiff[] }> {
         this.record('getImportPreview', [repositoryId]);
         return DEFAULT_IMPORT_PREVIEW;
     }
 
     async applyImport(
         repositoryId: string,
-        fields: RepositoryInfoImportField[],
+        input: { fields: RepositoryInfoImportField[]; files?: RepositoryFileImportSelection[] },
     ): Promise<RepositoryInfoSyncStatus> {
-        this.record('applyImport', [repositoryId, fields]);
+        this.record('applyImport', [repositoryId, input]);
         return DEFAULT_STATUS;
     }
 
@@ -459,7 +466,7 @@ test('POST /info-sync/import applies the selected fields and returns the status 
 
     assert.equal(res.statusCode, 200);
     assert.deepEqual(JSON.parse(res.body), DEFAULT_STATUS);
-    assert.deepEqual(infoSync.calls[0], { method: 'applyImport', args: ['repo-1', ['Name']] });
+    assert.deepEqual(infoSync.calls[0], { method: 'applyImport', args: ['repo-1', { fields: ['Name'] }] });
 });
 
 test('POST /info-sync/import accepts an empty fields array (keep all local values)', async () => {
@@ -467,15 +474,95 @@ test('POST /info-sync/import accepts an empty fields array (keep all local value
     const res = await dispatch(router, 'POST', '/api/repositories/repo-1/info-sync/import', { fields: [] });
 
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(infoSync.calls[0], { method: 'applyImport', args: ['repo-1', []] });
+    assert.deepEqual(infoSync.calls[0], { method: 'applyImport', args: ['repo-1', { fields: [] }] });
 });
 
-test('POST /info-sync/import rejects a missing fields array with 400', async () => {
+test('POST /info-sync/import accepts an empty body (keep everything for both fields and files)', async () => {
     const { router, infoSync } = setup();
     const res = await dispatch(router, 'POST', '/api/repositories/repo-1/info-sync/import', {});
 
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(infoSync.calls[0], { method: 'applyImport', args: ['repo-1', { fields: [] }] });
+});
+
+test('POST /info-sync/import rejects a non-array fields with 400', async () => {
+    const { router, infoSync } = setup();
+    const res = await dispatch(router, 'POST', '/api/repositories/repo-1/info-sync/import', { fields: 'Name' });
+
     assert.equal(res.statusCode, 400);
     assert.equal(infoSync.calls.length, 0);
+});
+
+test('POST /info-sync/import forwards a files selection alongside fields', async () => {
+    const { router, infoSync } = setup();
+    const res = await dispatch(router, 'POST', '/api/repositories/repo-1/info-sync/import', {
+        fields: ['Name'],
+        files: [{ path: 'scripts/run.sh', action: 'add' }],
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(infoSync.calls[0], {
+        method: 'applyImport',
+        args: ['repo-1', { fields: ['Name'], files: [{ path: 'scripts/run.sh', action: 'add' }] }],
+    });
+});
+
+test('POST /info-sync/import accepts a files-only body (no fields key)', async () => {
+    const { router, infoSync } = setup();
+    const res = await dispatch(router, 'POST', '/api/repositories/repo-1/info-sync/import', {
+        files: [{ path: 'scripts/run.sh', action: 'keep' }],
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(infoSync.calls[0], {
+        method: 'applyImport',
+        args: ['repo-1', { fields: [], files: [{ path: 'scripts/run.sh', action: 'keep' }] }],
+    });
+});
+
+test('POST /info-sync/import rejects a non-array files with 400', async () => {
+    const { router, infoSync } = setup();
+    const res = await dispatch(router, 'POST', '/api/repositories/repo-1/info-sync/import', {
+        files: 'scripts/run.sh',
+    });
+
+    assert.equal(res.statusCode, 400);
+    assert.equal(infoSync.calls.length, 0);
+});
+
+test('POST /info-sync/import rejects a files entry missing a path with 400', async () => {
+    const { router, infoSync } = setup();
+    const res = await dispatch(router, 'POST', '/api/repositories/repo-1/info-sync/import', {
+        files: [{ action: 'add' }],
+    });
+
+    assert.equal(res.statusCode, 400);
+    assert.equal(infoSync.calls.length, 0);
+});
+
+test('POST /info-sync/import rejects the disallowed "skip" action with 400', async () => {
+    const { router, infoSync } = setup();
+    const res = await dispatch(router, 'POST', '/api/repositories/repo-1/info-sync/import', {
+        files: [{ path: 'scripts/run.sh', action: 'skip' }],
+    });
+
+    assert.equal(res.statusCode, 400);
+    assert.match(JSON.parse(res.body).error, /skip/);
+    assert.equal(infoSync.calls.length, 0);
+});
+
+test('POST /info-sync/import maps a rejected files selection (unknown path) from applyImport to 400', async () => {
+    const { router, infoSync } = setup();
+    infoSync.errors['applyImport'] = new Error(
+        'Cannot apply import: file "scripts/unknown.sh" is not part of the current import diff.',
+    );
+
+    const res = await dispatch(router, 'POST', '/api/repositories/repo-1/info-sync/import', {
+        files: [{ path: 'scripts/unknown.sh', action: 'add' }],
+    });
+
+    assert.equal(res.statusCode, 400);
+    assert.match(JSON.parse(res.body).error, /not part of the current import diff/);
 });
 
 test('POST /info-sync/import rejects fields: ["Url"] with 400', async () => {

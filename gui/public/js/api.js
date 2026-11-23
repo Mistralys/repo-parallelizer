@@ -325,14 +325,29 @@ const repositories = {
         },
 
         /**
-         * Apply the selected fields from the incoming file onto the repository's data.
+         * Apply the selected fields and/or per-file actions from the incoming
+         * file onto the repository's data.
+         *
+         * Accepts either a bare `fields` array (the pre-Milestone-2 call shape,
+         * kept for existing callers) or a `{ fields, files }` selections object.
+         * Only the keys actually supplied end up in the request body — passing
+         * neither sends `{}`, which the server treats as "keep everything".
          *
          * @param {string} id - Repository ID.
-         * @param {Array<'Name'|'Description'>} fields - Fields to import; an empty array keeps every local value.
+         * @param {Array<'Name'|'Description'>|{ fields?: Array<'Name'|'Description'>, files?: Array<{ path: string, action: string }> }} selections
+         *   Either a bare `fields` array, or a selections object: `fields` is an array of
+         *   `'Name'` and/or `'Description'`; `files` is an array of `{ path, action }`
+         *   selections for the incoming `files/` diff (Milestone 2). Each `action` must be
+         *   one of `'add'`, `'discard'`, `'keep'`, `'delete'`, `'overwrite'`. Both are
+         *   optional — omitting either key keeps everything for that half of the import.
          * @returns {Promise<InfoSyncStatus>}
          */
-        applyImport(id, fields) {
-            return request('POST', `/api/repositories/${encodeURIComponent(id)}/info-sync/import`, { fields });
+        applyImport(id, selections) {
+            const { fields, files } = Array.isArray(selections) ? { fields: selections } : (selections || {});
+            const body = {};
+            if (fields !== undefined) body.fields = fields;
+            if (files !== undefined) body.files = files;
+            return request('POST', `/api/repositories/${encodeURIComponent(id)}/info-sync/import`, body);
         },
 
         /**
@@ -347,6 +362,60 @@ const repositories = {
                 'POST',
                 `/api/repositories/${encodeURIComponent(id)}/info-sync/commit-push`,
                 message === undefined ? {} : { message },
+            );
+        },
+    },
+
+    /**
+     * Repository-level custom-file endpoints (Milestone 2) — the
+     * repository-scoped counterpart of `api.projects.customFiles`. Every
+     * mutation requires info sync to be enabled for the repository (the
+     * server responds `409` otherwise); request bodies are camelCase,
+     * responses use the stored PascalCase `RepositoryFile` shape.
+     *
+     * @namespace api.repositories.files
+     */
+    files: {
+        /**
+         * @param {string} id - Repository ID.
+         * @returns {Promise<Object[]>}
+         */
+        list(id) {
+            return request('GET', `/api/repositories/${encodeURIComponent(id)}/files`);
+        },
+
+        /**
+         * @param {string} id - Repository ID.
+         * @param {{ directory?: string, fileName: string, label: string, description?: string, content: string, listInAgents?: boolean, executable?: boolean }} data
+         * @returns {Promise<Object>} The created repository file (HTTP 201).
+         */
+        create(id, data) {
+            return request('POST', `/api/repositories/${encodeURIComponent(id)}/files`, data);
+        },
+
+        /**
+         * @param {string} id - Repository ID.
+         * @param {string} fileId
+         * @param {{ directory?: string, fileName: string, label: string, description?: string, content: string, listInAgents?: boolean, executable?: boolean }} data
+         * @returns {Promise<Object>} The updated repository file.
+         */
+        update(id, fileId, data) {
+            return request(
+                'PUT',
+                `/api/repositories/${encodeURIComponent(id)}/files/${encodeURIComponent(fileId)}`,
+                data,
+            );
+        },
+
+        /**
+         * @param {string} id - Repository ID.
+         * @param {string} fileId
+         * @returns {Promise<void>}
+         */
+        remove(id, fileId) {
+            return request(
+                'DELETE',
+                `/api/repositories/${encodeURIComponent(id)}/files/${encodeURIComponent(fileId)}`,
             );
         },
     },

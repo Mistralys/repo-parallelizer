@@ -774,6 +774,26 @@ export function buildRepositoryInfoSyncSection(repo, options = {}) {
         safeRender();
     }
 
+    /**
+     * Builds the success toast text for a Commit & Push outcome.
+     *
+     * Names the pushed commit when both a `commitSha` and the main folder's
+     * `defaultBranch` are known (`Pushed {sha7} to {branch}.`); falls back to
+     * the generic `Committed and pushed.` otherwise — e.g. an older server
+     * response shape, or a repository whose main folder was recreated
+     * between the dialog opening and the commit landing.
+     *
+     * @param {{ commitSha?: string }} result - `CommitPushResult` from `commitPush()`.
+     * @returns {string}
+     */
+    function describeCommitOutcome(result) {
+        const branch = status.mainFolder ? status.mainFolder.defaultBranch : undefined;
+        if (result && result.commitSha && branch) {
+            return `Pushed ${result.commitSha.slice(0, 7)} to ${branch}.`;
+        }
+        return 'Committed and pushed.';
+    }
+
     async function doCommitPush() {
         if (busy || modalOpen) return;
         modalOpen = true;
@@ -782,7 +802,7 @@ export function buildRepositoryInfoSyncSection(repo, options = {}) {
         // The dialog performs the commit itself (see info-commit-dialog.js);
         // it already surfaces its own errors inline in its modal, so errors
         // from Commit & Push never reach this section's inline alert.
-        const message = await showInfoCommitDialog({
+        const outcome = await showInfoCommitDialog({
             repoId,
             pendingFiles: status.pendingChanges,
             defaultMessage: status.defaultCommitMessage,
@@ -790,8 +810,11 @@ export function buildRepositoryInfoSyncSection(repo, options = {}) {
         if (destroyed) return;
         modalOpen = false;
 
-        if (message !== null) {
-            showToast('Committed and pushed.', 'success');
+        if (outcome !== null) {
+            showToast(describeCommitOutcome(outcome.result), 'success');
+            if (outcome.result && outcome.result.filterFallback) {
+                showToast('The remote does not support partial-clone filtering — a full fetch was used.', 'info');
+            }
             await reloadStatusSilently();
         }
 

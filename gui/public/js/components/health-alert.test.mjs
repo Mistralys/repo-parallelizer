@@ -10,6 +10,8 @@
  *   AC3 — (covered indirectly here; verified end-to-end for workspace-detail.js
  *          by workspace-detail.index-health.test.mjs and
  *          workspace-detail.credential-error.test.mjs, which pass unchanged.)
+ *   AC4 (WP-016) — A rejected `onClick` re-enables the button, restores its
+ *          idle label, and raises no unhandled promise rejection.
  *
  * Uses Node's built-in test runner with jsdom for a minimal DOM environment.
  * Run individually with:
@@ -194,6 +196,56 @@ test('button falls back to label as the loading text when loadingLabel is omitte
 
     resolveClick();
     await pending;
+});
+
+test('AC4: a rejected onClick re-enables the button and restores its label, raising no unhandled rejection', async () => {
+    const originalConsoleError = console.error;
+    const loggedErrors = [];
+    console.error = (...args) => { loggedErrors.push(args); };
+
+    const unhandled = [];
+    const onUnhandledRejection = (err) => unhandled.push(err);
+    process.on('unhandledRejection', onUnhandledRejection);
+
+    let rejectClick;
+    const pending = new Promise((_resolve, reject) => { rejectClick = reject; });
+    // The handler's own `try` awaits this promise; without a listener of its
+    // own, Node would otherwise report it as unhandled while it is pending.
+    pending.catch(() => {});
+
+    try {
+        const section = buildHealthAlert(
+            { healthy: false, issues: [makeIssue({ fixAction: 'risky-action' })] },
+            {
+                actions: {
+                    'risky-action': {
+                        label: 'Fix',
+                        loadingLabel: 'Fixing…',
+                        onClick: () => pending,
+                    },
+                },
+            },
+        );
+
+        const btn = section.querySelector('button');
+        btn.dispatchEvent(new window.Event('click'));
+        await Promise.resolve();
+        assert.strictEqual(btn.disabled, true);
+        assert.strictEqual(btn.textContent, 'Fixing…');
+
+        rejectClick(new Error('boom'));
+        // Flush the rejection's microtask chain.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.strictEqual(btn.disabled, false, 'button should be re-enabled after a rejected onClick');
+        assert.strictEqual(btn.textContent, 'Fix', 'label should be restored after a rejected onClick');
+        assert.strictEqual(unhandled.length, 0, 'no unhandled promise rejection should have been raised');
+        assert.ok(loggedErrors.length >= 1, 'the rejection should be logged via console.error');
+    } finally {
+        console.error = originalConsoleError;
+        process.off('unhandledRejection', onUnhandledRejection);
+    }
 });
 
 test('no innerHTML assignment is used anywhere in the component source', () => {

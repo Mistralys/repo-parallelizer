@@ -141,7 +141,7 @@ Returns the subset of configured git credentials whose `host` matches the hostna
 
 ## Repository Info Sync (`/api/repositories/:id/info-sync`)
 
-Opt-in, per-repository sync of `Id`, `Name`, `Description`, and an informational `Url` into a Paralizer-managed main-folder clone's versioned `.workspace/info.json`. Every handler delegates to `RepositoryInfoSyncOrchestrator` (see `api-surface.md`), which serialises all mutating operations per repository via an internal async lock. Custom files are out of scope for this sync (deferred to a later milestone).
+Opt-in, per-repository sync of `Id`, `Name`, `Description`, and an informational `Url` into a Paralizer-managed main-folder clone's versioned `.workspace/info.json`. Every handler delegates to `RepositoryInfoSyncOrchestrator` (see `api-surface.md`), which serialises all mutating operations per repository via an internal async lock. As of Milestone 2, repository-level custom files (`files/` under the managed clone's `.workspace`) are also synced through this same import flow — see **`POST .../import` Body (Milestone 2: `files`)** below and **Repository Files** further down for the dedicated CRUD routes.
 
 | Method | Path | Success | Error Codes | Description |
 |---|---|---|---|---|
@@ -150,7 +150,7 @@ Opt-in, per-repository sync of `Id`, `Name`, `Description`, and an informational
 | `POST` | `/api/repositories/:id/info-sync/refresh` | 200 | 404, 409, 502 | Re-inspect the main folder and re-evaluate sync state without writing anything. |
 | `POST` | `/api/repositories/:id/info-sync/recreate-main-folder` | 200 | 400, 404, 409, 502 | Delete and re-clone the managed main folder. Body (optional): `{ discardPendingChanges? }`. |
 | `GET` | `/api/repositories/:id/info-sync/import` | 200 | 404, 409 | Preview the per-field diff between Paralizer's data and the incoming `.workspace/info.json`. Only valid when state is `incoming` or `conflict`. |
-| `POST` | `/api/repositories/:id/info-sync/import` | 200 | 400, 404, 409 | Apply selected fields from the incoming file onto the repository's data. Body: `{ fields }` — array of `'Name'` and/or `'Description'` (empty array valid, means "keep all local values"). Triggers a best-effort `workspaceArtifacts.regenerateForRepository()` call after a successful apply (failure is logged as a warning, Source: `'workspace-index'`, Operation: `'info-sync-import'`, and does not affect the response). |
+| `POST` | `/api/repositories/:id/info-sync/import` | 200 | 400, 404, 409 | Apply selected fields and/or per-file actions from the incoming file onto the repository's data. Body: `{ fields?, files? }` — both optional and independently allowed to be empty or omitted (an empty body `{}` is valid and means "keep everything"). `fields` is an array of `'Name'` and/or `'Description'`; `files` is an array of `{ path, action }` selections for the incoming `files/` diff (Milestone 2). Triggers a best-effort `workspaceArtifacts.regenerateForRepository()` call after a successful apply (failure is logged as a warning, Source: `'workspace-index'`, Operation: `'info-sync-import'`, and does not affect the response). |
 | `POST` | `/api/repositories/:id/info-sync/commit-push` | 200 | 400, 404, 409, 502 | Commit the local `.workspace/info.json` changes in the main folder and push them to the remote. Body (optional): `{ message? }`. |
 
 ### Error Mapping
@@ -171,7 +171,8 @@ Every handler maps errors thrown by the orchestrator onto HTTP status codes thro
 |---|---|---|---|---|
 | `enabled` | `PUT /info-sync` | `boolean` | **Yes** | Enables or disables sync for the repository. |
 | `discardPendingChanges` | `PUT /info-sync`, `POST .../recreate-main-folder` | `boolean` | No | When `true`, allows the operation to proceed even though it would discard pending local changes in the main folder. Omitting it (or `false`) causes a `PendingChangesError` (409) when changes are pending. |
-| `fields` | `POST .../import` | `Array<'Name' \| 'Description'>` | **Yes** | Fields to import from the incoming file. Any value other than `'Name'`/`'Description'` (e.g. `'Url'`) is rejected with 400. An empty array is valid and means "keep all local values" — the file is still rewritten from Paralizer's data and the state resolves to `in-sync`. `Url` is never an importable field: it is informational only and is never synced from the folder back into Paralizer's data. |
+| `fields` | `POST .../import` | `Array<'Name' \| 'Description'>` | No | Fields to import from the incoming file. Any value other than `'Name'`/`'Description'` (e.g. `'Url'`) is rejected with 400. Omitted or an empty array both mean "keep all local values" — the file is still rewritten from Paralizer's data and the state resolves to `in-sync`. `Url` is never an importable field: it is informational only and is never synced from the folder back into Paralizer's data. |
+| `files` | `POST .../import` | `Array<{ path: string; action: string }>` | No | Per-file import selections for the incoming `files/` diff (Milestone 2). Each `action` must be one of `'add'`, `'discard'`, `'keep'`, `'delete'`, `'overwrite'` — any other value (including `'skip'`) is rejected with 400 at the route layer. Omitted or an empty array both mean "keep all local files" (the actual default per file is resolved by `applyImport()`'s `defaultFileImportAction()` based on that file's diff kind). An unknown `path` or an action disallowed for a given file's diff kind is rejected with 400 by `applyImport()` itself (not the route-level structural check). |
 | `message` | `POST .../commit-push` | `string` | No | Commit message. When present, trimmed length must be between 1 and `MAX_INFO_COMMIT_MESSAGE_LENGTH`. When omitted, a default message (`Update <folder-name> for "<repositoryId>" via Paralizer`) is used. |
 
 ### `GET /api/repositories/:id/info-sync` Response Shape
@@ -245,6 +246,30 @@ Issues reported in the `health` field above, each carrying `{ type, severity, me
 | `info-sync-id-mismatch` | `error` | `none` | The file's `Id` does not match the repository's own `Id`. |
 | `info-sync-unsupported-schema` | `warning` | `none` | The file's `SchemaVersion` is greater than `REPOSITORY_INFO_SCHEMA_VERSION`. |
 | `info-sync-credential-missing` | `warning` | `configure-credential` | No credential resolves for the repository's host, so a git operation (fetch/push) cannot authenticate. |
+| `info-sync-files-unsafe-entry` | `warning` | `none` | A symlink or other non-regular entry sits under the managed clone's `files/` folder (Milestone 2); it is never followed, read, or deleted, so it stays reported until a human removes it by hand. |
+| `info-sync-files-invalid-incoming` | `warning` | `import` | A regular file under `files/` cannot be treated as a normal repository file (binary, oversized, unreadable, or an invalid/reserved path segment). |
+| `info-sync-files-write-skipped` | `warning` | `none` | One of the repository's own files (`RepositoryFileManager.list()`) resolves to a write target that the shared guard chain refuses (a symlink escape, or a path segment already occupied by a plain file). |
+
+---
+
+## Repository Files (`/api/repositories/:id/files`)
+
+Repository-level custom files (Milestone 2) — small per-repository files such as wrapper scripts, stored and synced by Paralizer through git. This is the repository-scoped counterpart of the **Projects** section's `/api/projects/:id/custom-files*` routes below, with one key difference: every mutation here is gated on info sync being enabled for the repository (see **Enabled-only mutations** below), since repository files travel through the `.workspace/files/` tree managed by Repository Info Sync (commit & push, then a pull in each workspace) rather than being copied directly into workspace folders.
+
+| Method | Path | Success | Error Codes | Description |
+|---|---|---|---|---|
+| `GET` | `/api/repositories/:id/files` | 200 | 404 | List the repository's custom files (array of `RepositoryFile`, PascalCase; empty when none). Always available, even when info sync is disabled. |
+| `POST` | `/api/repositories/:id/files` | 201 | 400, 404, 409 | Create a repository file. Body (camelCase): `{ fileName, label, content, directory?, description?, listInAgents?, executable? }`. Returns the created `RepositoryFile`. |
+| `PUT` | `/api/repositories/:id/files/:fileId` | 200 | 400, 404, 409 | Replace a repository file's editable fields (same body as `POST`). |
+| `DELETE` | `/api/repositories/:id/files/:fileId` | 204 | 404, 409 | Delete the file definition. |
+
+**Enabled-only mutations:** `GET` always works; every mutation (`POST`/`PUT`/`DELETE`) first calls `assertSyncEnabled(id)` and maps the resulting `SyncPreconditionError` to `409` — nothing is written while info sync is disabled for the repository.
+
+**Locking:** every mutation runs inside the same per-repository async lock (`runLocked`) that `RepositoryInfoSyncOrchestrator` uses for `saveSettings`/`refresh`/`applyImport`/`commitAndPush`, so a file CRUD call can never race a concurrent import or commit-and-push on the same repository.
+
+**Artefact regeneration:** a successful mutation calls `workspaceArtifacts.regenerateForRepository(id)`, which syncs the managed clone's `.workspace/files/` tree and regenerates every workspace's `AGENTS.md`. Best-effort: a failure is logged as a `warning` (Source: `'workspace-index'`) and does not change the response. Unlike the project custom-files routes, there is no separate "remove copies" call on move/rename/delete — the sync's write-only-if-changed pass already deletes any regular file under `files/` that is no longer in the data.
+
+**Validation (400):** same field rules as project custom files (see **Custom-file validation** below) via `validateRepositoryFileInput()`, including the file-count cap, enforced by `RepositoryFileManager`.
 
 ---
 

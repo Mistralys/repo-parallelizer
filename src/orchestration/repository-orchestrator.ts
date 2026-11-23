@@ -12,6 +12,7 @@ import type { AddRepositoryResult, WorkspaceCloneResult } from './orchestration.
 import type { ErrorLogManager } from '../error-log/error-log.manager.js';
 import { resolveRootRealPath, escapesRootViaRealpath } from '../utils/path-guard.js';
 import type { RepositoryInfoSyncOrchestrator } from './repository-info-sync.js';
+import type { RepositoryFileManager } from '../models/repository/repository-file.manager.js';
 
 /**
  * High-level orchestrator for repository lifecycle operations within projects.
@@ -48,6 +49,17 @@ export class RepositoryOrchestrator {
         private readonly workspaceArtifacts: WorkspaceArtifactsOrchestrator,
         private readonly errorLogManager?: ErrorLogManager,
         private readonly repositoryInfoSync?: RepositoryInfoSyncOrchestrator,
+        /**
+         * Milestone 2 — optional, trailing: when provided, the global
+         * deletion cascade also removes the repository's file store
+         * (`repository-files/{repoId}.json`), best-effort. Omitting it only
+         * skips that one cascade step; unlike `RepositoryInfoSyncOrchestrator`
+         * (a required constructor parameter elsewhere, since omitting it
+         * there risks deleting live committed files), there is no
+         * destructive risk in skipping this cleanup, so it follows the
+         * existing optional-trailing-dependency convention instead.
+         */
+        private readonly repositoryFileManager?: RepositoryFileManager,
     ) {}
 
     // -------------------------------------------------------------------------
@@ -380,6 +392,27 @@ export class RepositoryOrchestrator {
             }
         }
 
+        // Remove the repository's file store (if any) now that the
+        // repository record is gone. A failure here is logged, not thrown —
+        // the repository is already deleted and this is best-effort cleanup
+        // (Milestone 2, mirroring the managed-main-folder cleanup above).
+        let fileStoreRemoved = false;
+        if (this.repositoryFileManager) {
+            try {
+                this.repositoryFileManager.removeStore(repositoryId);
+                fileStoreRemoved = true;
+            } catch (error) {
+                this.errorLogManager?.append({
+                    Severity: 'warning',
+                    Source: 'workspace-info',
+                    Operation: 'delete-repository-global',
+                    Context: { RepositoryId: repositoryId },
+                    Message: `Failed to remove repository file store for repository "${repositoryId}": ` +
+                        `${error instanceof Error ? error.message : String(error)}`,
+                });
+            }
+        }
+
         // Audit trail — the summary entry is emitted only after the global
         // removal above has succeeded, so a throw here (after the per-project
         // cascade already completed) leaves no summary entry behind while the
@@ -390,7 +423,8 @@ export class RepositoryOrchestrator {
             Operation: 'delete-repository-global',
             Context: { RepositoryId: repositoryId },
             Message: `Repository "${repositoryId}" was deleted globally, affecting ${affectedProjectIds.length} project(s).` +
-                (managedFolderRemoved ? ' Managed main folder removed.' : ''),
+                (managedFolderRemoved ? ' Managed main folder removed.' : '') +
+                (fileStoreRemoved ? ' Repository file store removed.' : ''),
             Details: JSON.stringify(affectedProjectIds),
         });
     }

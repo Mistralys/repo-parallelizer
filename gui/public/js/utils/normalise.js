@@ -155,3 +155,26 @@ export function normaliseErrorEntry(entry) {
         repository: entry.Repository || entry.repository || '',
     };
 }
+
+/**
+ * Normalise a repository file object from the backend (PascalCase or
+ * camelCase `RepositoryFile`, Milestone 2). Mirrors `normaliseCustomFile()`
+ * in `views/project-custom-files.js`: fills every field's default and drops
+ * any unrecognised key from the input object.
+ *
+ * @param {Object} f
+ * @returns {{ id: string, directory: string, fileName: string, label: string, description: string, content: string, executable: boolean, listInAgents: boolean, dateModified: string }}
+ */
+export function normaliseRepositoryFile(f) {
+    return {
+        id:           f.Id           || f.id           || '',
+        directory:    f.Directory    ?? f.directory    ?? '',
+        fileName:     f.FileName     ?? f.fileName     ?? '',
+        label:        f.Label        ?? f.label        ?? '',
+        description:  f.Description  ?? f.description  ?? '',
+        content:      f.Content      ?? f.content      ?? '',
+        executable:   (f.Executable   ?? f.executable)   === true,
+        listInAgents: (f.ListInAgents ?? f.listInAgents) === true,
+        dateModified: f.DateModified  || f.dateModified  || '',
+    };
+}

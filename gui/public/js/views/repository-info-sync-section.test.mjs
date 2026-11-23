@@ -21,6 +21,13 @@
  *            on confirmation; a failed initial load shows an inline error
  *            with a Retry button; `cleanup()` stops the section from acting
  *            on a request that resolves after unmount.
+ *   AC-18 (WP-016) — The Commit & Push toast names the short commit SHA and
+ *            default branch when both are known, falls back to the generic
+ *            text otherwise, and shows an additional info toast for a
+ *            `filterFallback` result; cancelling the dialog shows no toast.
+ *            The button matrix for `main-folder-unavailable`, `invalid-file`,
+ *            `id-mismatch` and `unsupported-schema` matches the documented
+ *            reasons.
  *
  * Uses Node's built-in test runner with jsdom for a minimal DOM environment.
  * Run individually with:
@@ -508,3 +515,127 @@ test('cleanup() stops the section from acting on a status fetch that resolves af
     assert.equal(element.querySelector('.info-sync-toggle-row'), null);
     assert.ok(element.querySelector('.repository-info-sync-body').textContent.includes('Loading'));
 });
+
+// ---------------------------------------------------------------------------
+// AC-18 (WP-016) — Commit & Push toast naming the SHA/branch, filterFallback
+// ---------------------------------------------------------------------------
+
+function toastTexts() {
+    return Array.from(document.querySelectorAll('#toast-container .toast-message')).map((el) => el.textContent);
+}
+
+async function openCommitDialogAndSubmit(element) {
+    dispatchClick(findButton(element, 'Commit & Push'));
+    await wait();
+    const messageInput = document.getElementById('info-commit-message');
+    messageInput.value = 'Update workspace info';
+    messageInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+    dispatchClick(findModalButton('Commit & Push'));
+    await wait();
+}
+
+test('AC-18: the commit toast names the short SHA and default branch when both are known', async () => {
+    const repoId = uniqueRepoId();
+    api.repositories.infoSync.status = async () => makeStatus({ state: 'write-required', pendingChanges: ['x'] });
+    api.repositories.infoSync.commitPush = async () => ({ committed: true, pushed: true, commitSha: 'abcdef1234567' });
+
+    const { element } = buildRepositoryInfoSyncSection({ id: repoId, name: 'Repo' });
+    document.body.appendChild(element);
+    await wait();
+
+    await openCommitDialogAndSubmit(element);
+
+    assert.ok(toastTexts().includes('Pushed abcdef1 to main.'));
+});
+
+test('AC-18: the commit toast falls back to the generic text without a commitSha', async () => {
+    const repoId = uniqueRepoId();
+    api.repositories.infoSync.status = async () => makeStatus({ state: 'write-required', pendingChanges: ['x'] });
+    api.repositories.infoSync.commitPush = async () => ({ committed: true, pushed: true });
+
+    const { element } = buildRepositoryInfoSyncSection({ id: repoId, name: 'Repo' });
+    document.body.appendChild(element);
+    await wait();
+
+    await openCommitDialogAndSubmit(element);
+
+    assert.ok(toastTexts().includes('Committed and pushed.'));
+});
+
+test('AC-18: a filterFallback result shows an additional info toast', async () => {
+    const repoId = uniqueRepoId();
+    api.repositories.infoSync.status = async () => makeStatus({ state: 'write-required', pendingChanges: ['x'] });
+    api.repositories.infoSync.commitPush = async () => ({ committed: true, pushed: true, commitSha: 'abcdef1234567', filterFallback: true });
+
+    const { element } = buildRepositoryInfoSyncSection({ id: repoId, name: 'Repo' });
+    document.body.appendChild(element);
+    await wait();
+
+    await openCommitDialogAndSubmit(element);
+
+    const texts = toastTexts();
+    assert.ok(texts.includes('Pushed abcdef1 to main.'));
+    assert.ok(texts.some((t) => t.includes('partial-clone filtering')));
+});
+
+test('AC-18: cancelling the commit dialog shows no toast and does not re-fetch status', async () => {
+    const repoId = uniqueRepoId();
+    let statusCalls = 0;
+    api.repositories.infoSync.status = async () => { statusCalls += 1; return makeStatus({ state: 'write-required', pendingChanges: ['x'] }); };
+
+    const { element } = buildRepositoryInfoSyncSection({ id: repoId, name: 'Repo' });
+    document.body.appendChild(element);
+    await wait();
+    const callsBeforeOpen = statusCalls;
+
+    dispatchClick(findButton(element, 'Commit & Push'));
+    await wait();
+    dispatchClick(findModalButton('Cancel'));
+    await wait();
+
+    assert.equal(toastTexts().length, 0);
+    assert.equal(statusCalls, callsBeforeOpen);
+});
+
+// ---------------------------------------------------------------------------
+// AC-18 (WP-016) — Button matrix for the remaining documented states
+// ---------------------------------------------------------------------------
+
+test('AC-18: "main-folder-unavailable" disables Import… and Commit & Push with the documented reason, hides Refresh', async () => {
+    const repoId = uniqueRepoId();
+    api.repositories.infoSync.status = async () => makeStatus({ state: 'main-folder-unavailable' });
+
+    const { element } = buildRepositoryInfoSyncSection({ id: repoId, name: 'Repo' });
+    document.body.appendChild(element);
+    await wait();
+
+    assert.equal(findButton(element, 'Refresh').hidden, true);
+    const importBtn = findButton(element, 'Import…');
+    const commitBtn = findButton(element, 'Commit & Push');
+    assert.equal(importBtn.disabled, true);
+    assert.equal(importBtn.title, 'The main folder is unavailable — recreate it first.');
+    assert.equal(commitBtn.disabled, true);
+    assert.equal(commitBtn.title, 'The main folder is unavailable — recreate it first.');
+});
+
+for (const state of ['invalid-file', 'id-mismatch', 'unsupported-schema']) {
+    test(`AC-18: "${state}" enables Refresh, disables Import… and Commit & Push with the documented reasons`, async () => {
+        const repoId = uniqueRepoId();
+        api.repositories.infoSync.status = async () => makeStatus({ state });
+
+        const { element } = buildRepositoryInfoSyncSection({ id: repoId, name: 'Repo' });
+        document.body.appendChild(element);
+        await wait();
+
+        assert.equal(findButton(element, 'Refresh').hidden, false);
+        assert.equal(findButton(element, 'Refresh').disabled, false);
+
+        const importBtn = findButton(element, 'Import…');
+        assert.equal(importBtn.disabled, true);
+        assert.equal(importBtn.title, 'No import available.');
+
+        const commitBtn = findButton(element, 'Commit & Push');
+        assert.equal(commitBtn.disabled, true);
+        assert.equal(commitBtn.title, 'Resolve the info file issue first.');
+    });
+}

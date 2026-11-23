@@ -6,16 +6,41 @@
  * validation/normalisation rules, and the executable-type heuristic shared by
  * `ProjectManager` (validation on save) and the artefact writer
  * (`src/orchestration/custom-files.ts`).
+ *
+ * The generic, scope-neutral file rules (path-segment safety, directory
+ * normalisation, label/description/content validation, the executable-type
+ * heuristic, and the line-ending policy) live in `../file-definition.ts` and
+ * are re-exported here under their established public names.
  */
 
+import {
+    checkPathSegment,
+    joinRelativePath,
+    normaliseDirectory,
+    validateDescription,
+    validateFileContent,
+    validateLabel,
+    isExecutableFile,
+    applyLineEndingPolicy,
+    FILE_DEFINITION_MAX_CONTENT_BYTES,
+    FILE_DEFINITION_MAX_LABEL_LENGTH,
+    FILE_DEFINITION_MAX_DESCRIPTION_LENGTH,
+} from '../file-definition.js';
+
+export {
+    normaliseDirectory,
+    isExecutableFile,
+    applyLineEndingPolicy,
+};
+
 /** Maximum UTF-8 size of a custom file's content, in bytes. */
-export const CUSTOM_FILE_MAX_CONTENT_BYTES = 256 * 1024;
+export const CUSTOM_FILE_MAX_CONTENT_BYTES = FILE_DEFINITION_MAX_CONTENT_BYTES;
 
 /** Maximum length of a label. */
-export const CUSTOM_FILE_MAX_LABEL_LENGTH = 120;
+export const CUSTOM_FILE_MAX_LABEL_LENGTH = FILE_DEFINITION_MAX_LABEL_LENGTH;
 
 /** Maximum length of a description. */
-export const CUSTOM_FILE_MAX_DESCRIPTION_LENGTH = 1000;
+export const CUSTOM_FILE_MAX_DESCRIPTION_LENGTH = FILE_DEFINITION_MAX_DESCRIPTION_LENGTH;
 
 /**
  * File names (compared case-insensitively) that the workspace index
@@ -63,42 +88,9 @@ export interface CustomFileInput {
     ListInAgents: boolean;
 }
 
-/** Characters that are invalid in a path segment on at least one supported OS. */
-// eslint-disable-next-line no-control-regex
-const INVALID_SEGMENT_CHARS = /[<>:"|?*\u0000-\u001f]/;
-
-/** Windows reserved device names (case-insensitive, with or without extension). */
-const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
-
-/**
- * Returns an error message when `segment` is not a safe single path
- * component on every supported OS, or `undefined` when it is fine.
- */
-function checkSegment(segment: string, what: string): string | undefined {
-    if (segment === '') return `${what} must not contain empty path segments.`;
-    if (segment === '.' || segment === '..') return `${what} must not contain "." or ".." segments.`;
-    if (INVALID_SEGMENT_CHARS.test(segment)) {
-        return `${what} contains characters that are not allowed (< > : " | ? * or control characters).`;
-    }
-    if (/[. ]$/.test(segment)) return `${what} segments must not end with a dot or a space.`;
-    if (WINDOWS_RESERVED.test(segment)) return `${what} uses a reserved system name ("${segment}").`;
-    return undefined;
-}
-
-/**
- * Normalises a user-typed directory: trims, converts `\` to `/`, strips
- * leading `./` and surrounding slashes. Does not validate.
- */
-export function normaliseDirectory(raw: string): string {
-    let dir = raw.trim().replace(/\\/g, '/');
-    while (dir.startsWith('./')) dir = dir.slice(2);
-    if (dir === '.') dir = '';
-    return dir.replace(/\/+$/, '');
-}
-
 /** Builds the workspace-relative path (`dir/name`) of a custom file. */
 export function customFileRelativePath(file: Pick<CustomFile, 'Directory' | 'FileName'>): string {
-    return file.Directory === '' ? file.FileName : `${file.Directory}/${file.FileName}`;
+    return joinRelativePath(file.Directory, file.FileName);
 }
 
 /**
@@ -121,24 +113,16 @@ export function validateCustomFileInput(
     repositoryIds: readonly string[],
     others: readonly CustomFile[],
 ): CustomFileInput {
-    const label = input.Label.trim();
-    const description = input.Description.trim();
+    const label = validateLabel(input.Label, CUSTOM_FILE_MAX_LABEL_LENGTH);
+    const description = validateDescription(input.Description, CUSTOM_FILE_MAX_DESCRIPTION_LENGTH);
     const fileName = input.FileName.trim();
     const rawDirectory = input.Directory.trim().replace(/\\/g, '/');
-
-    if (label === '') throw new Error('Label is required.');
-    if (label.length > CUSTOM_FILE_MAX_LABEL_LENGTH) {
-        throw new Error(`Label must be at most ${CUSTOM_FILE_MAX_LABEL_LENGTH} characters.`);
-    }
-    if (description.length > CUSTOM_FILE_MAX_DESCRIPTION_LENGTH) {
-        throw new Error(`Description must be at most ${CUSTOM_FILE_MAX_DESCRIPTION_LENGTH} characters.`);
-    }
 
     if (fileName === '') throw new Error('File name is required.');
     if (/[\\/]/.test(fileName)) {
         throw new Error('File name must not contain path separators — use the directory field for the location.');
     }
-    const nameProblem = checkSegment(fileName, 'File name');
+    const nameProblem = checkPathSegment(fileName, 'File name');
     if (nameProblem) throw new Error(nameProblem);
 
     if (rawDirectory.startsWith('/') || /^[a-zA-Z]:/.test(rawDirectory)) {
@@ -147,7 +131,7 @@ export function validateCustomFileInput(
     const directory = normaliseDirectory(rawDirectory);
     if (directory !== '') {
         for (const segment of directory.split('/')) {
-            const problem = checkSegment(segment, 'Directory');
+            const problem = checkPathSegment(segment, 'Directory');
             if (problem) throw new Error(problem);
         }
     }
@@ -169,12 +153,7 @@ export function validateCustomFileInput(
         throw new Error(`Another custom file already uses the path "${relPath}".`);
     }
 
-    if (Buffer.byteLength(input.Content, 'utf8') > CUSTOM_FILE_MAX_CONTENT_BYTES) {
-        throw new Error(`Content exceeds the maximum size of ${CUSTOM_FILE_MAX_CONTENT_BYTES / 1024} KB.`);
-    }
-    if (input.Content.includes('\u0000')) {
-        throw new Error('Content must be plain text (binary data is not supported).');
-    }
+    validateFileContent(input.Content, CUSTOM_FILE_MAX_CONTENT_BYTES);
 
     return {
         Directory: directory,
@@ -184,36 +163,4 @@ export function validateCustomFileInput(
         Content: input.Content,
         ListInAgents: input.ListInAgents === true,
     };
-}
-
-/** Extensions of POSIX shell scripts that need the executable bit. */
-const EXECUTABLE_EXTENSIONS = ['.sh', '.bash', '.zsh', '.ksh', '.command'];
-
-/**
- * Decides whether a file should be marked executable (POSIX `chmod 755`).
- *
- * True for shell-script extensions, or for any file whose content starts with
- * a `#!` shebang. Windows scripts (`.bat`, `.cmd`, `.ps1`) are run by
- * extension and need no permission bit, so they are not "executable" here.
- */
-export function isExecutableFile(fileName: string, content: string): boolean {
-    const lower = fileName.toLowerCase();
-    if (EXECUTABLE_EXTENSIONS.some((ext) => lower.endsWith(ext))) return true;
-    return content.startsWith('#!');
-}
-
-/**
- * Applies the on-disk line-ending policy for a file: Windows batch files
- * (`.bat`, `.cmd`) are written with CRLF; POSIX scripts are written with LF
- * (a CRLF shebang breaks execution); all other files are kept as typed.
- */
-export function applyLineEndingPolicy(fileName: string, content: string): string {
-    const lower = fileName.toLowerCase();
-    if (lower.endsWith('.bat') || lower.endsWith('.cmd')) {
-        return content.replace(/\r\n|\r|\n/g, '\r\n');
-    }
-    if (isExecutableFile(fileName, content)) {
-        return content.replace(/\r\n|\r/g, '\n');
-    }
-    return content;
 }

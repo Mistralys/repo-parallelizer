@@ -155,6 +155,51 @@ test('renderClaudePointer: returns exactly the @AGENTS.md pointer line', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Milestone 2: "Repository Files" section — renderWorkspaceAgents() / renderCliSection()
+// ---------------------------------------------------------------------------
+
+test('renderWorkspaceAgents: lists a repository file row, escaped, with the workspace-relative path, before the directives; README does not', () => {
+    const ctx = makeContext({
+        repositoryFiles: [
+            { repositoryId: 'repo-a', path: 'bin/hello.sh', label: 'Run | all', description: 'Line1\nLine2' },
+        ],
+    });
+    const agents = renderWorkspaceAgents(ctx);
+
+    assert.match(agents, /## Repository Files/);
+    assert.match(agents, /\| repo-a \| `repo-a\/\.workspace\/files\/bin\/hello\.sh` \| Run \\\| all \| Line1 Line2 \|/);
+    assert.ok(agents.indexOf('## Repository Files') < agents.indexOf('## Agent Directives'));
+    assert.doesNotMatch(renderWorkspaceReadme(ctx), /Repository Files/);
+});
+
+test('renderWorkspaceAgents: intro states the git-delivery contract and the sh invocation note', () => {
+    const ctx = makeContext({
+        repositoryFiles: [{ repositoryId: 'repo-a', path: 'bin/hello.sh', label: 'Hello', description: '' }],
+    });
+    const agents = renderWorkspaceAgents(ctx);
+
+    assert.match(agents, /git/i);
+    assert.match(agents, /pull/i);
+    assert.match(agents, /sh <path>/);
+});
+
+test('renderWorkspaceAgents: no Repository Files section (and no CLI pointer) when nothing is listed', () => {
+    assert.doesNotMatch(renderWorkspaceAgents(makeContext({ repositoryFiles: [] })), /Repository Files/);
+    assert.doesNotMatch(renderWorkspaceAgents(makeContext({ repositoryFiles: undefined })), /Repository Files/);
+    assert.doesNotMatch(renderWorkspaceAgents(makeContext({ repositoryFiles: [] })), /paralizer repo-files/);
+});
+
+test('renderWorkspaceAgents: the Paralizer CLI section gains the repo-files pointer only when at least one row exists', () => {
+    const withRows = renderWorkspaceAgents(makeContext({
+        repositoryFiles: [{ repositoryId: 'repo-a', path: 'bin/hello.sh', label: 'Hello', description: '' }],
+    }));
+    const withoutRows = renderWorkspaceAgents(makeContext({ repositoryFiles: [] }));
+
+    assert.match(withRows, /paralizer repo-files/);
+    assert.doesNotMatch(withoutRows, /paralizer repo-files/);
+});
+
+// ---------------------------------------------------------------------------
 // mergeGeneratedContent() — AC-07
 // ---------------------------------------------------------------------------
 

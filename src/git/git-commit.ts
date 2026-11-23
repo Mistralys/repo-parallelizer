@@ -125,3 +125,141 @@ export function commitPaths(
         repoPath,
     );
 }
+
+/**
+ * Reads the staged (index) file mode for every path matching `pathspec`, via
+ * `git ls-files -s -z -- <pathspec>` (Milestone 2 — the executable bit
+ * fix-up `commitAndPush()` runs before committing).
+ *
+ * Each `ls-files -s` record is `<mode> <sha1> <stage>\t<path>`, NUL-separated
+ * by `-z` so a path containing any character (including a newline) is parsed
+ * unambiguously. `mode` is the raw octal string git reports (e.g. `100644`
+ * or `100755`).
+ *
+ * @param repoPath - Absolute path to the local repository.
+ * @param pathspec - A git pathspec, passed after a literal `--` separator.
+ *                   A `pathspec` starting with `-` is rejected without
+ *                   spawning git, resolving to an empty map (mirroring
+ *                   `getPathStatus()`'s "empty on failure" contract, since
+ *                   this function has no `GitResult` to report through).
+ */
+export async function getIndexModes(repoPath: string, pathspec: string): Promise<Map<string, string>> {
+    const modes = new Map<string, string>();
+    if (pathspec.startsWith('-')) {
+        return modes;
+    }
+
+    const result = await runGit(['ls-files', '-s', '-z', '--', pathspec], repoPath);
+    if (result.exitCode !== 0) {
+        return modes;
+    }
+
+    for (const record of result.stdout.split('\0')) {
+        if (record.length === 0) continue;
+        const tabIndex = record.indexOf('\t');
+        if (tabIndex === -1) continue;
+        const mode = record.slice(0, tabIndex).split(' ')[0];
+        const recordPath = record.slice(tabIndex + 1);
+        if (mode) {
+            modes.set(recordPath, mode);
+        }
+    }
+
+    return modes;
+}
+
+/**
+ * Sets or clears the POSIX executable bit on already-staged paths via
+ * `git update-index --chmod=(+|-)x -- <paths...>`, an index-only change that
+ * survives into the next commit of that index regardless of the working
+ * tree's actual file mode or `core.filemode` — the only cross-platform way
+ * to commit the executable bit (Milestone 2, decision 8).
+ *
+ * @param repoPath   - Absolute path to the local repository.
+ * @param paths      - Paths to update, passed after a literal `--` separator.
+ *                     Resolves with no-op success (`exitCode: 0`) when empty,
+ *                     without spawning git.
+ * @param executable - `true` to set the executable bit, `false` to clear it.
+ * @returns A rejected (`exitCode: 128`, `fatal: ...`) result without
+ *   spawning git when any path starts with `-` (flag-injection guard,
+ *   mirroring `setSparseCheckout()` in `git-clone.ts`).
+ */
+export function setIndexExecutable(repoPath: string, paths: readonly string[], executable: boolean): Promise<GitResult> {
+    if (paths.length === 0) {
+        return Promise.resolve({ exitCode: 0, stdout: '', stderr: '' });
+    }
+
+    const invalidPath = paths.find((p) => p.startsWith('-'));
+    if (invalidPath !== undefined) {
+        return Promise.resolve(invalidArgResult(`path must not start with '-': '${invalidPath}'`));
+    }
+
+    const chmodFlag = executable ? '--chmod=+x' : '--chmod=-x';
+    return runGit(['update-index', chmodFlag, '--', ...paths], repoPath);
+}
+
+/**
+ * Lists every path currently staged in the index, via
+ * `git diff --cached --name-only -z`. Used by `commitAndPush()` (Milestone 2)
+ * to confirm nothing outside `.workspace/` is staged before committing the
+ * index directly (see {@link commitStaged}).
+ *
+ * @param repoPath - Absolute path to the local repository.
+ * @returns The staged paths, or an empty array when the underlying git
+ *   command fails.
+ */
+export async function getStagedPaths(repoPath: string): Promise<string[]> {
+    const result = await runGit(['diff', '--cached', '--name-only', '-z'], repoPath);
+    if (result.exitCode !== 0) {
+        return [];
+    }
+
+    return result.stdout.split('\0').filter((p) => p.length > 0);
+}
+
+/**
+ * Commits whatever is currently staged, using a one-off author/committer
+ * identity, with no pathspec — unlike {@link commitPaths}, which scopes the
+ * commit to a pathspec but, by rebuilding the listed entries from the
+ * working tree, discards an index-only `--chmod` change under
+ * `core.filemode=false` (Milestone 2, decision 8). Committing the staged
+ * index directly preserves it.
+ *
+ * Runs `git -c user.name=<name> -c user.email=<email> commit -m <message>`.
+ * The identity is supplied purely as config overrides for this single
+ * invocation and never written to the repository's persisted
+ * `user.name`/`user.email` config.
+ *
+ * @param repoPath - Absolute path to the local repository.
+ * @param message  - The commit message. Rejected (without invoking git) when
+ *                   empty or whitespace-only.
+ * @param identity - The one-off author/committer identity. Rejected
+ *                   (without invoking git) when either field is empty,
+ *                   contains a newline, or starts with `-`.
+ */
+export function commitStaged(
+    repoPath: string,
+    message: string,
+    identity: CommitIdentity,
+): Promise<GitResult> {
+    if (!message || message.trim().length === 0) {
+        return Promise.resolve(invalidArgResult('commit message must not be empty'));
+    }
+
+    if (!isValidIdentityValue(identity.name)) {
+        return Promise.resolve(invalidArgResult(`invalid commit identity name: '${identity.name}'`));
+    }
+
+    if (!isValidIdentityValue(identity.email)) {
+        return Promise.resolve(invalidArgResult(`invalid commit identity email: '${identity.email}'`));
+    }
+
+    return runGit(
+        [
+            '-c', `user.name=${identity.name}`,
+            '-c', `user.email=${identity.email}`,
+            'commit', '-m', message,
+        ],
+        repoPath,
+    );
+}

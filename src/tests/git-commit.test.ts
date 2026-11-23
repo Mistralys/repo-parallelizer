@@ -4,7 +4,15 @@ import * as fs from 'node:fs';
 import * as os from 'os';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
-import { getPathStatus, stagePaths, commitPaths } from '../git/git-commit.js';
+import {
+    getPathStatus,
+    stagePaths,
+    commitPaths,
+    getIndexModes,
+    setIndexExecutable,
+    getStagedPaths,
+    commitStaged,
+} from '../git/git-commit.js';
 
 // ─── Fixture setup ────────────────────────────────────────────────────────────
 
@@ -147,5 +155,132 @@ test('commitPaths() rejects an identity email starting with "-"', async () => {
 test('commitPaths() rejects an identity name that is empty', async () => {
     const repoPath = makeRepo();
     const result = await commitPaths(repoPath, '.', 'test message', { name: '', email: 'a@b.c' });
+    assert.equal(result.exitCode, 128);
+});
+
+// ─── getIndexModes() ──────────────────────────────────────────────────────────
+
+test('getIndexModes() reports the staged mode for each path matched by the pathspec', async () => {
+    const repoPath = makeRepo();
+    const modes = await getIndexModes(repoPath, 'sub');
+
+    assert.equal(modes.get('sub/tracked.md'), '100644');
+});
+
+test('getIndexModes() reflects a pending update-index --chmod change before it is committed', async () => {
+    const repoPath = makeRepo();
+    const before = await getIndexModes(repoPath, 'sub');
+    assert.equal(before.get('sub/tracked.md'), '100644');
+
+    const chmodResult = await setIndexExecutable(repoPath, ['sub/tracked.md'], true);
+    assert.equal(chmodResult.exitCode, 0, `setIndexExecutable failed: ${chmodResult.stderr}`);
+
+    const after = await getIndexModes(repoPath, 'sub');
+    assert.equal(after.get('sub/tracked.md'), '100755');
+});
+
+test('getIndexModes() rejects a pathspec starting with "-" without invoking git, returning an empty map', async () => {
+    const repoPath = makeRepo();
+    const modes = await getIndexModes(repoPath, '-evil');
+    assert.deepEqual(modes, new Map());
+});
+
+test('getIndexModes() returns an empty map when repoPath is not a git repository', async () => {
+    const nonRepo = fs.mkdtempSync(path.join(tmpDir, 'non-repo-'));
+    const modes = await getIndexModes(nonRepo, '.');
+    assert.deepEqual(modes, new Map());
+});
+
+// ─── setIndexExecutable() ─────────────────────────────────────────────────────
+
+test('setIndexExecutable(executable: true) sets the staged mode to 100755, and false clears it back to 100644', async () => {
+    const repoPath = makeRepo();
+
+    const setResult = await setIndexExecutable(repoPath, ['sub/tracked.md'], true);
+    assert.equal(setResult.exitCode, 0, `setIndexExecutable failed: ${setResult.stderr}`);
+    assert.equal((await getIndexModes(repoPath, 'sub')).get('sub/tracked.md'), '100755');
+
+    const clearResult = await setIndexExecutable(repoPath, ['sub/tracked.md'], false);
+    assert.equal(clearResult.exitCode, 0, `setIndexExecutable failed: ${clearResult.stderr}`);
+    assert.equal((await getIndexModes(repoPath, 'sub')).get('sub/tracked.md'), '100644');
+});
+
+test('setIndexExecutable() resolves with no-op success for an empty paths array, without invoking git', async () => {
+    const repoPath = makeRepo();
+    const result = await setIndexExecutable(repoPath, [], true);
+    assert.equal(result.exitCode, 0);
+});
+
+test('setIndexExecutable() rejects a path starting with "-" without invoking git', async () => {
+    const repoPath = makeRepo();
+    const result = await setIndexExecutable(repoPath, ['-evil'], true);
+    assert.equal(result.exitCode, 128);
+    assert.ok(result.stderr.includes('fatal:'), `expected a "fatal:" error, got: ${result.stderr}`);
+});
+
+// ─── getStagedPaths() ─────────────────────────────────────────────────────────
+
+test('getStagedPaths() lists every currently staged path', async () => {
+    const repoPath = makeRepo();
+    fs.writeFileSync(path.join(repoPath, 'sub', 'new.md'), 'new content');
+    fs.writeFileSync(path.join(repoPath, 'unrelated.md'), 'unrelated content');
+    await stagePaths(repoPath, '.');
+
+    const staged = await getStagedPaths(repoPath);
+    assert.deepEqual(staged.sort(), ['sub/new.md', 'unrelated.md']);
+});
+
+test('getStagedPaths() returns an empty array when nothing is staged', async () => {
+    const repoPath = makeRepo();
+    const staged = await getStagedPaths(repoPath);
+    assert.deepEqual(staged, []);
+});
+
+// ─── commitStaged() ───────────────────────────────────────────────────────────
+
+test('commitStaged() commits whatever is currently staged, with no pathspec, using the given identity', async () => {
+    const repoPath = makeRepo();
+    fs.writeFileSync(path.join(repoPath, 'sub', 'new.md'), 'new content');
+    await stagePaths(repoPath, '.');
+
+    const result = await commitStaged(repoPath, 'sync: staged index', identity);
+    assert.equal(result.exitCode, 0, `commit failed: ${result.stderr}`);
+
+    const authorName = git('log -1 --format=%an', repoPath);
+    const authorEmail = git('log -1 --format=%ae', repoPath);
+    assert.equal(authorName, 'Paralizer');
+    assert.equal(authorEmail, 'paralizer@mistralys.eu');
+
+    const subject = git('log -1 --format=%s', repoPath);
+    assert.equal(subject, 'sync: staged index');
+
+    const committedFiles = git('log -1 --name-only --format=', repoPath);
+    assert.equal(committedFiles, 'sub/new.md');
+});
+
+test('commitStaged() preserves an index-only update-index --chmod change (unlike commitPaths(), which rebuilds from the working tree)', async () => {
+    const repoPath = makeRepo();
+    git('config core.filemode false', repoPath);
+
+    const chmodResult = await setIndexExecutable(repoPath, ['sub/tracked.md'], true);
+    assert.equal(chmodResult.exitCode, 0, `setIndexExecutable failed: ${chmodResult.stderr}`);
+
+    const result = await commitStaged(repoPath, 'sync: chmod', identity);
+    assert.equal(result.exitCode, 0, `commit failed: ${result.stderr}`);
+
+    const mode = git('show HEAD --format= --raw -- sub/tracked.md', repoPath).trim().split(' ')[1];
+    assert.equal(mode, '100755');
+});
+
+test('commitStaged() rejects an empty message without invoking git', async () => {
+    const repoPath = makeRepo();
+    const result = await commitStaged(repoPath, '', identity);
+    assert.equal(result.exitCode, 128);
+    assert.ok(result.stderr.includes('empty'), `expected an "empty message" error, got: ${result.stderr}`);
+});
+
+test('commitStaged() rejects an identity email starting with "-"', async () => {
+    const repoPath = makeRepo();
+    const result = await commitStaged(repoPath, 'test message', { name: 'Good Name', email: '-malicious' });
     assert.equal(result.exitCode, 128);
 });

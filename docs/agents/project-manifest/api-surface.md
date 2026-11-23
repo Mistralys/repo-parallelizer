@@ -216,11 +216,19 @@ interface CommitIdentity {
 function getPathStatus(repoPath: string, pathspec: string): Promise<PathStatusEntry[]>
 function stagePaths(repoPath: string, pathspec: string): Promise<GitResult>
 function commitPaths(repoPath: string, pathspec: string, message: string, identity: CommitIdentity): Promise<GitResult>
+
+// Milestone 2 — executable-bit fix-up and staged-index commit, used by commitAndPush() (below).
+function getIndexModes(repoPath: string, pathspec: string): Promise<Map<string, string>>   // ls-files -s -z; empty map on failure/rejected pathspec
+function setIndexExecutable(repoPath: string, paths: readonly string[], executable: boolean): Promise<GitResult>   // update-index --chmod=(+|-)x
+function getStagedPaths(repoPath: string): Promise<string[]>   // diff --cached --name-only -z; empty array on failure
+function commitStaged(repoPath: string, message: string, identity: CommitIdentity): Promise<GitResult>   // plain `commit -m`, no pathspec
 ```
 
-> Unlike `getGitStatus()` (whole working tree), all three functions are scoped to a single `pathspec` (passed to git after a literal `--` separator), for callers that manage one narrow, well-known set of files (e.g. the `.workspace/info.json` sync artifact) without being influenced by unrelated changes elsewhere in the repository.
+> Unlike `getGitStatus()` (whole working tree), `getPathStatus()`/`stagePaths()`/`commitPaths()`/`getIndexModes()` are scoped to a single `pathspec` (passed to git after a literal `--` separator), for callers that manage one narrow, well-known set of files (e.g. the `.workspace/info.json` sync artifact) without being influenced by unrelated changes elsewhere in the repository.
 >
-> **`commitPaths()`:** runs `-c user.name=<name> -c user.email=<email> commit -m <message> -- <pathspec>` — the `identity` is a one-off config override for this single invocation only and is never written to the repository's persisted `user.name`/`user.email` config. Rejects (without invoking git, resolving `exitCode: 128`) an empty/whitespace-only `message`, or an `identity` field that is empty, contains a newline, or starts with `-`.
+> **`commitPaths()`:** runs `-c user.name=<name> -c user.email=<email> commit -m <message> -- <pathspec>` — the `identity` is a one-off config override for this single invocation only and is never written to the repository's persisted `user.name`/`user.email` config. Rejects (without invoking git, resolving `exitCode: 128`) an empty/whitespace-only `message`, or an `identity` field that is empty, contains a newline, or starts with `-`. Still exported for compatibility, but no longer called from `commitAndPush()` (Milestone 2) — see `commitStaged()`, below.
+>
+> **`getIndexModes()` / `setIndexExecutable()` / `getStagedPaths()` / `commitStaged()` (Milestone 2):** added so `commitAndPush()` can commit the POSIX executable bit reliably across platforms — `update-index --chmod` is an index-only change, and `commitPaths()`'s pathspec commit rebuilds the listed entries from the working tree, which discards that change under `core.filemode=false` (verified empirically against git 2.56.0: the pathspec sequence records `100644`, committing the staged index directly records `100755`). `getIndexModes()` reads the staged mode for every path under a pathspec (`ls-files -s -z`, NUL-separated so any path parses unambiguously); `setIndexExecutable()` flips `+x`/`-x` on already-staged paths, no-op success (`exitCode: 0`) for an empty `paths` array without spawning git; `getStagedPaths()` lists everything currently staged (`diff --cached --name-only -z`), used by `commitAndPush()` to guard against committing anything outside `.workspace/`; `commitStaged()` is `commitPaths()`'s pathspec-free twin — same identity/message validation, same `exitCode: 128`/`fatal: ...` rejection shape, but commits whatever is already staged. Unlike `setIndexExecutable()`/`commitStaged()` (which return a `GitResult` with `exitCode: 128` for a rejected argument), `getIndexModes()`/`getStagedPaths()` have no `GitResult` to report through and fail quiet — an empty `Map`/array — for a rejected `-`-prefixed pathspec or a failing git call, mirroring `getPathStatus()`'s existing "empty on failure" convention; `getStagedPaths()` additionally takes no path/pathspec parameter at all, so it has nothing to reject.
 
 ---
 
@@ -357,6 +365,67 @@ class RepositoryManager {
 
 > **`update()`'s optional `url`:** When `url` is provided, it is trimmed and any embedded credentials are stripped (mirroring `add()`'s URL-handling pattern), then checked for duplicates against every other repository's `Url`, self-excluded by `Id`. Returns the repository spread with `credentialsStripped: true` when stripping occurred (transient, not persisted). Throws `NotFoundError` if the ID does not exist, or a plain `Error` if the cleaned URL duplicates another repository's URL. When `url` is omitted, behavior is unchanged (name-only update). **Known gap:** an empty or whitespace-only `url` is silently persisted with no rejection, unlike `add()`'s empty-slug guard — callers passing raw form input should validate non-empty before calling.
 
+### Repository Files (Milestone 2)
+
+#### Model (`repository-file.ts`) — pure module (no fs)
+
+```typescript
+// Builds on the scope-neutral rules in src/models/file-definition.ts, the same way
+// project/custom-file.ts does. No re-exports of the shared helpers — a later
+// orchestration WP (folder read/write) imports file-definition.ts directly.
+const REPOSITORY_FILE_MAX_CONTENT_BYTES = 256 * 1024   // alias of FILE_DEFINITION_MAX_CONTENT_BYTES
+const REPOSITORY_FILE_MAX_LABEL_LENGTH = 120            // alias of FILE_DEFINITION_MAX_LABEL_LENGTH
+const REPOSITORY_FILE_MAX_DESCRIPTION_LENGTH = 1000     // alias of FILE_DEFINITION_MAX_DESCRIPTION_LENGTH
+const REPOSITORY_FILE_MAX_COUNT = 64                    // max files per repository
+const RESERVED_REPOSITORY_FILE_SEGMENTS: readonly string[]   // ['.git'] — reserved at any path depth, case-insensitive
+
+interface RepositoryFile {
+    Id: string;            // UUID, machine-local; never written to info.json
+    Directory: string;     // relative to the repo's `.workspace/files/` folder, '/' separators, '' = root
+    FileName: string;      // with extension; never contains a separator
+    Label: string;
+    Description: string;
+    Content: string;       // UTF-8 text, max 256 KB
+    Executable: boolean;   // explicit (unlike CustomFile); defaults from isExecutableFile() when input omits it
+    ListInAgents: boolean; // default false
+    DateModified: string;  // machine-local; not hashed
+}
+interface RepositoryFileInput { Directory: string; FileName: string; Label: string; Description: string; Content: string; Executable?: boolean; ListInAgents: boolean }
+
+repositoryFileRelativePath(file: Pick<RepositoryFile, 'Directory' | 'FileName'>): string
+validateRepositoryFileInput(input: RepositoryFileInput, others: readonly RepositoryFile[]): Omit<RepositoryFileInput, 'Executable'> & { Executable: boolean }
+    // throws Error with a user-presentable message; checks (in order): others.length >= REPOSITORY_FILE_MAX_COUNT,
+    // label, description, file name, directory segment rules, RESERVED_REPOSITORY_FILE_SEGMENTS (any depth,
+    // case-insensitive), case-insensitive path-uniqueness against `others`, content size/binary.
+    // Resolves Executable from isExecutableFile(FileName, Content) when input.Executable is undefined.
+```
+
+> **`others.length >= REPOSITORY_FILE_MAX_COUNT` invariant:** `others` always excludes the file being edited (both for `add()`, where it is every existing file, and `update()`, where it is every file except the one being renamed/edited), so the same check is correct for both operations — adding a 65th file is rejected, but editing an existing file while the repository already holds exactly 64 is not.
+
+#### Manager (`repository-file.manager.ts`)
+
+```typescript
+interface RepositoryFileStore extends BaseStore { Files: RepositoryFile[] }   // { storageFolder}/repository-files/{repoId}.json
+
+class RepositoryFileManager {
+    constructor(config: AppConfig, repositoryManager: RepositoryManager)
+
+    list(repoId: string): RepositoryFile[]
+    get(repoId: string, fileId: string): RepositoryFile
+    add(repoId: string, input: RepositoryFileInput): RepositoryFile
+    update(repoId: string, fileId: string, input: RepositoryFileInput): { previous: RepositoryFile; updated: RepositoryFile }
+    remove(repoId: string, fileId: string): RepositoryFile       // returns the removed definition
+    replaceAll(repoId: string, files: RepositoryFile[]): void    // used by import; no per-field validation — caller must pre-validate
+    removeStore(repoId: string): void                            // deletes repository-files/{repoId}.json; no-op if absent; used by the deletion cascade
+}
+```
+
+> **Storage:** one JSON document per repository at `{storageFolder}/repository-files/{repoId}.json`, mirroring the `projects/{id}.json` per-aggregate pattern. `repositories.json` is never read or written by this manager — `repositoryManager` is injected solely to validate that a given `repoId` exists (via `exists()`) before every operation except `removeStore()`. Stateless like every other manager: re-reads the relevant store from disk on each call. The `repository-files/` directory is created lazily by `writeJsonFile()`.
+
+> **Private `mutate(repoId, fileId, operationLabel, fn)` helper:** backs `update()` and `remove()`, following the `RepositoryManager.mutate()` convention (`constraints.md`). `fn` receives `(existing, store)` and returns either the replacement `RepositoryFile` or `null` to delete it; `store` is passed so `update()`'s case-insensitive path-uniqueness check (via `validateRepositoryFileInput()`) runs against the file's siblings inside the same load/save cycle. Throws `NotFoundError` (repository, then file ID) with `operationLabel` interpolated as `` Cannot ${operationLabel}: ... ``.
+
+> **`removeStore()` skips the repository-existence check** that every other method performs — it must stay usable from the deletion cascade whether called before or after the repository record itself is removed from `repositories.json`. Because it therefore cannot rely on `assertRepositoryExists()` to guarantee `repoId` is a kebab-case value already persisted in `repositories.json` (the guarantee every other method gets for free), it validates `repoId` itself via `isValidKebabCase()` and additionally confirms the resolved store path stays lexically contained under `repository-files/` (`isLexicallyContained()`, `path-guard.ts`) before touching the filesystem — closing a path-traversal gap (CWE-22/CWE-73) flagged by security audit. Either check failing is a silent no-op, not a thrown error, matching the existing "no-op when absent" contract.
+
 ### Project
 
 #### Types (`project.types.ts`)
@@ -383,6 +452,10 @@ interface ProjectData {
 }
 
 // src/models/project/custom-file.ts — pure module (no fs): type, validation, executable/line-ending policy
+// Generic rules (path-segment safety, directory normalisation, label/description/content
+// validation, the executable heuristic, the line-ending policy) live in the scope-neutral
+// src/models/file-definition.ts (see "File Definition", below) and are re-exported here
+// under their established public names — custom-file.ts no longer defines them itself.
 interface CustomFile {
     Id: string;            // UUID, stable across path/name edits
     Directory: string;     // relative to workspace root, '/' separators, '' = root
@@ -396,11 +469,31 @@ interface CustomFile {
 type CustomFileInput = Omit<CustomFile, 'Id' | 'DateModified'>;
 
 validateCustomFileInput(input: CustomFileInput, repositoryIds: readonly string[], others: readonly CustomFile[]): CustomFileInput  // throws Error with a user-presentable message
-normaliseDirectory(raw: string): string
+normaliseDirectory(raw: string): string          // re-exported from file-definition.ts
 customFileRelativePath(file: Pick<CustomFile, 'Directory' | 'FileName'>): string
-isExecutableFile(fileName: string, content: string): boolean   // .sh/.bash/.zsh/.ksh/.command or '#!' shebang
-applyLineEndingPolicy(fileName: string, content: string): string // .bat/.cmd → CRLF; executable shell files → LF; others as typed
+isExecutableFile(fileName: string, content: string): boolean   // re-exported from file-definition.ts; .sh/.bash/.zsh/.ksh/.command or '#!' shebang
+applyLineEndingPolicy(fileName: string, content: string): string // re-exported from file-definition.ts; .bat/.cmd → CRLF; executable shell files → LF; others as typed
 const RESERVED_ROOT_FILE_NAMES: readonly string[]               // README.md, AGENTS.md, CLAUDE.md
+
+// src/models/file-definition.ts — scope-neutral file-definition rules shared by every file-storing
+// feature (today: project custom files; Milestone 2 adds repository-level custom files on top of
+// the same module). No notion of "project" or "repository" — describes what makes a user-supplied
+// file name, directory, label, description, and content safe and well-formed, independent of where
+// the file is stored. Pure module (no fs).
+const FILE_DEFINITION_MAX_CONTENT_BYTES = 256 * 1024
+const FILE_DEFINITION_MAX_LABEL_LENGTH = 120
+const FILE_DEFINITION_MAX_DESCRIPTION_LENGTH = 1000
+
+checkPathSegment(segment: string, what: string): string | undefined   // returns an error message, or undefined when `segment` is a safe single path component on every supported OS; `what` is the human-readable label used at the start of the message (e.g. "File name", "Directory")
+normaliseDirectory(raw: string): string          // trims, converts '\' to '/', strips leading './' and surrounding slashes; does not validate
+joinRelativePath(directory: string, fileName: string): string   // joins a normalised directory (may be '' for the root) and fileName
+validateLabel(rawLabel: string, maxLength: number): string      // throws Error when empty or over maxLength; returns the trimmed label
+validateDescription(rawDescription: string, maxLength: number): string   // throws Error when over maxLength; returns the trimmed description (empty allowed)
+validateFileContent(content: string, maxBytes: number): void    // throws Error on content exceeding maxBytes (UTF-8 byte size) or containing a NUL byte
+isExecutableFile(fileName: string, content: string): boolean    // true for .sh/.bash/.zsh/.ksh/.command extensions, or any content starting with a '#!' shebang
+applyLineEndingPolicy(fileName: string, content: string): string // .bat/.cmd → CRLF; executable shell files → LF (a CRLF shebang breaks execution); others kept as typed
+
+> **Why limits are passed as parameters, not imported constants:** `validateLabel()`/`validateDescription()`/`validateFileContent()` take `maxLength`/`maxBytes` as call arguments rather than reading the `FILE_DEFINITION_MAX_*` constants directly, keeping the module scope-neutral so a future caller (e.g. a repository-level custom file with different limits) can pass its own. `custom-file.ts` re-exports `CUSTOM_FILE_MAX_CONTENT_BYTES`/`CUSTOM_FILE_MAX_LABEL_LENGTH`/`CUSTOM_FILE_MAX_DESCRIPTION_LENGTH` as aliases of the shared constants and passes them in at each call site; `validateCustomFileInput()`'s check order (label, description, file name, directory, path-collision, content) is unchanged from before the extraction, so every error message and its precedence stay byte-identical.
 
 interface ProjectIndexEntry {
     Id: string;
@@ -554,6 +647,9 @@ const REPOSITORY_INFO_FILE_NAME = 'info.json'
 const REPOSITORY_INFO_README_FILE_NAME = 'README.md'
 const REPOSITORY_INFO_SCHEMA_VERSION = 1
 
+interface RepositoryInfoFileEntry { Path: string; Label: string; Description: string; Executable: boolean; ListInAgents: boolean; ContentHash: string }  // ContentHash is in-memory only, from canonicalFilesForHash() — never written to info.json
+type RepositoryInfoFileMetadata = Pick<RepositoryInfoFileEntry, 'Path' | 'Label' | 'Description' | 'Executable' | 'ListInAgents'>;  // the info.json Files entry shape (no ContentHash)
+
 interface RepositoryInfoFile {
     SchemaVersion: number;
     Id: string;
@@ -561,14 +657,15 @@ interface RepositoryInfoFile {
     Url?: string;              // informational only — never hashed, diffed, or imported
     Description: string;
     Settings: Record<string, unknown>;
+    Files?: RepositoryInfoFileMetadata[];  // per-file metadata, sorted by Path; absent on an un-upgraded M1 file, treated as []
     [key: string]: unknown;    // unknown top-level keys preserved verbatim on rewrite
 }
 
-interface RepositoryInfoPayload { Id: string; Name: string; Description: string }  // the synced field set
+interface RepositoryInfoPayload { Id: string; Name: string; Description: string; Files?: RepositoryInfoFileEntry[] }  // the synced field set (Milestone 2); Files optional so every pre-M2 payload literal stays valid
 
 interface RepositoryInfoReadResult {
     status: 'absent' | 'ok' | 'invalid' | 'unsupported-schema';
-    payload?: RepositoryInfoPayload;  // present when status === 'ok'
+    payload?: RepositoryInfoPayload;  // present when status === 'ok'; Files entries' ContentHash is always '' here — info.json never stores one
     raw?: RepositoryInfoFile;         // present when status === 'ok'
     error?: string;                   // present when status === 'invalid'
 }
@@ -582,6 +679,14 @@ type RepositoryInfoImportField = 'Name' | 'Description';
 
 interface RepositoryInfoFieldDiff { field: RepositoryInfoImportField; current: string; incoming: string }
 
+interface RepositoryFileFieldChange { field: 'Label' | 'Description' | 'Executable' | 'ListInAgents' | 'Content'; local: string | boolean; incoming: string | boolean }
+
+interface RepositoryFileDiff {
+    path: string;
+    kind: 'incoming-only' | 'local-only' | 'changed';   // incoming-only: folder-only (teammate added); local-only: data-only (removed, or not pulled yet); changed: both sides, ≥1 differing field
+    changes?: RepositoryFileFieldChange[];               // present only for kind === 'changed'
+}
+
 interface EvaluateRepositoryInfoSyncParams {
     dataHash: string;
     folder: RepositoryInfoReadResult;
@@ -589,20 +694,25 @@ interface EvaluateRepositoryInfoSyncParams {
     repositoryId: string;
 }
 
-function buildRepositoryInfoPayload(repo: Repository): RepositoryInfoPayload
+function buildRepositoryInfoPayload(repo: Repository, files: readonly RepositoryFileHashEntry[] = []): RepositoryInfoPayload   // converts canonicalFilesForHash() tuples into Files, sorted by Path
 function buildInformationalUrl(repo: Repository): string                              // repo.Url with embedded credentials stripped
-function hashRepositoryInfoPayload(payload: RepositoryInfoPayload): string             // SHA-256 of [Id, Name, Description]; Url excluded
+function hashRepositoryInfoPayload(payload: RepositoryInfoPayload): string             // SHA-256 of [Id, Name, Description]; Url excluded; see compatibility-rule note below
 function readRepositoryInfoFile(mainFolder: string): RepositoryInfoReadResult
 function renderRepositoryInfoFile(payload: RepositoryInfoPayload, informationalUrl: string, existingRaw?: RepositoryInfoFile): string
-function renderRepositoryInfoReadme(): string                                          // fixed, machine-independent text; never affects the hash
+function renderRepositoryInfoReadme(): string                                          // fixed, machine-independent text; never affects the hash; includes the Milestone 2 files/ section
 function evaluateRepositoryInfoSync(params: EvaluateRepositoryInfoSyncParams): RepositoryInfoSyncState
 function diffRepositoryInfo(current: RepositoryInfoPayload, incoming: RepositoryInfoPayload): RepositoryInfoFieldDiff[]
+function diffRepositoryFiles(local: readonly RepositoryInfoFileEntry[], folder: readonly RepositoryInfoFileEntry[]): RepositoryFileDiff[]   // for the import dialog; case-insensitive path matching
 function writeRepositoryInfoFile(mainFolder: string, content: string): { written: boolean }
 function writeRepositoryInfoReadme(mainFolder: string): { written: boolean }
 function infoFolderPathspec(): string                                                  // '.workspace/' — scopes a git status/stage/commit to this module's files
 ```
 
 > **`Url` is informational only:** excluded from `hashRepositoryInfoPayload()`, `diffRepositoryInfo()`, and the sync-state decision table — a file differing from Paralizer's data only in `Url` evaluates as `in-sync`. This prevents per-colleague remote-form differences (HTTPS-with-token vs. SSH vs. host alias) from manufacturing false `incoming`/`conflict` states. `buildInformationalUrl()` always strips embedded credentials via `stripEmbeddedCredentials()` before the value is written.
+
+> **`Files` hash-compatibility rule (Milestone 2):** `hashRepositoryInfoPayload()` hashes `[Id, Name, Description]` exactly as in Milestone 1 when `payload.Files` is empty — byte-identical, with no fourth array element at all — so a repository with no files keeps its existing M1 baseline valid across the upgrade and `SchemaVersion` stays `1`. Only when `Files` is non-empty does a fourth element get appended: the sorted (`by Path`, case-insensitive) `[Path, Label, Description, Executable, ListInAgents, ContentHash]` tuples, so the hash never depends on build order. `info.json` itself never stores `ContentHash` — `readRepositoryInfoFile()` always sets it to `''` on read; a caller rebuilding the folder-side payload for hashing/diffing must re-derive it by joining with `readRepositoryFilesFolder()`/`canonicalFilesForHash()` (`repository-files.ts`).
+
+> **`diffRepositoryFiles()`:** matches `local`/`folder` entries by case-insensitive `Path` (mirroring `readRepositoryFilesFolder()`). A path on both sides with every field equal produces no diff entry at all — because `ContentHash` already comes from `canonicalFilesForHash()`'s LF-normalised content, a CRLF-only difference never surfaces, and because `Executable` here is the metadata flag rather than a raw filesystem mode bit, a file-mode-only difference never surfaces either. A path present on both sides with a `ContentHash` difference is reported as a single `'Content'` field change (carrying the two hash strings, not file bodies).
 
 > **`evaluateRepositoryInfoSync()` decision table** (hash-driven only):
 
@@ -623,6 +733,40 @@ function infoFolderPathspec(): string                                           
 > **Write guard chain:** `writeRepositoryInfoFile()` and `writeRepositoryInfoReadme()` share a guard (lexical containment → realpath symlink-escape → directory-shape check on the `.workspace` folder, reusing `path-guard.ts`, below) and a write-only-if-changed rule (an unchanged second write leaves the file's mtime untouched). A guard failure is reported as `{ written: false }`, never throws.
 >
 > **`writeRepositoryInfoReadme()` is unconditional** — it has no sync-state awareness. `RepositoryInfoSyncOrchestrator.syncRepository()` (below) is responsible for calling it only when the evaluated state is not `disabled`, `main-folder-unavailable`, `id-mismatch`, `incoming`, or `conflict`.
+
+### Repository Files Folder (`repository-files.ts`, Milestone 2)
+
+Pure, filesystem-only module that reads and writes the managed clone's `.workspace/files/` folder — the committed-to-git counterpart of `RepositoryFileManager`'s data layer. Mirrors `custom-files.ts`'s writer pattern (same `guardedFileTarget()`/`pruneEmptyParents()` guard chain from `path-guard.ts`), but diverges where the two features differ: these files are committed, so the writer is write-only-if-changed and deletes by set difference against the data set, rather than unconditionally overwriting and tracking a single previous definition.
+
+```typescript
+const REPOSITORY_FILES_FOLDER_NAME = 'files'   // relative to REPOSITORY_INFO_FOLDER_NAME ('.workspace/files/')
+
+interface RepositoryFileMetadataEntry { Path: string; Label: string; Description: string; Executable: boolean; ListInAgents: boolean }  // info.json Files entry shape
+interface RepositoryFolderFileMetadata { Label: string; Description: string; Executable: boolean; ListInAgents: boolean }
+
+interface RepositoryFolderFile {
+    path: string;       // relative to .workspace/files/, '/'-separated
+    content: string;    // UTF-8 text when `problem` is unset; latin1 (raw-byte-preserving) when `problem` is set and is not the unreadable marker; '' when unreadable
+    metadata: RepositoryFolderFileMetadata;
+    problem?: string;   // human-readable reason the file cannot be treated as a normal repository file
+}
+
+interface ReadRepositoryFilesFolderResult { files: RepositoryFolderFile[]; unsafeEntries: string[] }
+
+type RepositoryFileHashEntry = [path: string, label: string, description: string, executable: boolean, listInAgents: boolean, contentHash: string];
+
+interface WriteRepositoryFilesResult { written: string[]; removed: string[]; skipped: string[] }
+
+readRepositoryFilesFolder(mainFolder: string, metadata: readonly RepositoryFileMetadataEntry[]): ReadRepositoryFilesFolderResult
+writeRepositoryFiles(mainFolder: string, files: readonly RepositoryFile[]): WriteRepositoryFilesResult
+canonicalFilesForHash(files: readonly RepositoryFolderFile[]): RepositoryFileHashEntry[]
+```
+
+> **Reader (`readRepositoryFilesFolder()`):** walks `.workspace/files/` recursively without ever following a symlink — a symlink entry (file or directory) is reported only in `unsafeEntries` and never descended into or read; any other non-regular entry (FIFO, socket, device file) is reported the same way. Every regular file is returned in `files`, joined with its `info.json` metadata entry by case-insensitive `Path`; a file without a matching entry gets defaults (`Label` = file name, empty `Description`, `Executable` from `isExecutableFile()`, `ListInAgents: false`). A metadata entry without a matching file on disk is silently ignored. A file that is unreadable, has an invalid or reserved (`.git`, any depth, case-insensitive) path segment, exceeds the size limit, or contains embedded binary data is still returned — never dropped — with `problem` set; this is what lets `canonicalFilesForHash()` detect the change rather than silently treating the file as absent.
+
+> **Writer (`writeRepositoryFiles()`):** every target goes through the same guard chain as `custom-files.ts`'s writer, with one difference forced by the files/ root not existing yet on a repository's first write — `.workspace/files/`'s own existence can't be assumed the way `custom-files.ts`'s workspace-folder root can, so the target is resolved lexically first (to know which directory to `mkdir`), then `guardedFileTarget()` runs once the directory — and therefore the root — exists. Content and the POSIX executable mode (`chmod`, skipped on Windows) are each written only when they differ from what's already on disk, so an unchanged re-sync leaves the file's mtime untouched. The delete pass removes every regular file under `files/` not in the current data set, re-confirming each candidate with `lstat` immediately before removal; a symlink or any other non-regular entry is never removed, regardless of whether it is "expected" — it is always left in place and reported in `skipped`. Directories left empty by a deletion are pruned upward via `pruneEmptyParents()`, stopping at (never removing) `files/` itself.
+
+> **`canonicalFilesForHash()`:** builds the order-independent representation of a repository's file set used (by a later work package) to extend `hashRepositoryInfoPayload()`. Sorted by lowercased `path`. Every entry in `files` counts, including a `problem` file, so a teammate's committed binary/oversized/invalid-path/unreadable file always changes the hash and surfaces as `incoming`/`conflict` rather than being silently ignored (and, since the delete pass only ever runs in a `write-required` state, never reaches deletion without an explicit import decision): a normal file hashes `sha256` of its LF-normalised content (so a Windows `core.autocrlf` checkout never looks like an incoming change); a `problem` file (other than unreadable) hashes `sha256` of its raw bytes via `Buffer.from(content, 'latin1')` (no line-ending normalisation); an unreadable file contributes the fixed string `'unreadable'`. `files` must already exclude symlinks/non-regular entries (`unsafeEntries`) — they are never part of this hash.
 
 ### Main Folder (`repository-main-folder.ts`)
 
@@ -688,48 +832,67 @@ interface RepositoryInfoSyncStatus {
 interface RepositoryInfoSyncSettingsInput { enabled: boolean; discardPendingChanges?: boolean }
 interface CommitPushResult { committed: boolean; pushed: boolean; commitSha?: string; filterFallback?: boolean }
 
+// Per-file import diff/decision types (Milestone 2, `repository-info.ts`) — see `getImportPreview()`/`applyImport()` below.
+interface RepositoryFileFieldChange { field: 'Label' | 'Description' | 'Executable' | 'ListInAgents' | 'Content'; local: string | boolean; incoming: string | boolean }
+interface RepositoryFileDiff { path: string; kind: 'incoming-only' | 'local-only' | 'changed'; changes?: RepositoryFileFieldChange[]; problem?: string }
+type RepositoryFileImportAction = 'add' | 'discard' | 'keep' | 'delete' | 'overwrite';
+interface RepositoryFileImportSelection { path: string; action: RepositoryFileImportAction }
+function defaultFileImportAction(kind: RepositoryFileDiff['kind']): RepositoryFileImportAction            // 'discard' for incoming-only, 'keep' otherwise
+function resolveFileImportAction(diff: RepositoryFileDiff, requested: RepositoryFileImportAction | undefined): RepositoryFileImportAction
+
 class SyncPreconditionError extends Error {}  // wrong state, wrong branch, nothing pending, etc.
 class PendingChangesError extends Error {}    // disable/recreate would discard pending changes; opt in via discardPendingChanges
 class RemoteOperationError extends Error {}   // clone/fetch/push/commit/merge failure; always credential-stripped
 
-function buildDefaultInfoCommitMessage(repositoryId: string): string  // offered by the Commit & Push dialog
+function buildDefaultInfoCommitMessage(repositoryId: string, pendingChanges?: readonly string[]): string  // offered by the Commit & Push dialog
+function describeInfoChangeAreas(pendingChanges: readonly string[]): string[]                              // pure helper: info.json/README/files, fixed order, no duplicates
 
 class RepositoryInfoSyncOrchestrator {
-    constructor(config: AppConfig, repositoryManager: RepositoryManager, errorLogManager?: ErrorLogManager)
+    constructor(config: AppConfig, repositoryManager: RepositoryManager, repositoryFileManager: RepositoryFileManager, errorLogManager?: ErrorLogManager)
 
+    assertSyncEnabled(repositoryId: string): void                                  // throws SyncPreconditionError while sync is disabled
+    runLocked<T>(repositoryId: string, fn: () => Promise<T>): Promise<T>           // public per-repository mutex, for mutation surfaces built on this orchestrator
     syncRepository(repositoryId: string): RepositoryInfoSyncResult                 // synchronous, filesystem-only; safe for the artefact choke-point
     getStatus(repositoryId: string): Promise<RepositoryInfoSyncStatus>             // no network calls
     saveSettings(repositoryId: string, input: RepositoryInfoSyncSettingsInput): Promise<RepositoryInfoSyncStatus>
     refresh(repositoryId: string): Promise<RepositoryInfoSyncStatus>
-    getImportPreview(repositoryId: string): Promise<{ state: RepositoryInfoSyncState; fields: RepositoryInfoFieldDiff[] }>
-    applyImport(repositoryId: string, fields: RepositoryInfoImportField[]): Promise<RepositoryInfoSyncStatus>
+    getImportPreview(repositoryId: string): Promise<{ state: RepositoryInfoSyncState; fields: RepositoryInfoFieldDiff[]; files: RepositoryFileDiff[] }>
+    applyImport(repositoryId: string, input: { fields: RepositoryInfoImportField[]; files?: RepositoryFileImportSelection[] }): Promise<RepositoryInfoSyncStatus>
     commitAndPush(repositoryId: string, options?: { message?: string }): Promise<CommitPushResult>
     recreateManagedClone(repositoryId: string, options?: { discardPendingChanges?: boolean }): Promise<RepositoryInfoSyncStatus>
     removeManagedFolder(repositoryId: string): void                                // synchronous; used by the deletion cascade
 }
 ```
 
-> **`syncRepository()` is the only method intended to run on every artefact regeneration;** every other method performs real git I/O and is only ever invoked from an explicit user action (settings toggle, refresh button, import dialog, commit & push, or a health-issue fix action). It never throws for an ordinary "nothing to do" outcome (disabled, no main folder yet) — only `NotFoundError` (unknown repository ID) or a genuine filesystem error escapes. It writes `info.json` only when the evaluated state is `write-required`, records the hash-only baseline (no write) when `in-sync` but `LastWrittenHash` is stale/missing, and writes `.workspace/README.md` whenever it differs except in the states `disabled`, `main-folder-unavailable`, `id-mismatch`, `incoming`, `conflict`.
+> **`repositoryFileManager` is a required constructor dependency (Milestone 2).** An orchestrator built without it would compute an empty file set for a repository that has files, evaluate `write-required`, and `writeRepositoryFiles()`'s delete pass would remove every committed file from the managed clone — so a missing file manager is a compile error at every construction site rather than a silent data-loss bug at runtime. All construction sites (`src/server/index.ts`, `src/cli/custom-files.ts`'s `createDefaultCustomFilesDeps()`, `src/cli/repo-files.ts`'s `createDefaultRepoFilesDeps()` (Milestone 2 — WP-011), and both orchestrator test harnesses) pass one on the same storage folder.
 >
-> **Per-repository mutex (`withRepositoryLock`):** every git-backed mutator (`saveSettings`, `refresh`, `applyImport`, `commitAndPush`, `recreateManagedClone`) is serialised per repository via a private `Map<string, Promise<unknown>>`, so two concurrent GUI requests never race on `.git/index.lock` for the same repository. A queued operation always runs after the prior one settles regardless of success/failure; the map entry is deleted once nothing is queued behind it, so it does not grow unbounded over a long server lifetime.
+> **`syncRepository()` is the only method intended to run on every artefact regeneration;** every other method performs real git I/O and is only ever invoked from an explicit user action (settings toggle, refresh button, import dialog, commit & push, or a health-issue fix action). It never throws for an ordinary "nothing to do" outcome (disabled, no main folder yet) — only `NotFoundError` (unknown repository ID) or a genuine filesystem error escapes. It writes `info.json` only when the evaluated state is `write-required`, records the hash-only baseline (no write) when `in-sync` but `LastWrittenHash` is stale/missing, writes `.workspace/README.md` whenever it differs except in the states `disabled`, `main-folder-unavailable`, `id-mismatch`, `incoming`, `conflict`, and (Milestone 2) writes the repository's files under `.workspace/files/` after `info.json`, write-only-if-changed exactly like the info file itself.
+>
+> **`assertSyncEnabled(repositoryId)`:** throws `NotFoundError` for an unknown repository ID, `SyncPreconditionError` while info sync is disabled for it, and returns normally otherwise. A thin, reusable guard so the mutation surfaces built on top of this orchestrator (REST routes, CLI commands — WP-008, WP-011) enforce the same precondition every async method here already checks for itself, without duplicating the check.
+>
+> **Per-repository mutex (`runLocked`, public — formerly the private `withRepositoryLock`):** every git-backed mutator (`saveSettings`, `refresh`, `applyImport`, `commitAndPush`, `recreateManagedClone`) is serialised per repository via a private `Map<string, Promise<unknown>>`, so two concurrent GUI requests never race on `.git/index.lock` for the same repository. A queued operation always runs after the prior one settles regardless of success/failure; the map entry is deleted once nothing is queued behind it, so it does not grow unbounded over a long server lifetime. It is now public so mutation surfaces built on top of this orchestrator (REST routes, CLI commands) can serialise their own multi-step operations (e.g. a file add followed by a folder write) behind the same per-repository lock this orchestrator itself uses.
 >
 > **`saveSettings()`:** disabling refuses with `PendingChangesError` unless `discardPendingChanges` is `true`, then removes the managed clone and clears `InfoSync` entirely (so `LastWrittenHash` never survives a disable/re-enable cycle). Enabling creates the managed clone first and persists `{ Enabled: true }` (no hash) only after the clone succeeds, so a failed enable leaves no `InfoSync` setting behind. Either way, `syncRepository()` runs before the status is returned.
 >
-> **`getImportPreview()` / `applyImport()`:** both require state `incoming` or `conflict`, which (per `evaluateRepositoryInfoSync()`'s decision table) already guarantees the file reads `ok` and its `Id` matches — not re-checked separately. `applyImport()` re-reads and re-evaluates the state before applying (a concurrent caller serialised behind it may already have resolved it), applies only the selected fields (`Name`/`Description`) through `RepositoryManager.update()`, and never touches `Url` or `CredentialId`. An empty `fields` array is valid — it keeps every local value, still rewrites the file from Paralizer's data, and resolves to `in-sync`. Writes an `audit`-severity log entry (`Source: 'workspace-info'`, `Operation: 'import'`).
+> **`getImportPreview()` / `applyImport()`:** both require state `incoming` or `conflict`, which (per `evaluateRepositoryInfoSync()`'s decision table) already guarantees the file reads `ok` and its `Id` matches — not re-checked separately. `getImportPreview()`'s `files` is `diffRepositoryFiles()`'s (`repository-info.ts`) pure path/field diff joined with `problem` data from the folder read (binary/oversized/unreadable/unsafe entries), identical files omitted. `applyImport()` re-reads and re-evaluates the state before applying (a concurrent caller serialised behind it may already have resolved it), applies the selected fields (`Name`/`Description`) through `RepositoryManager.update()` and never touches `Url` or `CredentialId`, and resolves every file diff's action via `resolveFileImportAction()` (`repository-info.ts`) up front — before any mutation — so an unknown path or a disallowed action (wrong action for the diff's `kind`, or any action but the one safe one on a `problem` diff) rejects the whole call with a plain `Error` and leaves no partial import. The per-diff action table is `incoming-only` → `add`/`discard`, `local-only` → `keep`/`delete`, `changed` → `overwrite`/`keep`; a path omitted from `input.files` defaults to the side that keeps Paralizer's own data (`discard`/`keep`/`keep` respectively — see `defaultFileImportAction()`). Resolved file actions are applied in one `RepositoryFileManager.replaceAll()` call, then folded into the same merged write/hash-record step as the field import. An empty/omitted `fields` or `files` array is valid — it keeps every local value, still rewrites the file from Paralizer's data, and resolves to `in-sync`. Writes an `audit`-severity log entry (`Source: 'workspace-info'`, `Operation: 'import'`) listing both the field list and the per-file `action: path` list (or `(none)` when there were no file diffs).
 >
-> **`commitAndPush()`:** refuses with `SyncPreconditionError` when the folder is unavailable, off the default branch, the state is `incoming`/`conflict`/`invalid-file`/`id-mismatch`/`unsupported-schema`, or nothing is pending. Otherwise re-points `origin`, fetches, and — when behind — refuses if the upstream change touches the info folder (`changedPathsBetween()` filtered client-side to the `.workspace/` prefix, since that function has no pathspec parameter) or fast-forwards. The commit is staged/committed scoped to `infoFolderPathspec()` and always carries the fixed `INFO_COMMIT_AUTHOR_NAME`/`INFO_COMMIT_AUTHOR_EMAIL` identity (never a global git identity). Every surfaced git error is credential-stripped via `stripEmbeddedCredentials()`; a push rejected for lack of permission (`403`/`permission denied`/`denied`) gets an explanatory hint appended. Writes an `audit`-severity log entry on success.
+> **`commitAndPush()`:** refuses with `SyncPreconditionError` when the folder is unavailable, off the default branch, the state is `incoming`/`conflict`/`invalid-file`/`id-mismatch`/`unsupported-schema`, or nothing is pending. Otherwise re-points `origin`, fetches, and — when behind — refuses if the upstream change touches the info folder (`changedPathsBetween()` filtered client-side to the `.workspace/` prefix, since that function has no pathspec parameter) or fast-forwards. Changes are staged via `stagePaths()` scoped to `infoFolderPathspec()`, then (Milestone 2) `getStagedPaths()` guards that nothing outside `.workspace/` was staged (throws `SyncPreconditionError` otherwise, before any commit), then `getIndexModes()`/`setIndexExecutable()` fix up the staged index's executable bit for every repository file whose mode disagrees with `RepositoryFile.Executable`, and finally `commitStaged()` commits the staged index directly (no pathspec — see `commitStaged()`'s docs above for why a pathspec commit would drop the chmod) always carrying the fixed `INFO_COMMIT_AUTHOR_NAME`/`INFO_COMMIT_AUTHOR_EMAIL` identity (never a global git identity). Every surfaced git error is credential-stripped via `stripEmbeddedCredentials()`; a push rejected for lack of permission (`403`/`permission denied`/`denied`) gets an explanatory hint appended. Writes an `audit`-severity log entry on success.
+>
+> **`buildDefaultInfoCommitMessage()` / `describeInfoChangeAreas()` (Milestone 2):** with no `pendingChanges` (or none that map to a known area), the default message stays byte-identical to Milestone 1's `Update .workspace for "{repoId}" via Paralizer`; otherwise `describeInfoChangeAreas()` maps the pending paths to `info.json`/`README`/`files` (fixed order, no duplicates, based on path prefix) and the message appends them in parentheses, e.g. `Update .workspace for "{repoId}" via Paralizer (info.json, files)`. `getStatus()` and `commitAndPush()`'s own default-message fallback both pass the current `pendingChanges` so the dialog's offered message and the status's `defaultCommitMessage` field agree.
 >
 > **`recreateManagedClone()` / `removeManagedFolder()`:** `recreateManagedClone()` refuses with `PendingChangesError` unless discarded, then removes and re-clones, clearing `LastWrittenHash` (a fresh clone is baseline-less, so a differing file routes through the import dialog rather than being silently treated as `in-sync` against a stale hash) while preserving `LastSyncedAt`. `removeManagedFolder()` is synchronous, does no settings mutation and no git beyond the filesystem removal already performed by `removeManagedClone()` — used by `RepositoryOrchestrator.deleteRepositoryGlobally()`'s deletion cascade after the repository's data entry has already been removed.
 >
 > **Health report (`buildHealthReport()`, private):** remaps `deriveMainFolderIssues()`'s generic issue types onto this module's own `info-sync-*` vocabulary (`info-sync-main-folder-missing`, `info-sync-remote-mismatch`, `info-sync-wrong-branch`) rather than duplicating the underlying checks, adds sync-state-derived issues (`info-sync-behind-remote`, `info-sync-pending-changes`, `info-sync-import-available`, `info-sync-conflict`, `info-sync-invalid-file`, `info-sync-id-mismatch`, `info-sync-unsupported-schema` — only meaningful when the folder is usable), and `info-sync-credential-missing` (meaningful regardless of folder usability, since it blocks every async operation this orchestrator offers). See `rest-api.md`'s **Repository Info Sync Issue Types** table for the full severity/`fixAction` list.
+>
+> **Files-folder health sweep (`buildFilesHealthIssues()`, private, Milestone 2):** called only when the main folder is usable, and is purely read-only (no write, not even a dry-run `mkdir`), so calling it from `getStatus()` on every poll never mutates the managed clone. Raises `info-sync-files-unsafe-entry` for a symlink or other non-regular entry under `files/` (from `readRepositoryFilesFolder()`'s `unsafeEntries`), `info-sync-files-invalid-incoming` for a regular file under `files/` that cannot be treated as a normal repository file (binary, oversized, unreadable, or an invalid/reserved path segment — `fixAction: 'import'`, since resolving it requires looking at the incoming change), and `info-sync-files-write-skipped` when one of the repository's own files (`RepositoryFileManager.list()`) resolves to a write target the shared guard chain (`guardedFileTarget()`) refuses — the same check `writeRepositoryFiles()` itself applies before writing, run here without writing so a refusal surfaces even outside a sync. Every method that evaluates sync state (not just `syncRepository()`) — `getStatus()`, `getImportPreview()`, `applyImport()`, `commitAndPush()` — reconstructs its `dataHash`/`folderHash` from real file content via module-private helpers (`toFolderFiles()`, `buildLocalPayload()`, `withFolderFileHashes()`), since `info.json` never stores file content and so cannot supply a hash on its own.
 
-> **Commit constants (`src/config/config.constants.ts`):** `INFO_COMMIT_AUTHOR_NAME = 'Paralizer'` and `INFO_COMMIT_AUTHOR_EMAIL = 'paralizer@mistralys.eu'` are the fixed identity `commitAndPush()` always passes to `commitPaths()` (`git-commit.ts`), independent of any machine's git config. `MAX_INFO_COMMIT_MESSAGE_LENGTH = 500` bounds the trimmed `message` body field on `POST .../commit-push` (`rest-api.md`) and the commit dialog's own client-side validation (`info-commit-dialog.js`, below) — both enforce the identical limit so the dialog never accepts a message the route would reject.
+> **Commit constants (`src/config/config.constants.ts`):** `INFO_COMMIT_AUTHOR_NAME = 'Paralizer'` and `INFO_COMMIT_AUTHOR_EMAIL = 'paralizer@mistralys.eu'` are the fixed identity `commitAndPush()` always passes to `commitStaged()` (`git-commit.ts`, Milestone 2 — `commitPaths()` before it), independent of any machine's git config. `MAX_INFO_COMMIT_MESSAGE_LENGTH = 500` bounds the trimmed `message` body field on `POST .../commit-push` (`rest-api.md`) and the commit dialog's own client-side validation (`info-commit-dialog.js`, below) — both enforce the identical limit so the dialog never accepts a message the route would reject.
 
 ### RepositoryOrchestrator (`repository-orchestrator.ts`)
 
 ```typescript
 class RepositoryOrchestrator {
-    constructor(config: AppConfig, projectManager: ProjectManager, repositoryManager: RepositoryManager, workspaceArtifacts: WorkspaceArtifactsOrchestrator, errorLogManager?: ErrorLogManager, repositoryInfoSync?: RepositoryInfoSyncOrchestrator)
+    constructor(config: AppConfig, projectManager: ProjectManager, repositoryManager: RepositoryManager, workspaceArtifacts: WorkspaceArtifactsOrchestrator, errorLogManager?: ErrorLogManager, repositoryInfoSync?: RepositoryInfoSyncOrchestrator, repositoryFileManager?: RepositoryFileManager)
 
     addRepositoryToProject(projectId: string, repositoryId: string): Promise<AddRepositoryResult>
     removeRepositoryFromProject(projectId: string, repositoryId: string): void
@@ -738,6 +901,8 @@ class RepositoryOrchestrator {
 ```
 
 > **`deleteRepositoryGlobally()`'s managed-folder cleanup:** when `repositoryInfoSync` is injected, `removeManagedFolder(repositoryId)` (see `RepositoryInfoSyncOrchestrator`, above) runs once `repositoryManager.remove()` has succeeded — there is no `InfoSync` setting left to clear at that point, so this is a plain filesystem removal. A removal failure is logged as a `Severity: 'warning'`, `Source: 'workspace-info'`, `Operation: 'delete-repository-global'` entry rather than thrown, since the repository record is already gone by the time this step runs. On success, the `delete-repository-global` audit message (described below) gains a trailing "Managed main folder removed." sentence; it is omitted on failure or when no sync orchestrator was injected.
+>
+> **`deleteRepositoryGlobally()`'s file-store cleanup (Milestone 2, new optional trailing `repositoryFileManager` parameter):** mirrors the managed-folder cleanup immediately above — runs after `repositoryManager.remove()` succeeds, is best-effort (a thrown error is logged as a `Severity: 'warning'`, `Source: 'workspace-info'`, `Operation: 'delete-repository-global'` entry and does not block deletion or the audit entry), and appends a trailing "Repository file store removed." sentence to the same audit message when it succeeds. Like `managedFolderRemoved`, `fileStoreRemoved` becomes `true` whenever `removeStore()` does not throw — including when no store existed for that repository, since `removeStore()` silently no-ops in that case — so the audit suffix does not strictly mean a store was present, only that the best-effort removal attempt did not fail. Omitting `repositoryFileManager` (the existing 4-, 5-, and 6-argument constructor forms) makes this step a no-op, exactly as omitting `repositoryInfoSync` does for the managed-folder step.
 
 > **`removeRepositoryFromProject()`'s association precondition:** before any clone folder is touched, the method checks `project.Repositories.includes(repositoryId)` and throws `Repository "X" is not listed in project "Y".` if it fails — hoisted above the per-workspace delete loop so an unlisted repository ID can never cause a partial, unassociated deletion. `projectManager.removeRepository()` further down re-validates the same association as defense in depth.
 
@@ -791,6 +956,10 @@ const MAX_SYMLINK_RESOLUTION_DEPTH = 40  // upper bound on symlink chain length 
 function resolveRootRealPath(projectsFolder: string): string
 function escapesRootViaRealpath(targetPath: string, resolvedRoot: string): boolean
 function isDirectoryShaped(targetPath: string): boolean
+
+// Composite helpers, built on the guards above
+function guardedFileTarget(root: string, relativePath: string): string | null  // runs the full chain (lexical containment -> realpath symlink-escape -> directory-shape) for one '/'-separated relative path under root; returns the resolved absolute path when safe, or null to skip (target escapes root lexically or via symlink, equals root itself, or already exists as a directory)
+function pruneEmptyParents(dir: string, stopAt: string): void   // prunes empty directories upward from dir, stopping at (never removing) stopAt; stops early on a non-empty directory, an escape from stopAt, or any read/remove error
 ```
 
 > **`isLexicallyContained()`:** purely string-based (`resolvedTarget === resolvedRoot || resolvedTarget.startsWith(resolvedRoot + path.sep)`) — does not touch the filesystem, and therefore cannot see through a planted symlink. **Its equality-permitting contract suits a writer whose target may legitimately equal the root, but is wrong for a delete guard** — `RepositoryOrchestrator.removeRepositoryFromProject()` (below) deliberately does not call this helper for its lexical layer, instead keeping a bespoke strict-descendant check that rejects equality with `projectsFolder`, so a malformed persisted ID can never resolve to the projects root.
@@ -803,7 +972,11 @@ function isDirectoryShaped(targetPath: string): boolean
 
 > **`isDirectoryShaped()`:** rejects a target that already exists on disk as a directory. Applied by the write-guard chain in `writeWorkspaceIndexFiles()` (below); deliberately **not** applied by `removeRepositoryFromProject()`'s delete guard, since the delete target (a clone folder) is expected to be a directory.
 
-> **Two distinct roots, one recurring pattern:** every consumer of this module keeps the lexical-check root (`path.resolve(root)`) and the realpath-check root (`resolveRootRealPath(root)`) as two separate values rather than unifying them — unifying them would falsely reject every legitimate write/delete whenever the configured root itself sits behind a symlink (e.g. macOS's `/tmp` → `/private/tmp`). Consumers: `workspace-index.ts`'s `writeWorkspaceIndexFiles()` guard chain (below), `repository-orchestrator.ts`'s `removeRepositoryFromProject()` clone-folder deletion guard (see `RepositoryOrchestrator`, above), and `repository-main-folder.ts`'s `removeManagedClone()` guard (see `Main Folder`, above).
+> **Two distinct roots, one recurring pattern:** every consumer of this module keeps the lexical-check root (`path.resolve(root)`) and the realpath-check root (`resolveRootRealPath(root)`) as two separate values rather than unifying them — unifying them would falsely reject every legitimate write/delete whenever the configured root itself sits behind a symlink (e.g. macOS's `/tmp` → `/private/tmp`). Consumers: `workspace-index.ts`'s `writeWorkspaceIndexFiles()` guard chain (below), `repository-orchestrator.ts`'s `removeRepositoryFromProject()` clone-folder deletion guard (see `RepositoryOrchestrator`, above), `repository-main-folder.ts`'s `removeManagedClone()` guard (see `Main Folder`, above), and `custom-files.ts`'s `writeCustomFiles()`/`removeCustomFileCopy()` via the composite `guardedFileTarget()`/`pruneEmptyParents()` helpers (see `Custom Files`, below).
+
+> **`guardedFileTarget()`:** the write-and-delete-side equivalent of `writeWorkspaceIndexFiles()`'s inline guard chain, packaged as one call for a caller whose target is always a `/`-separated relative path under a single root (rather than a fixed set of named files). Rejects equality with `root` itself — unlike `isLexicallyContained()`'s own equality-permitting contract — since a bare-root target is never a valid file. A caller that creates intermediate directories before writing (`fs.mkdirSync(..., { recursive: true })`) should call this a second time after that `mkdir`, since a directory component may have been replaced by a symlink in between the two calls — `custom-files.ts`'s `writeCustomFiles()` does exactly this.
+
+> **`pruneEmptyParents()`:** removes now-empty directories bottom-up after a file delete, stopping at (never removing) the given root. Treats a non-empty directory, an escape from the stop root, or any `readdir`/`rmdir` failure (e.g. a permission error) as "nothing more to prune" rather than throwing — mirrors this module's existing conservative-on-error posture.
 
 ### Workspace Index Files (`workspace-index.ts`)
 
@@ -821,6 +994,9 @@ interface WorkspaceIndexRepositoryRow {
     url: string;
 }
 
+interface WorkspaceIndexCustomFileRow { path: string; label: string; description: string }   // AGENTS.md "Custom Files" table row
+interface WorkspaceIndexRepositoryFileRow { repositoryId: string; path: string; label: string; description: string }   // AGENTS.md "Repository Files" table row (Milestone 2); path is relative to the repo's .workspace/files/
+
 interface WorkspaceIndexContext {
     projectsFolder: string;
     projectId: string;
@@ -830,6 +1006,8 @@ interface WorkspaceIndexContext {
     workspaceDescription: string; // empty string when none is set
     workspaceNotes: string;       // empty string when none are set
     repositories: WorkspaceIndexRepositoryRow[]; // project.Repositories order
+    customFiles?: WorkspaceIndexCustomFileRow[];          // ListInAgents custom files, project order; AGENTS.md "Custom Files" section, omitted when empty/absent
+    repositoryFiles?: WorkspaceIndexRepositoryFileRow[];  // ListInAgents repository files from sync-enabled repos only, project.Repositories order (Milestone 2); AGENTS.md "Repository Files" section, omitted when empty/absent; built with no filesystem check
     guiUrl: string;                // built from config.serverPort
     toolVersion: string;           // from getToolVersion()
     toolRoot: string;              // from getToolRoot(); rendered into the AGENTS.md "Paralizer CLI" section
@@ -838,7 +1016,7 @@ interface WorkspaceIndexContext {
 
 function escapeMarkdownCell(value: string): string
 function renderWorkspaceReadme(ctx: WorkspaceIndexContext): string
-function renderWorkspaceAgents(ctx: WorkspaceIndexContext): string
+function renderWorkspaceAgents(ctx: WorkspaceIndexContext): string                             // only file that renders customFiles/repositoryFiles — never README.md
 function renderClaudePointer(): string
 function mergeGeneratedContent(existing: string | null, generatedBody: string): { content: string; skipped: boolean }
 function writeWorkspaceIndexFiles(ctx: WorkspaceIndexContext): { written: string[]; skipped: string[] }
@@ -858,7 +1036,7 @@ function checkIndexFileStatus(projectsFolder: string, projectId: string, workspa
 
 ### Custom Files (`custom-files.ts`)
 
-Stateless writer/remover for a project's custom files inside one workspace folder. Same guard chain as the index files (`path-guard.ts`), with the **workspace folder** as the containment root.
+Stateless writer/remover for a project's custom files inside one workspace folder. Same guard chain as the index files (`path-guard.ts`), with the **workspace folder** as the containment root — consumed via the composite `guardedFileTarget()`/`pruneEmptyParents()` helpers (see `Path Guard`, above) rather than a private guard/prune implementation of its own.
 
 ```typescript
 interface CustomFilesResult { written: string[]; skipped: string[] }   // workspace-relative paths
@@ -883,7 +1061,7 @@ interface RegenerateWorkspaceOverrides {
 }
 
 class WorkspaceArtifactsOrchestrator {
-    constructor(config: AppConfig, projectManager: ProjectManager, repositoryManager: RepositoryManager, repositoryInfoSync?: RepositoryInfoSyncOrchestrator, errorLogManager?: ErrorLogManager)
+    constructor(config: AppConfig, projectManager: ProjectManager, repositoryManager: RepositoryManager, repositoryInfoSync?: RepositoryInfoSyncOrchestrator, errorLogManager?: ErrorLogManager, repositoryFileManager?: RepositoryFileManager)
 
     regenerateWorkspace(projectId: string, workspaceId: string, overrides?: RegenerateWorkspaceOverrides): void
     regenerateProject(projectId: string): void
@@ -895,6 +1073,8 @@ class WorkspaceArtifactsOrchestrator {
 
 > **Custom files:** `regenerateWorkspace()` also calls `writeCustomFiles()` (see `custom-files.ts` below), so every existing trigger of the artefact set (project/workspace/repository edits, setup, regenerate) syncs custom files too, and `WorkspaceIndexContext.customFiles` carries the `ListInAgents` rows rendered into the `AGENTS.md` "Custom Files" table (README.md is unaffected; the section is omitted when no file is listed).
 
+> **Repository files listing (Milestone 2):** `repositoryFileManager` is an optional, last constructor parameter. When present, a private `buildRepositoryFileRows()` fills `WorkspaceIndexContext.repositoryFiles` by filtering `repositories` to `InfoSync?.Enabled === true`, listing each via `RepositoryFileManager.list()`, keeping only `ListInAgents` entries, and mapping to rows in `repositories`' own (`project.Repositories`) order — with **no filesystem check** against the workspace clone, so the "Repository Files" table in `AGENTS.md` is deterministic regardless of whether a teammate has actually pulled the file yet. `renderCliSection()` adds one `paralizer repo-files` pointer line only when `repositoryFiles` has at least one row. **Wiring status (as of WP-011):** `src/cli/custom-files.ts`'s `createDefaultCustomFilesDeps()` and `src/cli/repo-files.ts`'s `createDefaultRepoFilesDeps()` both now pass a real `RepositoryFileManager` as this argument, so the "Repository Files" table renders for both CLI paths' `regenerateProject()`/`regenerateForRepository()` calls; `src/server/index.ts` still constructs `WorkspaceArtifactsOrchestrator` without it, so the section does not yet render for GUI-triggered regeneration.
+
 > **`.code-workspace` vs. index-file initialisation asymmetry:** `regenerateWorkspace()` preserves `generateWorkspaceFile()`'s existing unconditional-write behaviour (it writes, and `mkdir -p`s its parent, even for a workspace whose own folder does not exist yet), but `writeWorkspaceIndexFiles()` is a deliberate no-op in that same case (see `workspace-index.ts` above). Calling `regenerateWorkspace()` on an uninitialised workspace therefore still produces a `.code-workspace` file while silently skipping the three index files.
 
 > **Repository resolution:** `regenerateWorkspace()` resolves `project.Repositories` against the live `RepositoryManager` store, silently skipping any ID no longer present (a repository can be deleted globally while still transiently listed on a project) — the deleted repository is omitted from both the `.code-workspace` folder list and the index-file repository table, never throwing.
@@ -905,7 +1085,7 @@ class WorkspaceArtifactsOrchestrator {
 
 > **`removeWorkspace()`:** calls both `removeWorkspaceFile()` and `removeWorkspaceIndexFiles()`, each already tolerant of a missing target — no folder-existence check is needed here.
 
-> **`.workspace/info.json` is a repository-level artefact, not a per-workspace one:** `regenerateWorkspace()` calls `RepositoryInfoSyncOrchestrator.syncRepository()` (above) for every resolved repository, and `regenerateForRepository()` also calls it once up front — independent of project membership, so a repository that belongs to no project is still synced. Both route through a private `safeSync()` helper that catches and logs any thrown error (`Severity: 'warning'`, `Source: 'workspace-info'`, `Operation: 'sync'`) rather than propagating it, so a sync failure never breaks `.code-workspace`/index-file regeneration; `safeSync()` is a no-op when `repositoryInfoSync` was not injected. Because `regenerateForRepository()` delegates to `regenerateProject()` → `regenerateWorkspace()` for every project that lists the repository, a repository that does have projects is synced more than once per call — accepted as redundant-but-cheap, since `syncRepository()` is documented as a single read + hash when nothing changed.
+> **`.workspace/info.json` is a repository-level artefact, not a per-workspace one:** `regenerateWorkspace()` calls `RepositoryInfoSyncOrchestrator.syncRepository()` (above) for every resolved repository, and `regenerateForRepository()` also calls it once up front — independent of project membership, so a repository that belongs to no project is still synced. Both route through a private `safeSync()` helper that catches and logs any thrown error (`Severity: 'warning'`, `Source: 'workspace-info'`, `Operation: 'sync'`) rather than propagating it, so a sync failure never breaks `.code-workspace`/index-file regeneration; `safeSync()` is a no-op when `repositoryInfoSync` was not injected. Because `regenerateForRepository()` delegates to `regenerateProject()` → `regenerateWorkspace()` for every project that lists the repository, a repository that does have projects is synced more than once per call — accepted as redundant-but-cheap, since `syncRepository()` is documented as a small info-file read + a files-folder read + hash when nothing changed.
 >
 > **Migrated onto by all three orchestrators:** `WorkspaceOrchestrator`, `ProjectOrchestrator`, and `RepositoryOrchestrator` (above) now construct-inject this orchestrator and call it exclusively for artefact generation/removal; `repository-orchestrator.ts`'s former private `regenerateWorkspaceFile()` helper has been deleted. A source-level guard test (`workspace-artifacts-chokepoint.test.ts`) asserts no module outside this file imports `generateWorkspaceFile`/`removeWorkspaceFile`/`writeWorkspaceIndexFiles`/`removeWorkspaceIndexFiles`, and its `TEMPORARY_EXCEPTIONS` allowlist — the mechanism for recording a file that still needs migrating onto this choke-point during an intentionally-incomplete migration — is currently empty by design: `src/server/routes/workspaces.ts`'s former `regenerate-workspace-file` route handler, the allowlist's one-time entry, has since been migrated onto `workspaceArtifacts.regenerateWorkspace()` and no longer imports any guarded identifier, so the stale entry was removed. Any future entry must satisfy two conditions — the named file must exist, and it must still reference a guarded module (`workspace-index.js` or `vscode-workspace.js`) via `referencesGuardedModule()` — both now mechanically enforced by the guard test's assertion (previously an existence-only check that could not detect a stale entry). `referencesGuardedModule()` catches every import shape (named, namespace, default, side-effect, dynamic `import()`, `require()`), not just static named imports, closing the import-shape bypasses the prior identifier-inside-named-import-clause detection missed; see the Choke-Point Guard Tests entry in `constraints.md` for the identifier-vs-specifier gating rationale. `WorkspaceArtifactsOrchestrator` itself is instantiated exactly once, in `src/server/index.ts`, and injected into `WorkspaceOrchestrator`, `registerWorkspaceRoutes()`, `registerRepositoryRoutes()`, and (as of a later WP) `registerProjectRoutes()` directly — see that registrar's updated signature above. `ProjectOrchestrator` (the class) still accepts `workspaceArtifacts` via constructor but is not itself instantiated in `index.ts`; the live project-lifecycle *routes* instead call `WorkspaceArtifactsOrchestrator` directly rather than through the `ProjectOrchestrator` class (see the Artefact Reconciliation note in `rest-api.md`'s Projects/Workspaces sections for the six lifecycle routes now wired this way).
 
@@ -1038,11 +1218,53 @@ runCustomFilesCommand(args: string[], deps: CustomFilesCliDeps): Promise<number>
 createDefaultCustomFilesDeps(): CustomFilesCliDeps                          // loads config.json; throws if missing
 ```
 
-> **`createDefaultCustomFilesDeps()` also wires `RepositoryInfoSyncOrchestrator`:** it constructs one (config + `RepositoryManager`, no `errorLogManager` — the CLI has none) and passes it as the 4th constructor argument to `WorkspaceArtifactsOrchestrator`, so `paralizer custom-files add/update/delete`'s `regenerateProject()` call also syncs each affected repository's `.workspace/info.json` via the same `safeSync()` choke-point described above.
+> **`createDefaultCustomFilesDeps()` also wires `RepositoryInfoSyncOrchestrator`:** it constructs one (config + `RepositoryManager` + the same `RepositoryFileManager` the CLI uses, no `errorLogManager` — the CLI has none) and passes it as the 4th constructor argument to `WorkspaceArtifactsOrchestrator`, so `paralizer custom-files add/update/delete`'s `regenerateProject()` call also syncs each affected repository's `.workspace/info.json` and `.workspace/files/` via the same `safeSync()` choke-point described above.
 
 - `<file>` references resolve by exact ID, then workspace-relative path (case-insensitive, `\` accepted), then unique ID prefix (>= 4 chars).
 - Content sources for `add`/`update`: `--content-file <path>` (`-` = stdin), `--stdin`, `--content <text>` (mutually exclusive). `update` changes only the given fields.
 - `paralizer help` (`src/index.ts`) prints the general usage plus `CUSTOM_FILES_HELP`; it needs no `config.json`. Workspace `AGENTS.md` files point agents at this command instead of duplicating the docs.
+
+## File Command Helpers (`src/cli/file-command-helpers.ts`)
+
+Milestone 2: the scope-neutral parts of `custom-files.ts`'s CLI plumbing, extracted so `repo-files.ts` (below) can reuse them without duplicating logic. Every per-scope difference (noun, list-hint text, how to render a relative path) is passed in by the caller rather than branched on internally.
+
+```typescript
+const EXIT_OK = 0; const EXIT_ERROR = 1; const EXIT_SYNC_FAILED = 2;
+
+class UsageError extends Error {}
+
+function parseCommandArgs(args: string[], options: Record<string, { type: 'string' | 'boolean'; multiple?: boolean }>): { values: Record<string, unknown>; positionals: string[] }
+function requirePositionals(positionals: string[], count: number, usage: string, commandName: string): void   // throws UsageError with a command-name-aware message when short
+const FILE_FIELD_OPTIONS: Record<string, { type: 'string' | 'boolean' }>   // the add/update option schema shared by both command groups
+function readContentSource(values: Record<string, unknown>, readStdin: () => Promise<string>): Promise<string | undefined>   // enforces "exactly one of --content-file/--stdin/--content"; '-' as --content-file reads stdin
+function readFlagPair(values: Record<string, unknown>, name: string): boolean | undefined   // resolves a --name/--no-name pair; undefined when neither given (update keeps the existing value)
+function resolveFileReference<T>(files: readonly T[], ref: string, options: { relativePath: (file: T) => string; noun: string; listHint: string }): T   // exact ID -> case-insensitive relative path -> unique ID prefix (>= 4 chars), in that order
+function readStdin(): Promise<string>
+```
+
+> **Extraction boundary:** dispatch (the subcommand `switch`), help text, the post-mutation sync hook (`regenerateProject()` vs. `regenerateForRepository()`), and success/error wording stay in `custom-files.ts`/`repo-files.ts` respectively — only parsing, content-source resolution, flag-pair resolution, and reference resolution moved here. `custom-files.ts`'s behaviour (output, exit codes, `CustomFilesCliDeps`) is byte-identical before and after this extraction.
+>
+> **`resolveFileReference()`'s resolution order and `listHint`:** tries an exact `Id` match first, then a case-insensitive relative-path match (via the caller's `relativePath()`, with `\` accepted as well as `/`), then a unique prefix of the ID of at least 4 characters (ambiguous or too-short prefixes are rejected). `noun` and `listHint` customise the "not found"/"ambiguous" error text per caller (e.g. `'custom file'` / `'paralizer custom-files list <project-id>'` vs. `'repository file'` / `'paralizer repo-files list --repo <repo-id>'`).
+
+## Repository Files CLI (`src/cli/repo-files.ts`)
+
+Milestone 2: non-interactive `paralizer repo-files <list|show|add|update|delete|help>` command group, mirroring `custom-files.ts` but scoped to a single repository (`--repo <repo-id>` instead of a leading project-ID positional) and never committing or pushing — publishing a change still requires Commit & Push in the Paralizer GUI (or the next `git pull` in a workspace, once someone else has published it).
+
+```typescript
+interface RepoFilesCliDeps {
+    fileManager: Pick<RepositoryFileManager, 'list' | 'add' | 'update' | 'remove'>;
+    infoSync: Pick<RepositoryInfoSyncOrchestrator, 'assertSyncEnabled'>;
+    artifacts: Pick<WorkspaceArtifactsOrchestrator, 'regenerateForRepository'>;
+    readStdin: () => Promise<string>; out: (text: string) => void; err: (text: string) => void;
+}
+const REPO_FILES_HELP: string                                              // shown by `paralizer help` / `repo-files help`
+runRepoFilesCommand(args: string[], deps: RepoFilesCliDeps): Promise<number>   // args after "repo-files"; returns exit code, never throws for user errors
+createDefaultRepoFilesDeps(): RepoFilesCliDeps                              // loads config.json; throws if missing
+```
+
+> **Validation and sync path mirror the REST routes (WP-008):** every mutation (`add`/`update`/`delete`) calls `infoSync.assertSyncEnabled(repoId)` first — sync disabled throws `SyncPreconditionError`, mapped to exit `1` with nothing written; `list`/`show` work regardless of sync state. On success, `fileManager.add()`/`update()`/`remove()` runs the same `validateRepositoryFileInput()` validation as the REST layer (unlike `applyImport()`'s `replaceAll()` path, flagged separately on WP-006), then `artifacts.regenerateForRepository(repoId)` runs — a regeneration failure returns `EXIT_SYNC_FAILED` (`2`, "saved but regeneration failed"), matching `custom-files.ts`'s existing exit-code convention. `repo-files.ts` never shells out to git; its success/help text says "Commit & Push in the Paralizer GUI to publish" rather than describing a commit it never performs.
+>
+> **`createDefaultRepoFilesDeps()`:** constructs its own `RepositoryManager`/`RepositoryFileManager`/`ProjectManager`/`RepositoryInfoSyncOrchestrator`/`WorkspaceArtifactsOrchestrator` instances (no `errorLogManager`, same as `createDefaultCustomFilesDeps()`), passing the shared `RepositoryFileManager` into both `RepositoryInfoSyncOrchestrator`'s required constructor parameter and `WorkspaceArtifactsOrchestrator`'s optional trailing one, so the "Repository Files" `AGENTS.md` table (see `workspace-index.ts`, above) renders for `repo-files`-triggered regeneration too.
 
 ## CLI Terminal UI (`src/cli/`)
 
@@ -1368,6 +1590,19 @@ function registerRepositoryInfoSyncRoutes(
     workspaceArtifacts: WorkspaceArtifactsOrchestrator,  // consulted best-effort by POST .../import (regenerateForRepository())
     errorLogManager?: ErrorLogManager,
 ): void
+// POST .../import's body is parsed by validateFieldsInput() into { fields?: RepositoryInfoImportField[]; files?: RepositoryFileImportSelection[] } (Milestone 2, WP-008)
+// — both optional and independently allowed to be empty; an unknown files path or action disallowed for a diff's kind is
+// rejected by applyImport() itself (a plain Error, special-cased to 400 by this route's handler) rather than by validateFieldsInput().
+
+// repository-files.ts (Milestone 2, WP-008) — repository-scoped counterpart of registerProjectRoutes()'s custom-files routes
+function registerRepositoryFileRoutes(
+    router: Router,
+    repoManager: RepositoryManager,  // kept for signature symmetry; every handler's 404 comes from `fileManager`/`infoSync` instead
+    fileManager: RepositoryFileManager,
+    infoSync: RepositoryInfoSyncOrchestrator,  // every mutation calls assertSyncEnabled() then runs inside runLocked()
+    workspaceArtifacts: WorkspaceArtifactsOrchestrator,  // consulted best-effort on mutation (regenerateForRepository())
+    errorLogManager?: ErrorLogManager,
+): void
 
 // config.ts — accepts a named-options bag
 interface ConfigRoutesOptions {
@@ -1436,14 +1671,29 @@ api.repositories.infoSync.saveSettings(id, { enabled, discardPendingChanges? }) 
 api.repositories.infoSync.refresh(id)                                 // POST /api/repositories/:id/info-sync/refresh
 api.repositories.infoSync.recreateMainFolder(id, discardPendingChanges?)  // POST /api/repositories/:id/info-sync/recreate-main-folder
 api.repositories.infoSync.importPreview(id)                           // GET  /api/repositories/:id/info-sync/import
-api.repositories.infoSync.applyImport(id, fields)                     // POST /api/repositories/:id/info-sync/import
+api.repositories.infoSync.applyImport(id, selections)                 // POST /api/repositories/:id/info-sync/import
 api.repositories.infoSync.commitPush(id, message?)                    // POST /api/repositories/:id/info-sync/commit-push
 ```
 
 - `status()`, `saveSettings()`, `refresh()`, `recreateMainFolder()`, and `applyImport()` resolve to the `InfoSyncStatus` shape (`enabled`, `mainFolder`, `state`, `pendingChanges`, `lastSyncedAt?`, `defaultCommitMessage`, `health`) — a JSDoc `@typedef {InfoSyncStatus}` above the `repositories` namespace in `api.js` documents the full field set, mirroring `RepositoryInfoSyncStatus` in `src/orchestration/repository-info-sync.ts`.
 - `recreateMainFolder(id, discardPendingChanges?)` and `commitPush(id, message?)` take a plain positional optional parameter (not an options object) and build the request body internally (`{}` when the optional argument is `undefined`), keeping the no-argument call terse.
 - `importPreview()` resolves to `{ state, fields: Array<{ field, current, incoming }> }` instead of `InfoSyncStatus`.
-- `applyImport(id, fields)` sends `{ fields }` as the request body.
+- `applyImport(id, selections)` (Milestone 2) accepts either a bare `fields` array (the pre-Milestone-2 call shape) or a `{ fields, files }` selections object — `fields` is `Array<'Name'|'Description'>`, `files` is `Array<{ path: string, action: 'add'|'discard'|'keep'|'delete'|'overwrite' }>` for the incoming `files/` diff. Only the keys actually supplied in the input end up in the request body; passing neither sends `{}` ("keep everything"). `repository-info-import-modal.js` (below) now always calls the `{ fields, files }` shape — sending `files: []` when the preview had no file diffs — and, for a selection containing at least one `discard`, awaits a `showConfirm()` confirmation naming the affected paths before calling `applyImport()`.
+
+### `api.repositories.files`
+
+Repository-level custom-file endpoints (Milestone 2) — the repository-scoped counterpart of `api.projects.customFiles`, below. Every mutation requires info sync to be enabled for the repository (the server responds `409` otherwise, per WP-008's routes); request bodies are camelCase, responses use the stored PascalCase `RepositoryFile` shape. Every method takes the repository/file IDs through `encodeURIComponent`.
+
+```js
+api.repositories.files.list(id)                    // GET    /api/repositories/:id/files
+api.repositories.files.create(id, data)             // POST   /api/repositories/:id/files
+api.repositories.files.update(id, fileId, data)      // PUT    /api/repositories/:id/files/:fileId
+api.repositories.files.remove(id, fileId)            // DELETE /api/repositories/:id/files/:fileId
+```
+
+- `create()`/`update()`'s `data` shape: `{ directory?: string, fileName: string, label: string, description?: string, content: string, listInAgents?: boolean, executable?: boolean }`.
+- `create()` resolves to the created file (HTTP 201); `update()` resolves to the updated file; `remove()` resolves to `void`.
+- `normaliseRepositoryFile()` (`utils/normalise.js`) converts the PascalCase/camelCase `RepositoryFile` response into the camelCase shape (`id`, `directory`, `fileName`, `label`, `description`, `content`, `executable`, `listInAgents`, `dateModified`) consumed by the GUI views, mirroring `normaliseCustomFile()`'s picked-keys/default/strict-boolean-coercion pattern plus the two `RepositoryFile`-only fields (`executable`, `dateModified`).
 
 ### `api.config.credentials`
 
@@ -1686,12 +1936,15 @@ Commit & Push confirmation dialog that performs the commit itself. Built on `cre
 import { showInfoCommitDialog } from './components/info-commit-dialog.js';
 
 // config: { repoId: string, pendingFiles?: string[], defaultMessage?: string }
-// Returns: Promise<string|null> — the trimmed, committed message on success; null on Cancel/Escape/backdrop-click. Never rejects.
-const message = await showInfoCommitDialog({ repoId, pendingFiles: status.pendingChanges, defaultMessage: status.defaultCommitMessage });
+// Returns: Promise<{ message: string, result: CommitPushResult }|null> — the trimmed,
+//   committed message plus the CommitPushResult from commitPush() (`{ committed, pushed,
+//   commitSha?, filterFallback? }`) on success; null on Cancel/Escape/backdrop-click. Never rejects.
+const outcome = await showInfoCommitDialog({ repoId, pendingFiles: status.pendingChanges, defaultMessage: status.defaultCommitMessage });
 ```
 
 - The message textarea enforces a trimmed length of 1–`MAX_INFO_COMMIT_MESSAGE_LENGTH` (500, duplicated client-side — see the commit constants note above) with a live character counter and `aria-invalid`/`aria-describedby` wiring; the Commit button stays disabled while invalid.
 - `Commit & Push` calls `api.repositories.infoSync.commitPush(repoId, trimmedMessage)` itself; a 409/502 rejection is shown inline in a `role="alert"` paragraph without closing the modal (so the caller's own inline alert is never used for Commit & Push errors — see the section builder, below).
+- **Caller (Milestone 2):** `repository-info-sync-section.js`'s `doCommitPush()` reads `outcome.result.commitSha`/`outcome.result.filterFallback` to build its toast — see `rest-api.md`'s `commitPush()` entry and `data-flows.md` §16 for the exact wording — and treats a `null` outcome (cancel) as a no-op, same as Milestone 1.
 
 ---
 

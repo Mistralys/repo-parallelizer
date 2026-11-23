@@ -18,13 +18,14 @@
  * Usage:
  *   import { showInfoCommitDialog } from './components/info-commit-dialog.js';
  *
- *   const message = await showInfoCommitDialog({
+ *   const outcome = await showInfoCommitDialog({
  *     repoId: 'my-repo',
  *     pendingFiles: status.pendingChanges,
  *     defaultMessage: status.defaultCommitMessage,
  *   });
- *   if (message !== null) {
- *     // Commit & Push already happened — re-fetch the section's status.
+ *   if (outcome !== null) {
+ *     // Commit & Push already happened — outcome.message, outcome.result;
+ *     // re-fetch the section's status.
  *   }
  */
 
@@ -73,9 +74,11 @@ function isValidMessage(trimmedMessage) {
  *   the managed main folder, shown as a scrollable list.
  * @param {string} [config.defaultMessage] - Server-suggested commit message
  *   used to pre-fill the textarea.
- * @returns {Promise<string|null>} Resolves with the trimmed, committed
- *   message after a successful Commit & Push; resolves with `null` on
- *   Cancel/Escape/backdrop-click. Never rejects.
+ * @returns {Promise<{ message: string, result: Object }|null>} Resolves with
+ *   the trimmed, committed message plus the `CommitPushResult` returned by
+ *   `api.repositories.infoSync.commitPush()` (`{ committed, pushed,
+ *   commitSha?, filterFallback? }`) after a successful Commit & Push;
+ *   resolves with `null` on Cancel/Escape/backdrop-click. Never rejects.
  */
 export function showInfoCommitDialog({ repoId, pendingFiles, defaultMessage }) {
     return new Promise((resolve) => {
@@ -221,9 +224,9 @@ export function showInfoCommitDialog({ repoId, pendingFiles, defaultMessage }) {
 
             setBusy(true);
             try {
-                await api.repositories.infoSync.commitPush(repoId, trimmed);
+                const result = await api.repositories.infoSync.commitPush(repoId, trimmed);
                 shell.close();
-                resolve(trimmed);
+                resolve({ message: trimmed, result });
             } catch (err) {
                 errorEl.textContent = err.message || 'Failed to commit and push.';
                 errorEl.hidden = false;

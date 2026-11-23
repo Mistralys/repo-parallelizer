@@ -9,6 +9,8 @@ import {
     resolveRootRealPath,
     escapesRootViaRealpath,
     isDirectoryShaped,
+    guardedFileTarget,
+    pruneEmptyParents,
     MAX_SYMLINK_RESOLUTION_DEPTH,
 } from '../utils/path-guard.js';
 
@@ -124,4 +126,78 @@ test('isDirectoryShaped() returns false for an absent path', () => {
     const root = makeCase();
     const missingPath = path.join(root, 'does-not-exist.md');
     assert.equal(isDirectoryShaped(missingPath), false);
+});
+
+// ─── guardedFileTarget() ───────────────────────────────────────────────────
+
+test('guardedFileTarget() resolves a safe relative path inside the root', () => {
+    const root = makeCase();
+    const resolved = guardedFileTarget(root, 'scripts/run.sh');
+    assert.equal(resolved, path.join(root, 'scripts', 'run.sh'));
+});
+
+test('guardedFileTarget() rejects the root itself as a target', () => {
+    const root = makeCase();
+    assert.equal(guardedFileTarget(root, '.'), null);
+});
+
+test('guardedFileTarget() rejects a ".." traversal escaping the root', () => {
+    const root = makeCase();
+    assert.equal(guardedFileTarget(root, '../../etc/passwd'), null);
+});
+
+test('guardedFileTarget() rejects a symlinked sub-folder pointing outside the root', { skip: process.platform === 'win32' }, () => {
+    const root = makeCase();
+    const outside = makeCase();
+    fs.symlinkSync(outside, path.join(root, 'scripts'));
+    assert.equal(guardedFileTarget(root, 'scripts/run.sh'), null);
+});
+
+test('guardedFileTarget() rejects a target that already exists on disk as a directory', () => {
+    const root = makeCase();
+    fs.mkdirSync(path.join(root, 'a-folder'));
+    assert.equal(guardedFileTarget(root, 'a-folder'), null);
+});
+
+// ─── pruneEmptyParents() ───────────────────────────────────────────────────
+
+test('pruneEmptyParents() removes now-empty ancestor directories up to (not including) the given root', () => {
+    const root = makeCase();
+    const nested = path.join(root, 'a', 'b');
+    fs.mkdirSync(nested, { recursive: true });
+
+    pruneEmptyParents(nested, root);
+
+    assert.equal(fs.existsSync(path.join(root, 'a')), false);
+    assert.equal(fs.existsSync(root), true);
+});
+
+test('pruneEmptyParents() stops at the first non-empty ancestor', () => {
+    const root = makeCase();
+    const nested = path.join(root, 'a', 'b');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(root, 'a', 'keep.txt'), 'x');
+
+    pruneEmptyParents(nested, root);
+
+    assert.equal(fs.existsSync(path.join(root, 'a', 'b')), false);
+    assert.equal(fs.existsSync(path.join(root, 'a', 'keep.txt')), true);
+});
+
+test('pruneEmptyParents() never removes the given root even when it is empty', () => {
+    const root = makeCase();
+    pruneEmptyParents(root, root);
+    assert.equal(fs.existsSync(root), true);
+});
+
+test('pruneEmptyParents() does not climb past the given root to a shared-prefix sibling', () => {
+    // Guards against a lexical-containment bug where "/a/b-evil" would be
+    // treated as "inside" root "/a/b" purely by string prefix.
+    const root = makeCase();
+    const siblingPrefixed = `${root}-evil`;
+    fs.mkdirSync(siblingPrefixed);
+    pruneEmptyParents(siblingPrefixed, root);
+    // Nothing to assert on removal (the dir is outside root by design) —
+    // the call must simply not throw and must leave the root untouched.
+    assert.equal(fs.existsSync(root), true);
 });

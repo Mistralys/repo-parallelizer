@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased - Custom Files CLI & Repository Workspace Info Sync
+## Unreleased - Custom Files CLI & Repository Workspace Info & File Sync
 
 **Agents and scripts can now manage a project's custom files from the command line.**
 Changes are validated and synced to all workspaces exactly like in the GUI. The generated
@@ -10,15 +10,20 @@ workspace AGENTS.md now says where Paralizer is installed and how to reach its h
 - CLI: Added `paralizer help`, printing the full command documentation.
 - Workspaces: AGENTS.md now has a "Paralizer CLI" section with install path and help command.
 
-**Repositories can now opt in to sync their name and description through version control.**
+**Repositories can now opt in to sync their name, description, and custom files through git.**
 Enabling it creates a small Paralizer-managed clone that keeps a `.workspace/info.json` file
-up to date; changes made on either side (Paralizer or the repository itself) are detected,
-and the repository detail page offers an import or lets you commit and push a local update.
-Custom files for repositories (as opposed to projects) are not part of this change yet.
+up to date, including a `Files` list tracking repository-level custom files such as wrapper
+scripts; changes made on either side (Paralizer or the repository itself) are detected, and
+the repository detail page offers an import or lets you commit and push a local update.
 
+- Repositories: Repository-level custom files, such as wrapper scripts, can now be synced via git.
 - Repositories: Added an opt-in "Sync workspace info" setting backed by a managed clone.
+- Repositories: File metadata is tracked in a new `Files` list inside `info.json`.
 - GUI: Repository detail page gained a Workspace Info Sync section with status, import, and push.
 - GUI: Repositories list gained a Sync column showing whether sync is on or off for each repository.
+- GUI: Commit & push now names the pushed commit and branch in its confirmation toast.
+- GUI: Commit & push shows an info notice when the remote lacks partial-clone filtering support.
+- GUI: Fix actions on health alerts no longer get stuck if the fix action fails or is cancelled.
 - Git: Added partial/sparse clone, remote fetch/push/fast-forward, and scoped commit helpers.
 - Security: Synced files never store credentials; git error output strips credential-bearing URLs.
 

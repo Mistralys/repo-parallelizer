@@ -79,12 +79,19 @@ menu.cmd
 | `paralizer setup` | Run the setup wizard |
 | `paralizer docs` | Generate project documentation |
 | `paralizer custom-files <subcommand>` | Manage a project's custom files (list, show, add, update, delete) without the GUI |
-| `paralizer help` | Show all commands, including the full custom-files documentation |
+| `paralizer repo-files <subcommand>` | Manage a repository's own files (list, show, add, update, delete) synced via git — publish with Commit & Push in the GUI |
+| `paralizer help` | Show all commands, including the full custom-files/repo-files documentation |
 
 The generated `AGENTS.md` of every workspace tells agents where Paralizer is installed and to run `paralizer help`, so agents can update a project's custom files themselves, for example:
 
 ```
 paralizer custom-files update my-project scripts/deploy.sh --content-file ./deploy.sh
+```
+
+`paralizer repo-files` follows the same subcommands and flags (identified by `--repo <repo-id>` instead of a leading project ID), but operates on a repository's own files (requires info sync to be enabled for that repository) and never commits or pushes on its own — run Commit & Push from the Paralizer GUI to publish the change:
+
+```
+paralizer repo-files update --repo my-repo scripts/deploy.sh --content-file ./deploy.sh
 ```
 
 ## Start with Windows

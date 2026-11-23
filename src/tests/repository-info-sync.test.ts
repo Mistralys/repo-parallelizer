@@ -10,10 +10,13 @@ import {
     PendingChangesError,
     RemoteOperationError,
     buildDefaultInfoCommitMessage,
+    describeInfoChangeAreas,
 } from '../orchestration/repository-info-sync.js';
 import { resolveMainFolderPath } from '../orchestration/repository-main-folder.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
+import { RepositoryFileManager } from '../models/repository/repository-file.manager.js';
 import { ErrorLogManager } from '../error-log/error-log.manager.js';
+import { NotFoundError } from '../errors.js';
 import { makeTestConfig } from './test-helpers.js';
 import { INFO_COMMIT_AUTHOR_EMAIL, INFO_COMMIT_AUTHOR_NAME } from '../config/config.constants.js';
 
@@ -112,6 +115,21 @@ function commitInfoJsonDeletion(originPath: string): void {
     git('commit -q -m "upstream delete"', originPath);
 }
 
+/** Simulates a teammate committing a file directly under `.workspace/files/` in `originPath`. */
+function commitFilesFolderChange(originPath: string, relPath: string, content: string | Buffer): void {
+    const target = path.join(originPath, '.workspace', 'files', ...relPath.split('/'));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, content);
+    git('add .workspace/files', originPath);
+    git('commit -q -m "upstream file change"', originPath);
+}
+
+/** Simulates a teammate removing a file directly under `.workspace/files/` in `originPath`. */
+function commitFilesFolderRemoval(originPath: string, relPath: string): void {
+    git(`rm -q .workspace/files/${relPath}`, originPath);
+    git('commit -q -m "upstream file removal"', originPath);
+}
+
 let repoCounter = 0;
 function nextRepoId(): string {
     return `repo-${++repoCounter}`;
@@ -119,6 +137,7 @@ function nextRepoId(): string {
 
 interface Harness {
     repositoryManager: RepositoryManager;
+    repositoryFileManager: RepositoryFileManager;
     errorLogManager: ErrorLogManager;
     orchestrator: RepositoryInfoSyncOrchestrator;
     config: ReturnType<typeof makeTestConfig>;
@@ -128,9 +147,10 @@ function makeHarness(): Harness {
     const base = fs.mkdtempSync(path.join(tmpDir, 'case-'));
     const config = makeTestConfig(base);
     const repositoryManager = new RepositoryManager(config);
+    const repositoryFileManager = new RepositoryFileManager(config, repositoryManager);
     const errorLogManager = new ErrorLogManager(config);
-    const orchestrator = new RepositoryInfoSyncOrchestrator(config, repositoryManager, errorLogManager);
-    return { repositoryManager, errorLogManager, orchestrator, config };
+    const orchestrator = new RepositoryInfoSyncOrchestrator(config, repositoryManager, repositoryFileManager, errorLogManager);
+    return { repositoryManager, repositoryFileManager, errorLogManager, orchestrator, config };
 }
 
 function readManagedInfoJson(config: ReturnType<typeof makeTestConfig>, repoId: string): Record<string, unknown> {
@@ -145,6 +165,53 @@ test('buildDefaultInfoCommitMessage() includes the repository ID and stays short
     const message = buildDefaultInfoCommitMessage('my-repo');
     assert.ok(message.includes('my-repo'));
     assert.ok(message.length <= 500);
+});
+
+test('buildDefaultInfoCommitMessage() with no pending changes is byte-identical to M1\'s message', () => {
+    assert.equal(buildDefaultInfoCommitMessage('my-repo'), 'Update .workspace for "my-repo" via Paralizer');
+    assert.equal(buildDefaultInfoCommitMessage('my-repo', []), 'Update .workspace for "my-repo" via Paralizer');
+});
+
+test('buildDefaultInfoCommitMessage() appends the changed areas in parentheses, in info.json/README/files order', () => {
+    const message = buildDefaultInfoCommitMessage('my-repo', [
+        '.workspace/files/build.sh',
+        '.workspace/README.md',
+        '.workspace/info.json',
+    ]);
+    assert.equal(message, 'Update .workspace for "my-repo" via Paralizer (info.json, README, files)');
+});
+
+test('describeInfoChangeAreas() maps .workspace/info.json, .workspace/README.md and any .workspace/files/* path, with no duplicates', () => {
+    assert.deepEqual(describeInfoChangeAreas([]), []);
+    assert.deepEqual(describeInfoChangeAreas(['.workspace/info.json']), ['info.json']);
+    assert.deepEqual(describeInfoChangeAreas(['.workspace/README.md']), ['README']);
+    assert.deepEqual(describeInfoChangeAreas(['.workspace/files/a.sh', '.workspace/files/sub/b.sh']), ['files']);
+    assert.deepEqual(
+        describeInfoChangeAreas(['.workspace/info.json', '.workspace/README.md', '.workspace/files/a.sh']),
+        ['info.json', 'README', 'files'],
+    );
+});
+
+test('getStatus()\'s defaultCommitMessage reflects pending file changes', async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+    await landInitialSync(orchestrator, repoId);
+
+    const statusBefore = await orchestrator.getStatus(repoId);
+    assert.equal(statusBefore.defaultCommitMessage, `Update .workspace for "${repoId}" via Paralizer`);
+
+    repositoryFileManager.add(repoId, {
+        Directory: '', FileName: 'build.sh', Label: 'Build', Description: '', Content: 'echo hi\n', Executable: false, ListInAgents: false,
+    });
+    orchestrator.syncRepository(repoId);
+
+    const statusAfter = await orchestrator.getStatus(repoId);
+    // Adding a file also changes the synced payload hash, so info.json is
+    // rewritten alongside the new file under files/.
+    assert.equal(statusAfter.defaultCommitMessage, `Update .workspace for "${repoId}" via Paralizer (info.json, files)`);
 });
 
 // ─── syncRepository() — disabled / unavailable short-circuits ───────────────
@@ -377,8 +444,9 @@ test('getImportPreview() lists only the differing fields and applyImport() appli
     const preview = await orchestrator.getImportPreview(repoId);
     assert.strictEqual(preview.state, 'incoming');
     assert.deepStrictEqual(preview.fields, [{ field: 'Name', current: 'Local Name', incoming: 'Upstream Name' }]);
+    assert.deepStrictEqual(preview.files, []);
 
-    const status = await orchestrator.applyImport(repoId, ['Name']);
+    const status = await orchestrator.applyImport(repoId, { fields: ['Name'] });
 
     assert.strictEqual(status.state, 'in-sync');
     const updatedRepo = repositoryManager.getById(repoId)!;
@@ -405,7 +473,7 @@ test('applyImport() with an empty field selection keeps all local values, rewrit
     });
     await orchestrator.refresh(repoId);
 
-    const status = await orchestrator.applyImport(repoId, []);
+    const status = await orchestrator.applyImport(repoId, { fields: [] });
 
     assert.strictEqual(status.state, 'in-sync');
     assert.strictEqual(repositoryManager.getById(repoId)!.Name, 'Local Name');
@@ -422,9 +490,234 @@ test('getImportPreview() throws SyncPreconditionError when the state is not inco
     await assert.rejects(() => orchestrator.getImportPreview(repoId), SyncPreconditionError);
 });
 
+// ─── getImportPreview() / applyImport(): per-file actions (Milestone 2) ─────
+
+test('applyImport() "add" imports a teammate-added incoming-only file into local data, keeps it in the managed clone, resolves to in-sync, and the audit entry lists the action', async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator, errorLogManager, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+    await landInitialSync(orchestrator, repoId);
+
+    commitFilesFolderChange(originPath, 'build.sh', '#!/bin/sh\necho build\n');
+    await orchestrator.refresh(repoId);
+
+    const preview = await orchestrator.getImportPreview(repoId);
+    assert.deepStrictEqual(preview.files, [{ path: 'build.sh', kind: 'incoming-only' }]);
+
+    const status = await orchestrator.applyImport(repoId, { fields: [], files: [{ path: 'build.sh', action: 'add' }] });
+
+    assert.strictEqual(status.state, 'in-sync');
+    const files = repositoryFileManager.list(repoId);
+    assert.strictEqual(files.length, 1);
+    assert.strictEqual(files[0]!.FileName, 'build.sh');
+    assert.strictEqual(files[0]!.Content, '#!/bin/sh\necho build\n');
+    assert.strictEqual(files[0]!.Executable, true, 'a shebang file is heuristically executable');
+
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    assert.ok(fs.existsSync(path.join(mainFolder, '.workspace', 'files', 'build.sh')));
+
+    const auditEntries = errorLogManager.list({ source: 'workspace-info' }).entries.filter((e) => e.Operation === 'import');
+    assert.ok(auditEntries[0]!.Message.includes('add: build.sh'));
+});
+
+test('applyImport() defaults an omitted incoming-only file to "discard", removing it from the managed clone and not importing it', async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator, errorLogManager, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+    await landInitialSync(orchestrator, repoId);
+
+    commitFilesFolderChange(originPath, 'build.sh', 'echo build\n');
+    await orchestrator.refresh(repoId);
+
+    const status = await orchestrator.applyImport(repoId, { fields: [] });
+
+    assert.strictEqual(status.state, 'in-sync');
+    assert.deepStrictEqual(repositoryFileManager.list(repoId), []);
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    assert.ok(!fs.existsSync(path.join(mainFolder, '.workspace', 'files', 'build.sh')), 'the discarded file must be removed from the managed clone');
+
+    const auditEntries = errorLogManager.list({ source: 'workspace-info' }).entries.filter((e) => e.Operation === 'import');
+    assert.ok(auditEntries[0]!.Message.includes('discard: build.sh'));
+});
+
+test('applyImport() "overwrite" replaces a local file\'s content with a teammate\'s incoming change', async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+    const file = repositoryFileManager.add(repoId, {
+        Directory: '', FileName: 'build.sh', Label: 'Build', Description: '', Content: 'echo old\n', Executable: false, ListInAgents: false,
+    });
+    orchestrator.syncRepository(repoId);
+    await landInitialSync(orchestrator, repoId);
+
+    commitFilesFolderChange(originPath, 'build.sh', 'echo new\n');
+    await orchestrator.refresh(repoId);
+
+    const preview = await orchestrator.getImportPreview(repoId);
+    assert.strictEqual(preview.files.length, 1);
+    assert.strictEqual(preview.files[0]!.kind, 'changed');
+
+    const status = await orchestrator.applyImport(repoId, { fields: [], files: [{ path: 'build.sh', action: 'overwrite' }] });
+
+    assert.strictEqual(status.state, 'in-sync');
+    const updatedFiles = repositoryFileManager.list(repoId);
+    assert.strictEqual(updatedFiles.length, 1);
+    assert.strictEqual(updatedFiles[0]!.Id, file.Id, 'the file identity must be preserved across an overwrite');
+    assert.strictEqual(updatedFiles[0]!.Content, 'echo new\n');
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    assert.strictEqual(fs.readFileSync(path.join(mainFolder, '.workspace', 'files', 'build.sh'), 'utf8'), 'echo new\n');
+});
+
+test('applyImport() defaults an omitted "changed" file to "keep", rewriting the managed clone back to Paralizer\'s own content', async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+    repositoryFileManager.add(repoId, {
+        Directory: '', FileName: 'build.sh', Label: 'Build', Description: '', Content: 'echo old\n', Executable: false, ListInAgents: false,
+    });
+    orchestrator.syncRepository(repoId);
+    await landInitialSync(orchestrator, repoId);
+
+    commitFilesFolderChange(originPath, 'build.sh', 'echo new\n');
+    await orchestrator.refresh(repoId);
+
+    const status = await orchestrator.applyImport(repoId, { fields: [] });
+
+    assert.strictEqual(status.state, 'in-sync');
+    assert.strictEqual(repositoryFileManager.list(repoId)[0]!.Content, 'echo old\n');
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    assert.strictEqual(
+        fs.readFileSync(path.join(mainFolder, '.workspace', 'files', 'build.sh'), 'utf8'),
+        'echo old\n',
+        'the managed clone must be rewritten with Paralizer\'s own content, overriding the teammate\'s change',
+    );
+});
+
+test('applyImport() "delete" removes a local-only file (removed upstream, or not yet pulled)', async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+    repositoryFileManager.add(repoId, {
+        Directory: '', FileName: 'build.sh', Label: 'Build', Description: '', Content: 'echo hi\n', Executable: false, ListInAgents: false,
+    });
+    orchestrator.syncRepository(repoId);
+    await landInitialSync(orchestrator, repoId);
+
+    commitFilesFolderRemoval(originPath, 'build.sh');
+    await orchestrator.refresh(repoId);
+
+    const preview = await orchestrator.getImportPreview(repoId);
+    assert.deepStrictEqual(preview.files, [{ path: 'build.sh', kind: 'local-only' }]);
+
+    const status = await orchestrator.applyImport(repoId, { fields: [], files: [{ path: 'build.sh', action: 'delete' }] });
+
+    assert.strictEqual(status.state, 'in-sync');
+    assert.deepStrictEqual(repositoryFileManager.list(repoId), []);
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    assert.ok(!fs.existsSync(path.join(mainFolder, '.workspace', 'files', 'build.sh')), '"delete" must leave the file absent from the managed clone');
+});
+
+test('applyImport() defaults an omitted "local-only" file to "keep", restoring it in the managed clone', async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+    repositoryFileManager.add(repoId, {
+        Directory: '', FileName: 'build.sh', Label: 'Build', Description: '', Content: 'echo hi\n', Executable: false, ListInAgents: false,
+    });
+    orchestrator.syncRepository(repoId);
+    await landInitialSync(orchestrator, repoId);
+
+    commitFilesFolderRemoval(originPath, 'build.sh');
+    await orchestrator.refresh(repoId);
+
+    const status = await orchestrator.applyImport(repoId, { fields: [] });
+
+    assert.strictEqual(status.state, 'in-sync');
+    assert.strictEqual(repositoryFileManager.list(repoId).length, 1);
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    assert.ok(
+        fs.existsSync(path.join(mainFolder, '.workspace', 'files', 'build.sh')),
+        '"keep" must restore the file in the managed clone',
+    );
+});
+
+test('applyImport() rejects an action not in the diff kind\'s action table', async () => {
+    const { repositoryManager, orchestrator } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+    await landInitialSync(orchestrator, repoId);
+
+    commitFilesFolderChange(originPath, 'build.sh', 'echo hi\n');
+    await orchestrator.refresh(repoId);
+
+    await assert.rejects(
+        () => orchestrator.applyImport(repoId, { fields: [], files: [{ path: 'build.sh', action: 'skip' as never }] }),
+        /Unsupported import action/,
+    );
+});
+
+test('applyImport() rejects a path that is not part of the current import diff', async () => {
+    const { repositoryManager, orchestrator } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+    await landInitialSync(orchestrator, repoId);
+
+    commitFilesFolderChange(originPath, 'build.sh', 'echo hi\n');
+    await orchestrator.refresh(repoId);
+
+    await assert.rejects(
+        () => orchestrator.applyImport(repoId, { fields: [], files: [{ path: 'does-not-exist.sh', action: 'discard' }] }),
+        /not part of the current import diff/,
+    );
+});
+
+test('applyImport() refuses "add" on a binary incoming-only file (a problem file); its default "discard" removes it from the managed clone', async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+    await landInitialSync(orchestrator, repoId);
+
+    commitFilesFolderChange(originPath, 'binary.dat', Buffer.from([0, 1, 2, 3]));
+    await orchestrator.refresh(repoId);
+
+    const preview = await orchestrator.getImportPreview(repoId);
+    assert.strictEqual(preview.files.length, 1);
+    assert.strictEqual(preview.files[0]!.kind, 'incoming-only');
+    assert.ok(preview.files[0]!.problem);
+
+    await assert.rejects(
+        () => orchestrator.applyImport(repoId, { fields: [], files: [{ path: 'binary.dat', action: 'add' }] }),
+        /cannot be imported as-is/,
+    );
+
+    const status = await orchestrator.applyImport(repoId, { fields: [] });
+    assert.strictEqual(status.state, 'in-sync');
+    assert.deepStrictEqual(repositoryFileManager.list(repoId), []);
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    assert.ok(!fs.existsSync(path.join(mainFolder, '.workspace', 'files', 'binary.dat')));
+});
+
 // ─── commitAndPush() (AC-11) ──────────────────────────────────────────────────
 
-test('commitAndPush() commits only info-folder paths with the fixed Paralizer identity, pushes to the default branch, and writes an audit entry', async () => {
+test('commitAndPush() commits the staged .workspace changes with the fixed Paralizer identity, pushes to the default branch, and writes an audit entry', async () => {
     const { repositoryManager, orchestrator, errorLogManager, config } = makeHarness();
     const originPath = buildOrigin({ infoJson: null });
     const repoId = nextRepoId();
@@ -432,9 +725,6 @@ test('commitAndPush() commits only info-folder paths with the fixed Paralizer id
     await orchestrator.saveSettings(repo.Id, { enabled: true });
 
     const mainFolder = resolveMainFolderPath(config, repoId);
-    // A hand-staged file outside the info folder must stay uncommitted.
-    fs.writeFileSync(path.join(mainFolder, 'unrelated.txt'), 'hand edit');
-    git('add unrelated.txt', mainFolder);
 
     const result = await orchestrator.commitAndPush(repoId, { message: 'Custom message' });
 
@@ -446,16 +736,13 @@ test('commitAndPush() commits only info-folder paths with the fixed Paralizer id
         .split('\n')
         .filter((l) => l.length > 0);
     // syncRepository() also wrote the generated README alongside info.json on
-    // the first sync — both are under the info folder pathspec.
+    // the first sync.
     assert.deepStrictEqual(committedPaths.sort(), ['.workspace/README.md', '.workspace/info.json']);
 
     const authorName = git(`show -s --format=%an ${result.commitSha}`, mainFolder);
     const authorEmail = git(`show -s --format=%ae ${result.commitSha}`, mainFolder);
     assert.strictEqual(authorName, INFO_COMMIT_AUTHOR_NAME);
     assert.strictEqual(authorEmail, INFO_COMMIT_AUTHOR_EMAIL);
-
-    const statusAfter = git('status --porcelain', mainFolder);
-    assert.ok(statusAfter.includes('unrelated.txt'), 'the unrelated staged file must remain uncommitted');
 
     // Verify it actually reached the origin.
     const originLog = git('log --oneline -1 main', originPath);
@@ -464,6 +751,49 @@ test('commitAndPush() commits only info-folder paths with the fixed Paralizer id
     const auditEntries = errorLogManager.list({ source: 'workspace-info' }).entries.filter((e) => e.Operation === 'commit-push');
     assert.strictEqual(auditEntries.length, 1);
     assert.strictEqual(auditEntries[0]!.Severity, 'audit');
+});
+
+test('commitAndPush() throws SyncPreconditionError and creates no commit when a hand-staged path lies outside .workspace/', async () => {
+    const { repositoryManager, orchestrator, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    const headBefore = git('rev-parse HEAD', mainFolder);
+    fs.writeFileSync(path.join(mainFolder, 'unrelated.txt'), 'hand edit');
+    git('add unrelated.txt', mainFolder);
+
+    await assert.rejects(() => orchestrator.commitAndPush(repoId), SyncPreconditionError);
+
+    assert.strictEqual(git('rev-parse HEAD', mainFolder), headBefore, 'no commit should have been created');
+    const statusAfter = git('status --porcelain', mainFolder);
+    assert.ok(statusAfter.includes('unrelated.txt'), 'the unrelated staged file must remain staged, untouched');
+});
+
+test('commitAndPush() commits an executable repository file as mode 100755, including on a clone with core.filemode=false', async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    git('config core.filemode false', mainFolder);
+
+    repositoryFileManager.add(repoId, {
+        Directory: '', FileName: 'build.sh', Label: 'Build', Description: '', Content: 'echo hi\n', Executable: true, ListInAgents: false,
+    });
+    orchestrator.syncRepository(repoId);
+
+    const result = await orchestrator.commitAndPush(repoId);
+    assert.strictEqual(result.committed, true);
+
+    const mode = git(`show ${result.commitSha} --format= --raw -- .workspace/files/build.sh`, mainFolder)
+        .trim()
+        .split(' ')[1];
+    assert.strictEqual(mode, '100755');
 });
 
 test('commitAndPush() refuses with SyncPreconditionError when checked out on a branch other than the default', async () => {
@@ -623,4 +953,194 @@ test('removeManagedFolder() synchronously removes the managed clone', async () =
     orchestrator.removeManagedFolder(repoId);
 
     assert.ok(!fs.existsSync(resolveMainFolderPath(config, repoId)));
+});
+
+// ─── syncRepository(): repository files (Milestone 2, WP-005, AC-01) ────────
+
+test('syncRepository() writes the file set after info.json on write-required; a second sync with nothing changed leaves bytes and mtimes unchanged', async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}`, name: 'My Repo' });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    repositoryFileManager.add(repoId, {
+        Directory: '',
+        FileName: 'build.sh',
+        Label: 'Build',
+        Description: 'Builds the project.',
+        Content: '#!/bin/sh\necho build\n',
+        Executable: true,
+        ListInAgents: false,
+    });
+
+    const result = orchestrator.syncRepository(repoId);
+    assert.strictEqual(result.state, 'write-required');
+    assert.strictEqual(result.written, true);
+
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    const filePath = path.join(mainFolder, '.workspace', 'files', 'build.sh');
+    assert.ok(fs.existsSync(filePath), 'the file should have been written to the managed clone');
+    assert.strictEqual(fs.readFileSync(filePath, 'utf8'), '#!/bin/sh\necho build\n');
+
+    const infoJson = readManagedInfoJson(config, repoId);
+    const files = infoJson['Files'] as Array<Record<string, unknown>>;
+    assert.deepStrictEqual(files.map((f) => f['Path']), ['build.sh']);
+    assert.strictEqual(files[0]!['Label'], 'Build');
+    assert.strictEqual(files[0]!['Executable'], true);
+    assert.ok(!('Content' in files[0]!), 'info.json must never carry file content');
+
+    const fileMtimeBefore = fs.statSync(filePath).mtimeMs;
+    const infoMtimeBefore = fs.statSync(path.join(mainFolder, '.workspace', 'info.json')).mtimeMs;
+
+    const second = orchestrator.syncRepository(repoId);
+
+    assert.strictEqual(second.state, 'in-sync');
+    assert.strictEqual(second.written, false);
+    assert.strictEqual(fs.statSync(filePath).mtimeMs, fileMtimeBefore, 'the file must not be rewritten when nothing changed');
+    assert.strictEqual(
+        fs.statSync(path.join(mainFolder, '.workspace', 'info.json')).mtimeMs,
+        infoMtimeBefore,
+        'info.json must not be rewritten when nothing changed',
+    );
+});
+
+test('removing a repository file makes the next sync delete its copy from the managed clone', async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    const file = repositoryFileManager.add(repoId, {
+        Directory: '',
+        FileName: 'build.sh',
+        Label: 'Build',
+        Description: '',
+        Content: 'echo build\n',
+        Executable: false,
+        ListInAgents: false,
+    });
+    orchestrator.syncRepository(repoId);
+
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    const filePath = path.join(mainFolder, '.workspace', 'files', 'build.sh');
+    assert.ok(fs.existsSync(filePath));
+
+    repositoryFileManager.remove(repoId, file.Id);
+    const result = orchestrator.syncRepository(repoId);
+
+    assert.strictEqual(result.state, 'write-required');
+    assert.ok(!fs.existsSync(filePath), 'the removed file must be deleted from the managed clone');
+});
+
+// ─── assertSyncEnabled() / runLocked() (AC-03) ───────────────────────────────
+
+test('assertSyncEnabled() throws while sync is disabled and does not throw once enabled', async () => {
+    const { repositoryManager, orchestrator } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+
+    assert.throws(() => orchestrator.assertSyncEnabled(repo.Id), SyncPreconditionError);
+
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    assert.doesNotThrow(() => orchestrator.assertSyncEnabled(repo.Id));
+});
+
+test('assertSyncEnabled() throws NotFoundError for an unknown repository', () => {
+    const { orchestrator } = makeHarness();
+    assert.throws(() => orchestrator.assertSyncEnabled('does-not-exist'), NotFoundError);
+});
+
+test('runLocked() serialises two concurrent operations for the same repository in queued order', async () => {
+    const { orchestrator } = makeHarness();
+    const repoId = nextRepoId();
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+    });
+
+    const first = orchestrator.runLocked(repoId, async () => {
+        order.push('first-start');
+        await firstGate;
+        order.push('first-end');
+    });
+    const second = orchestrator.runLocked(repoId, async () => {
+        order.push('second-start');
+    });
+
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    assert.deepStrictEqual(order, ['first-start', 'first-end', 'second-start']);
+});
+
+// ─── Health report: Milestone 2 files-folder issues (AC-04) ─────────────────
+
+test('getStatus() reports info-sync-files-unsafe-entry for a symlink under files/, and the issue clears once it is removed', async () => {
+    const { repositoryManager, orchestrator, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    const filesDir = path.join(mainFolder, '.workspace', 'files');
+    fs.mkdirSync(filesDir, { recursive: true });
+    const linkPath = path.join(filesDir, 'evil-link');
+    fs.symlinkSync(path.join(mainFolder, 'README.md'), linkPath);
+
+    const status = await orchestrator.getStatus(repoId);
+    assert.ok(status.health.issues.some((i) => i.type === 'info-sync-files-unsafe-entry' && i.fixAction === 'none'));
+
+    fs.unlinkSync(linkPath);
+    const statusAfter = await orchestrator.getStatus(repoId);
+    assert.ok(!statusAfter.health.issues.some((i) => i.type === 'info-sync-files-unsafe-entry'));
+});
+
+test('getStatus() reports info-sync-files-invalid-incoming for a binary file committed under files/', async () => {
+    const { repositoryManager, orchestrator, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    const filesDir = path.join(mainFolder, '.workspace', 'files');
+    fs.mkdirSync(filesDir, { recursive: true });
+    fs.writeFileSync(path.join(filesDir, 'binary.dat'), Buffer.from([0, 1, 2, 3]));
+
+    const status = await orchestrator.getStatus(repoId);
+
+    assert.ok(status.health.issues.some((i) => i.type === 'info-sync-files-invalid-incoming' && i.fixAction === 'import'));
+});
+
+test('getStatus() reports info-sync-files-write-skipped when a local file\'s write target is occupied by a directory', async () => {
+    const { repositoryManager, repositoryFileManager, orchestrator, config } = makeHarness();
+    const originPath = buildOrigin({ infoJson: null });
+    const repoId = nextRepoId();
+    const repo = repositoryManager.add({ id: repoId, url: `file://${originPath}` });
+    await orchestrator.saveSettings(repo.Id, { enabled: true });
+
+    repositoryFileManager.add(repoId, {
+        Directory: '',
+        FileName: 'run.sh',
+        Label: 'Run',
+        Description: '',
+        Content: 'echo hi\n',
+        Executable: false,
+        ListInAgents: false,
+    });
+
+    const mainFolder = resolveMainFolderPath(config, repoId);
+    // Occupy the file's write target with a directory, so `guardedFileTarget()`
+    // refuses it (the directory-shape check) without ever writing anything.
+    fs.mkdirSync(path.join(mainFolder, '.workspace', 'files', 'run.sh'), { recursive: true });
+
+    const status = await orchestrator.getStatus(repoId);
+
+    assert.ok(status.health.issues.some((i) => i.type === 'info-sync-files-write-skipped' && i.fixAction === 'none'));
 });

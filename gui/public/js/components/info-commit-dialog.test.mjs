@@ -8,7 +8,8 @@
  *         `aria-invalid` on the field, shows an inline error, and disables
  *         Commit; a valid message re-enables it.
  *   AC3 — Commit calls `api.repositories.infoSync.commitPush(repoId, trimmed)`
- *         and resolves with the trimmed message on success.
+ *         and resolves with `{ message: trimmed, result }` on success, where
+ *         `result` is whatever `commitPush()` returned (WP-016).
  *   AC4 — Cancel/Escape/backdrop-click resolve with `null` without calling
  *         `commitPush()`.
  *   AC5 — While `commitPush()` is in flight, Commit/Cancel/the message field
@@ -192,17 +193,34 @@ test('AC2: exactly 500 trimmed characters is valid', async () => {
 // AC3 — Commit success
 // ---------------------------------------------------------------------------
 
-test('AC3: Commit trims the message, calls commitPush(repoId, trimmed), and resolves with it', async () => {
+test('AC3: Commit trims the message, calls commitPush(repoId, trimmed), and resolves with { message, result }', async () => {
     const promise = showInfoCommitDialog({ repoId: 'repo-1', pendingFiles: ['.workspace/info.json'], defaultMessage: '' });
 
     setMessage('  Update info  ');
     dispatchClick(getCommitBtn());
 
-    const result = await promise;
+    const outcome = await promise;
 
     assert.equal(commitPushCalls.length, 1);
     assert.deepEqual(commitPushCalls[0], { id: 'repo-1', message: 'Update info' });
-    assert.equal(result, 'Update info');
+    assert.deepEqual(outcome, { message: 'Update info', result: { committed: true, pushed: true } });
+});
+
+test('AC3: the resolved result carries whatever commitPush() returns (commitSha, filterFallback)', async () => {
+    api.repositories.infoSync.commitPush = async (id, message) => {
+        commitPushCalls.push({ id, message });
+        return { committed: true, pushed: true, commitSha: 'abc1234567', filterFallback: true };
+    };
+
+    const promise = showInfoCommitDialog({ repoId: 'repo-1', pendingFiles: [], defaultMessage: '' });
+    setMessage('Update info');
+    dispatchClick(getCommitBtn());
+
+    const outcome = await promise;
+    assert.deepEqual(outcome, {
+        message: 'Update info',
+        result: { committed: true, pushed: true, commitSha: 'abc1234567', filterFallback: true },
+    });
 });
 
 // ---------------------------------------------------------------------------

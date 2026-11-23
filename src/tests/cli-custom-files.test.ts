@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import { initializeStorage } from '../storage/json-storage.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
+import { RepositoryFileManager } from '../models/repository/repository-file.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceArtifactsOrchestrator } from '../orchestration/workspace-artifacts.js';
 import { RepositoryInfoSyncOrchestrator } from '../orchestration/repository-info-sync.js';
@@ -254,8 +255,9 @@ test('createDefaultCustomFilesDeps(): the constructed WorkspaceArtifactsOrchestr
         // orchestrator pointed at the same storage/projects folders that
         // createDefaultCustomFilesDeps() will read from.
         const setupRepoManager = new RepositoryManager(config);
+        const setupRepositoryFileManager = new RepositoryFileManager(config, setupRepoManager);
         const setupProjectManager = new ProjectManager(config, setupRepoManager);
-        const setupSync = new RepositoryInfoSyncOrchestrator(config, setupRepoManager);
+        const setupSync = new RepositoryInfoSyncOrchestrator(config, setupRepoManager, setupRepositoryFileManager);
 
         const originPath = buildInfoSyncOrigin(base);
         const repoId = 'info-sync-repo';
@@ -278,5 +280,49 @@ test('createDefaultCustomFilesDeps(): the constructed WorkspaceArtifactsOrchestr
             fs.readFileSync(path.join(mainFolder, '.workspace', 'info.json'), 'utf8'),
         ) as Record<string, unknown>;
         assert.strictEqual(written['Name'], 'Updated Via CLI Wiring');
+    });
+});
+
+test('createDefaultCustomFilesDeps(): regeneration leaves a repository\'s already-committed files untouched (no accidental delete pass)', async () => {
+    const base = makeTempDir();
+    await withDefaultDepsConfig(base, async (config) => {
+        initializeStorage(config);
+
+        const setupRepoManager = new RepositoryManager(config);
+        const setupRepositoryFileManager = new RepositoryFileManager(config, setupRepoManager);
+        const setupProjectManager = new ProjectManager(config, setupRepoManager);
+        const setupSync = new RepositoryInfoSyncOrchestrator(config, setupRepoManager, setupRepositoryFileManager);
+
+        const originPath = buildInfoSyncOrigin(base);
+        const repoId = 'info-sync-files-repo';
+        setupRepoManager.add({ id: repoId, url: `file://${originPath}`, name: 'Original Name' });
+        await setupSync.saveSettings(repoId, { enabled: true });
+
+        setupRepositoryFileManager.add(repoId, {
+            Directory: '',
+            FileName: 'run.sh',
+            Label: 'Run',
+            Description: 'Runs things.',
+            Content: '#!/bin/sh\necho hi\n',
+            Executable: true,
+            ListInAgents: false,
+        });
+        setupSync.syncRepository(repoId);
+
+        setupProjectManager.create('Info Sync Files Project', [repoId], undefined, 'info-sync-files-project');
+
+        const mainFolder = resolveMainFolderPath(config, repoId);
+        const filePath = path.join(mainFolder, '.workspace', 'files', 'run.sh');
+        assert.ok(fs.existsSync(filePath), 'the setup sync should have committed the file to the managed clone');
+
+        // The CLI's own orchestrator (built fresh inside
+        // createDefaultCustomFilesDeps(), not the setup one above) must be
+        // wired with a RepositoryFileManager on the same storage folder, so
+        // its regeneration run computes the same non-empty file set rather
+        // than an empty one that would trigger the delete pass.
+        const deps = createDefaultCustomFilesDeps();
+        deps.artifacts.regenerateProject('info-sync-files-project');
+
+        assert.ok(fs.existsSync(filePath), 'the already-committed file must not have been deleted by the regeneration run');
     });
 });

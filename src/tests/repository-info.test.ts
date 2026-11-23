@@ -16,12 +16,18 @@ import {
     renderRepositoryInfoReadme,
     evaluateRepositoryInfoSync,
     diffRepositoryInfo,
+    diffRepositoryFiles,
+    defaultFileImportAction,
+    resolveFileImportAction,
     writeRepositoryInfoFile,
     writeRepositoryInfoReadme,
     infoFolderPathspec,
     type RepositoryInfoPayload,
     type RepositoryInfoReadResult,
+    type RepositoryInfoFileEntry,
+    type RepositoryFileDiff,
 } from '../orchestration/repository-info.js';
+import type { RepositoryFileHashEntry } from '../orchestration/repository-files.js';
 import type { Repository } from '../models/repository/repository.types.js';
 import { createTempDirTracker } from './test-helpers.js';
 
@@ -50,9 +56,9 @@ function readmeFile(mainFolder: string): string {
 
 // ─── buildRepositoryInfoPayload() / buildInformationalUrl() ──────────────────
 
-test('buildRepositoryInfoPayload() returns Id/Name/Description, empty string for an absent description', () => {
+test('buildRepositoryInfoPayload() returns Id/Name/Description/Files=[], empty string for an absent description', () => {
     const payload = buildRepositoryInfoPayload(makeRepo());
-    assert.deepEqual(payload, { Id: 'my-repo', Name: 'My Repo', Description: '' });
+    assert.deepEqual(payload, { Id: 'my-repo', Name: 'My Repo', Description: '', Files: [] });
 });
 
 test('buildRepositoryInfoPayload() uses the repository Description when set', () => {
@@ -106,7 +112,7 @@ test('readRepositoryInfoFile() returns ok with the parsed payload for a valid fi
 
     const result = readRepositoryInfoFile(mainFolder);
     assert.equal(result.status, 'ok');
-    assert.deepEqual(result.payload, { Id: 'my-repo', Name: 'My Repo', Description: 'D' });
+    assert.deepEqual(result.payload, { Id: 'my-repo', Name: 'My Repo', Description: 'D', Files: [] });
 });
 
 test('readRepositoryInfoFile() returns invalid for unparseable JSON', () => {
@@ -169,18 +175,22 @@ test('readRepositoryInfoFile() tolerates a non-string Url field', () => {
 
 // ─── renderRepositoryInfoFile() — AC-02 ──────────────────────────────────────
 
-test('renderRepositoryInfoFile() produces exactly SchemaVersion/Id/Name/Url/Description/Settings for a fresh file', () => {
+test('renderRepositoryInfoFile() produces exactly SchemaVersion/Id/Name/Url/Description/Settings/Files for a fresh file', () => {
     const payload: RepositoryInfoPayload = { Id: 'my-repo', Name: 'My Repo', Description: 'D' };
     const content = renderRepositoryInfoFile(payload, 'https://github.com/org/my-repo.git');
     const parsed = JSON.parse(content);
 
-    assert.deepEqual(Object.keys(parsed).sort(), ['Description', 'Id', 'Name', 'Settings', 'SchemaVersion', 'Url'].sort());
+    assert.deepEqual(
+        Object.keys(parsed).sort(),
+        ['Description', 'Files', 'Id', 'Name', 'Settings', 'SchemaVersion', 'Url'].sort(),
+    );
     assert.equal(parsed.SchemaVersion, REPOSITORY_INFO_SCHEMA_VERSION);
     assert.equal(parsed.Id, 'my-repo');
     assert.equal(parsed.Name, 'My Repo');
     assert.equal(parsed.Url, 'https://github.com/org/my-repo.git');
     assert.equal(parsed.Description, 'D');
     assert.deepEqual(parsed.Settings, {});
+    assert.deepEqual(parsed.Files, []);
 });
 
 test('renderRepositoryInfoFile() never contains a token, CredentialId or machine-local setting', () => {
@@ -446,4 +456,301 @@ test('renderRepositoryInfoReadme() mentions the workspace AGENTS.md', () => {
 
 test('infoFolderPathspec() returns the folder name with a trailing slash', () => {
     assert.equal(infoFolderPathspec(), `${REPOSITORY_INFO_FOLDER_NAME}/`);
+});
+
+// ─── Milestone 2: Files — buildRepositoryInfoPayload() / hashRepositoryInfoPayload() compatibility rule ──
+
+function fileEntry(overrides: Partial<RepositoryInfoFileEntry> = {}): RepositoryInfoFileEntry {
+    return {
+        Path: 'bin/hello.sh',
+        Label: 'hello.sh',
+        Description: '',
+        Executable: true,
+        ListInAgents: false,
+        ContentHash: 'abc123',
+        ...overrides,
+    };
+}
+
+function hashEntry(overrides: Partial<{
+    path: string; label: string; description: string; executable: boolean; listInAgents: boolean; contentHash: string;
+}> = {}): RepositoryFileHashEntry {
+    const e = {
+        path: 'bin/hello.sh', label: 'hello.sh', description: '', executable: true, listInAgents: false, contentHash: 'abc123',
+        ...overrides,
+    };
+    return [e.path, e.label, e.description, e.executable, e.listInAgents, e.contentHash];
+}
+
+test('buildRepositoryInfoPayload() defaults Files to [] when no files are passed', () => {
+    const payload = buildRepositoryInfoPayload(makeRepo());
+    assert.deepEqual(payload.Files, []);
+});
+
+test('buildRepositoryInfoPayload() converts canonicalFilesForHash()-shaped tuples into RepositoryInfoFileEntry objects, sorted by Path', () => {
+    const payload = buildRepositoryInfoPayload(makeRepo(), [
+        hashEntry({ path: 'z.sh' }),
+        hashEntry({ path: 'a.sh' }),
+    ]);
+    assert.deepEqual(payload.Files!.map((f) => f.Path), ['a.sh', 'z.sh']);
+    assert.deepEqual(payload.Files![0], fileEntry({ Path: 'a.sh' }));
+});
+
+test('hashRepositoryInfoPayload() with empty Files is byte-identical to the M1 hash (compatibility rule)', () => {
+    const payload: RepositoryInfoPayload = { Id: 'x', Name: 'Y', Description: 'Z', Files: [] };
+    const m1Json = JSON.stringify(['x', 'Y', 'Z']);
+    const expected = crypto.createHash('sha256').update(m1Json).digest('hex');
+    assert.equal(hashRepositoryInfoPayload(payload), expected);
+});
+
+test('hashRepositoryInfoPayload() with a non-empty Files differs from the Files-less hash of the same Id/Name/Description', () => {
+    const withoutFiles = hashRepositoryInfoPayload({ Id: 'x', Name: 'Y', Description: 'Z', Files: [] });
+    const withFiles = hashRepositoryInfoPayload({ Id: 'x', Name: 'Y', Description: 'Z', Files: [fileEntry()] });
+    assert.notEqual(withoutFiles, withFiles);
+});
+
+test('hashRepositoryInfoPayload() is independent of the order Files happened to be built in', () => {
+    const a = hashRepositoryInfoPayload({ Id: 'x', Name: 'Y', Description: 'Z', Files: [fileEntry({ Path: 'a.sh' }), fileEntry({ Path: 'z.sh' })] });
+    const b = hashRepositoryInfoPayload({ Id: 'x', Name: 'Y', Description: 'Z', Files: [fileEntry({ Path: 'z.sh' }), fileEntry({ Path: 'a.sh' })] });
+    assert.equal(a, b);
+});
+
+test('hashRepositoryInfoPayload() changes when a file\'s ContentHash changes', () => {
+    const a = hashRepositoryInfoPayload({ Id: 'x', Name: 'Y', Description: 'Z', Files: [fileEntry({ ContentHash: 'h1' })] });
+    const b = hashRepositoryInfoPayload({ Id: 'x', Name: 'Y', Description: 'Z', Files: [fileEntry({ ContentHash: 'h2' })] });
+    assert.notEqual(a, b);
+});
+
+test('evaluateRepositoryInfoSync(): an existing M1 baseline (no Files) stays in-sync after the upgrade', () => {
+    // Simulates an M1 info.json (no Files key at all) read after upgrading to
+    // a Paralizer that knows about Files: readRepositoryInfoFile() treats the
+    // absent key as [], and the repository has no files either.
+    const mainFolder = makeTempDir();
+    fs.mkdirSync(infoFolder(mainFolder), { recursive: true });
+    fs.writeFileSync(
+        infoFile(mainFolder),
+        JSON.stringify({ SchemaVersion: 1, Id: 'my-repo', Name: 'My Repo', Description: 'D' }),
+    );
+
+    const dataPayload = buildRepositoryInfoPayload(makeRepo({ Id: 'my-repo', Name: 'My Repo', Description: 'D' }));
+    const dataHash = hashRepositoryInfoPayload(dataPayload);
+    const folderRead = readRepositoryInfoFile(mainFolder);
+
+    const state = evaluateRepositoryInfoSync({ dataHash, folder: folderRead, repositoryId: 'my-repo' });
+    assert.equal(state, 'in-sync');
+    assert.equal(folderRead.raw!.SchemaVersion, 1);
+});
+
+// ─── Milestone 2: Files — info.json rendering ─────────────────────────────────
+
+test('renderRepositoryInfoFile() renders Files sorted by path, with exactly Path/Label/Description/Executable/ListInAgents (no ContentHash)', () => {
+    const payload: RepositoryInfoPayload = {
+        Id: 'repo', Name: 'N', Description: 'D',
+        Files: [fileEntry({ Path: 'z.sh' }), fileEntry({ Path: 'a.sh' })],
+    };
+    const content = renderRepositoryInfoFile(payload, 'https://x');
+    const parsed = JSON.parse(content);
+
+    assert.deepEqual(parsed.Files.map((f: { Path: string }) => f.Path), ['a.sh', 'z.sh']);
+    for (const entry of parsed.Files) {
+        assert.deepEqual(Object.keys(entry).sort(), ['Description', 'Executable', 'Label', 'ListInAgents', 'Path'].sort());
+    }
+});
+
+test('renderRepositoryInfoFile() renders Files as [] when the payload has no files', () => {
+    const payload: RepositoryInfoPayload = { Id: 'repo', Name: 'N', Description: 'D', Files: [] };
+    const content = renderRepositoryInfoFile(payload, 'https://x');
+    assert.deepEqual(JSON.parse(content).Files, []);
+});
+
+test('renderRepositoryInfoFile() never duplicates Files as a preserved unknown top-level key', () => {
+    const payload: RepositoryInfoPayload = { Id: 'repo', Name: 'N', Description: 'D', Files: [fileEntry()] };
+    const existingRaw = {
+        SchemaVersion: 1, Id: 'repo', Name: 'old', Description: 'old', Settings: {},
+        Files: [{ Path: 'stale.sh', Label: 'stale', Description: '', Executable: false, ListInAgents: false }],
+    };
+    const content = renderRepositoryInfoFile(payload, 'https://x', existingRaw);
+    const parsed = JSON.parse(content);
+
+    assert.equal(Object.keys(parsed).filter((k) => k === 'Files').length, 1);
+    assert.deepEqual(parsed.Files.map((f: { Path: string }) => f.Path), ['bin/hello.sh']);
+});
+
+// ─── Milestone 2: Files — readRepositoryInfoFile() validation ────────────────
+
+test('readRepositoryInfoFile() treats an absent Files key as [] (an un-upgraded M1 file)', () => {
+    const mainFolder = makeTempDir();
+    fs.mkdirSync(infoFolder(mainFolder), { recursive: true });
+    fs.writeFileSync(infoFile(mainFolder), JSON.stringify({ SchemaVersion: 1, Id: 'repo', Name: 'N', Description: 'D' }));
+
+    const result = readRepositoryInfoFile(mainFolder);
+    assert.equal(result.status, 'ok');
+    assert.deepEqual(result.payload!.Files, []);
+});
+
+test('readRepositoryInfoFile() parses valid Files entries, with ContentHash set to \'\' (never stored in info.json)', () => {
+    const mainFolder = makeTempDir();
+    fs.mkdirSync(infoFolder(mainFolder), { recursive: true });
+    fs.writeFileSync(infoFile(mainFolder), JSON.stringify({
+        SchemaVersion: 1, Id: 'repo', Name: 'N', Description: 'D',
+        Files: [{ Path: 'bin/hello.sh', Label: 'Hello', Description: 'desc', Executable: true, ListInAgents: false }],
+    }));
+
+    const result = readRepositoryInfoFile(mainFolder);
+    assert.equal(result.status, 'ok');
+    assert.deepEqual(result.payload!.Files, [
+        { Path: 'bin/hello.sh', Label: 'Hello', Description: 'desc', Executable: true, ListInAgents: false, ContentHash: '' },
+    ]);
+});
+
+test('readRepositoryInfoFile() returns invalid when Files is not an array', () => {
+    const mainFolder = makeTempDir();
+    fs.mkdirSync(infoFolder(mainFolder), { recursive: true });
+    fs.writeFileSync(infoFile(mainFolder), JSON.stringify({ SchemaVersion: 1, Id: 'repo', Name: 'N', Description: 'D', Files: 'nope' }));
+
+    const result = readRepositoryInfoFile(mainFolder);
+    assert.equal(result.status, 'invalid');
+    assert.ok(result.error);
+});
+
+test('readRepositoryInfoFile() returns invalid when a Files entry has a wrong field type', () => {
+    const mainFolder = makeTempDir();
+    fs.mkdirSync(infoFolder(mainFolder), { recursive: true });
+    fs.writeFileSync(infoFile(mainFolder), JSON.stringify({
+        SchemaVersion: 1, Id: 'repo', Name: 'N', Description: 'D',
+        Files: [{ Path: 'bin/hello.sh', Label: 'Hello', Description: 'desc', Executable: 'yes', ListInAgents: false }],
+    }));
+
+    const result = readRepositoryInfoFile(mainFolder);
+    assert.equal(result.status, 'invalid');
+});
+
+test('readRepositoryInfoFile() returns invalid when a Files entry is missing a required field', () => {
+    const mainFolder = makeTempDir();
+    fs.mkdirSync(infoFolder(mainFolder), { recursive: true });
+    fs.writeFileSync(infoFile(mainFolder), JSON.stringify({
+        SchemaVersion: 1, Id: 'repo', Name: 'N', Description: 'D',
+        Files: [{ Path: 'bin/hello.sh', Label: 'Hello', Executable: true, ListInAgents: false }],
+    }));
+
+    const result = readRepositoryInfoFile(mainFolder);
+    assert.equal(result.status, 'invalid');
+});
+
+// ─── Milestone 2: Files — diffRepositoryFiles() ───────────────────────────────
+
+test('diffRepositoryFiles(): a file present only in the folder (teammate-added) is incoming-only', () => {
+    const diffs = diffRepositoryFiles([], [fileEntry()]);
+    assert.deepEqual(diffs, [{ path: 'bin/hello.sh', kind: 'incoming-only' }]);
+});
+
+test('diffRepositoryFiles(): a file present only locally (teammate-removed, or not yet pulled) is local-only', () => {
+    const diffs = diffRepositoryFiles([fileEntry()], []);
+    assert.deepEqual(diffs, [{ path: 'bin/hello.sh', kind: 'local-only' }]);
+});
+
+test('diffRepositoryFiles(): a file present on both sides with a differing ContentHash is changed, with a Content change entry', () => {
+    const local = [fileEntry({ ContentHash: 'local-hash' })];
+    const folder = [fileEntry({ ContentHash: 'folder-hash' })];
+    const diffs = diffRepositoryFiles(local, folder);
+    assert.deepEqual(diffs, [{
+        path: 'bin/hello.sh',
+        kind: 'changed',
+        changes: [{ field: 'Content', local: 'local-hash', incoming: 'folder-hash' }],
+    }]);
+});
+
+test('diffRepositoryFiles(): a changed Label/Description/Executable/ListInAgents each surfaces as its own change entry', () => {
+    const local = [fileEntry({ Label: 'A', Description: 'a', Executable: true, ListInAgents: false })];
+    const folder = [fileEntry({ Label: 'B', Description: 'b', Executable: false, ListInAgents: true })];
+    const diffs = diffRepositoryFiles(local, folder);
+    assert.equal(diffs.length, 1);
+    assert.equal(diffs[0]!.kind, 'changed');
+    const fields = diffs[0]!.changes!.map((c) => c.field).sort();
+    assert.deepEqual(fields, ['Description', 'Executable', 'Label', 'ListInAgents'].sort());
+});
+
+test('diffRepositoryFiles(): an identical file on both sides produces no diff entry', () => {
+    const diffs = diffRepositoryFiles([fileEntry()], [fileEntry()]);
+    assert.deepEqual(diffs, []);
+});
+
+test('diffRepositoryFiles(): a CRLF-only difference (already normalised into equal ContentHash) yields no diff entry', () => {
+    // canonicalFilesForHash() normalises line endings before hashing, so an
+    // LF/CRLF-only difference between two checkouts produces the same
+    // ContentHash on both sides — diffRepositoryFiles() never re-reads raw
+    // content, so it correctly reports no change here.
+    const diffs = diffRepositoryFiles([fileEntry({ ContentHash: 'same' })], [fileEntry({ ContentHash: 'same' })]);
+    assert.deepEqual(diffs, []);
+});
+
+test('diffRepositoryFiles(): matches paths case-insensitively', () => {
+    const local = [fileEntry({ Path: 'Bin/Hello.sh' })];
+    const folder = [fileEntry({ Path: 'bin/hello.sh' })];
+    const diffs = diffRepositoryFiles(local, folder);
+    assert.deepEqual(diffs, []);
+});
+
+// ─── Milestone 2: Files — defaultFileImportAction() / resolveFileImportAction() ──
+
+function makeDiff(overrides: Partial<RepositoryFileDiff> = {}): RepositoryFileDiff {
+    return { path: 'bin/hello.sh', kind: 'incoming-only', ...overrides };
+}
+
+test('defaultFileImportAction(): "discard" for incoming-only, "keep" for local-only and changed', () => {
+    assert.equal(defaultFileImportAction('incoming-only'), 'discard');
+    assert.equal(defaultFileImportAction('local-only'), 'keep');
+    assert.equal(defaultFileImportAction('changed'), 'keep');
+});
+
+test('resolveFileImportAction(): omitted selection resolves to the default for the diff\'s kind', () => {
+    assert.equal(resolveFileImportAction(makeDiff({ kind: 'incoming-only' }), undefined), 'discard');
+    assert.equal(resolveFileImportAction(makeDiff({ kind: 'local-only' }), undefined), 'keep');
+    assert.equal(resolveFileImportAction(makeDiff({ kind: 'changed' }), undefined), 'keep');
+});
+
+test('resolveFileImportAction(): accepts every action in the kind\'s action table', () => {
+    assert.equal(resolveFileImportAction(makeDiff({ kind: 'incoming-only' }), 'add'), 'add');
+    assert.equal(resolveFileImportAction(makeDiff({ kind: 'incoming-only' }), 'discard'), 'discard');
+    assert.equal(resolveFileImportAction(makeDiff({ kind: 'local-only' }), 'keep'), 'keep');
+    assert.equal(resolveFileImportAction(makeDiff({ kind: 'local-only' }), 'delete'), 'delete');
+    assert.equal(resolveFileImportAction(makeDiff({ kind: 'changed' }), 'overwrite'), 'overwrite');
+    assert.equal(resolveFileImportAction(makeDiff({ kind: 'changed' }), 'keep'), 'keep');
+});
+
+test('resolveFileImportAction(): rejects an action not in the kind\'s action table (e.g. "skip", or a cross-kind action)', () => {
+    assert.throws(() => resolveFileImportAction(makeDiff({ kind: 'incoming-only' }), 'skip' as never), /Unsupported import action/);
+    assert.throws(() => resolveFileImportAction(makeDiff({ kind: 'incoming-only' }), 'keep'), /Unsupported import action/);
+    assert.throws(() => resolveFileImportAction(makeDiff({ kind: 'local-only' }), 'add'), /Unsupported import action/);
+    assert.throws(() => resolveFileImportAction(makeDiff({ kind: 'changed' }), 'add'), /Unsupported import action/);
+});
+
+test('resolveFileImportAction(): a problem incoming-only file may only be discarded, not added', () => {
+    const diff = makeDiff({ kind: 'incoming-only', problem: 'File must be plain text (binary data is not supported).' });
+    assert.equal(resolveFileImportAction(diff, undefined), 'discard');
+    assert.equal(resolveFileImportAction(diff, 'discard'), 'discard');
+    assert.throws(() => resolveFileImportAction(diff, 'add'), /cannot be imported as-is/);
+});
+
+test('resolveFileImportAction(): a problem changed file may only be kept, not overwritten', () => {
+    const diff = makeDiff({ kind: 'changed', problem: 'File exceeds the maximum size of 256 KB.' });
+    assert.equal(resolveFileImportAction(diff, undefined), 'keep');
+    assert.equal(resolveFileImportAction(diff, 'keep'), 'keep');
+    assert.throws(() => resolveFileImportAction(diff, 'overwrite'), /cannot be imported as-is/);
+});
+
+// ─── Milestone 2: README files/ section ──────────────────────────────────────
+
+test('renderRepositoryInfoReadme() documents the files/ folder: purpose, git-only delivery, maintained-by-Paralizer and invocation', () => {
+    const content = renderRepositoryInfoReadme();
+    assert.ok(content.includes('files/'));
+    assert.ok(/git/i.test(content));
+    assert.ok(content.includes('sh .workspace/files/<name>.sh'));
+    assert.ok(content.includes('Files'));
+});
+
+test('renderRepositoryInfoReadme() files/ section contains no absolute path', () => {
+    const content = renderRepositoryInfoReadme();
+    assert.ok(!/\/(Users|home|var|private)\//.test(content));
+    assert.ok(!/^[A-Za-z]:\\/m.test(content));
 });

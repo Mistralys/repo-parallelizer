@@ -10,12 +10,19 @@ import {
     RemoteOperationError,
 } from '../../orchestration/repository-info-sync.js';
 import { MainFolderPreconditionError, MainFolderGitError } from '../../orchestration/repository-main-folder.js';
-import type { RepositoryInfoImportField } from '../../orchestration/repository-info.js';
+import type {
+    RepositoryInfoImportField,
+    RepositoryFileImportAction,
+    RepositoryFileImportSelection,
+} from '../../orchestration/repository-info.js';
 import { NotFoundError } from '../../errors.js';
 import { parseJsonBody, sendJson, sendError, isPlainObject } from '../requestUtils.js';
 import { MAX_INFO_COMMIT_MESSAGE_LENGTH } from '../../config/config.constants.js';
 
 const IMPORTABLE_FIELDS: readonly RepositoryInfoImportField[] = ['Name', 'Description'];
+
+/** Every per-file action value `validateFieldsInput()` accepts, independent of the diff it will eventually be resolved against (see `resolveFileImportAction()` in `repository-info.ts` for the kind-specific allowed subset). */
+const VALID_FILE_IMPORT_ACTIONS: readonly RepositoryFileImportAction[] = ['add', 'discard', 'keep', 'delete', 'overwrite'];
 
 /**
  * Registers the `/api/repositories/:id/info-sync*` routes on the provided
@@ -30,6 +37,11 @@ const IMPORTABLE_FIELDS: readonly RepositoryInfoImportField[] = ['Name', 'Descri
  * | `PendingChangesError` / `SyncPreconditionError` / `MainFolderPreconditionError` | 409 |
  * | `RemoteOperationError` / `MainFolderGitError`                            | 502    |
  * | anything else                                                            | 500    |
+ *
+ * `POST /import` is the one exception to the "anything else → 500" row: a
+ * plain `Error` thrown by `applyImport()` there (an unknown `files` path, or
+ * an action disallowed for that diff's kind) is a client input mistake, not
+ * a server fault, and is mapped to 400 instead — see that handler.
  *
  * | Method | Path                                                | Success |
  * |--------|-----------------------------------------------------|---------|
@@ -174,35 +186,82 @@ export function registerRepositoryInfoSyncRoutes(
     }
 
     /**
-     * Validates the `POST /import` body: `fields` is required and must be an
-     * array containing only `'Name'` and/or `'Description'` (an empty array
-     * is valid and means "keep all local values"; any other value, including
-     * `'Url'`, is rejected).
+     * Validates the `POST /import` body: `{ fields?, files? }`. Both are
+     * optional and independently allowed to be empty or omitted entirely — an
+     * omitted/empty `fields` means "keep all local field values", and an
+     * omitted/empty `files` means "keep all local files" (resolved per-diff by
+     * {@link RepositoryInfoSyncOrchestrator.applyImport} via
+     * `defaultFileImportAction()`). An empty body `{}` is therefore valid and
+     * means "keep everything".
+     *
+     * `fields`, when present, must be an array containing only `'Name'`
+     * and/or `'Description'` — any other value, including `'Url'`, is
+     * rejected. `files`, when present, must be an array of
+     * `{ path: string; action: string }` objects whose `action` is one of
+     * {@link VALID_FILE_IMPORT_ACTIONS} (structural validation only — whether
+     * a given path/action pair is actually valid for the current import diff,
+     * e.g. an unknown path or an action disallowed for that diff's kind, is
+     * resolved by `applyImport()` itself and mapped onto a `400` by the
+     * `POST /import` handler below).
      */
     function validateFieldsInput(
         res: ServerResponse,
         body: Record<string, unknown>,
-    ): RepositoryInfoImportField[] | undefined {
-        const { fields } = body;
+    ): { fields: RepositoryInfoImportField[]; files?: RepositoryFileImportSelection[] } | undefined {
+        const { fields, files } = body;
 
-        if (!Array.isArray(fields)) {
-            sendError(res, 400, 'Field fields is required and must be an array.');
+        let validatedFields: RepositoryInfoImportField[];
+        if (fields === undefined) {
+            validatedFields = [];
+        } else if (!Array.isArray(fields)) {
+            sendError(res, 400, 'Field fields, when provided, must be an array.');
+            return undefined;
+        } else {
+            for (const field of fields) {
+                if (!IMPORTABLE_FIELDS.includes(field as RepositoryInfoImportField)) {
+                    sendError(
+                        res,
+                        400,
+                        `Field fields contains an unsupported value "${String(field)}". ` +
+                        `Only ${IMPORTABLE_FIELDS.map((f) => `"${f}"`).join(', ')} are importable.`,
+                    );
+                    return undefined;
+                }
+            }
+            validatedFields = fields as RepositoryInfoImportField[];
+        }
+
+        if (files === undefined) {
+            return { fields: validatedFields };
+        }
+
+        if (!Array.isArray(files)) {
+            sendError(res, 400, 'Field files, when provided, must be an array.');
             return undefined;
         }
 
-        for (const field of fields) {
-            if (!IMPORTABLE_FIELDS.includes(field as RepositoryInfoImportField)) {
+        const validatedFiles: RepositoryFileImportSelection[] = [];
+        for (const entry of files) {
+            if (!isPlainObject(entry) || typeof entry['path'] !== 'string' || entry['path'].trim() === '') {
+                sendError(res, 400, 'Each entry in files must be an object with a non-empty string path.');
+                return undefined;
+            }
+
+            const action = entry['action'];
+            if (typeof action !== 'string' || !VALID_FILE_IMPORT_ACTIONS.includes(action as RepositoryFileImportAction)) {
                 sendError(
                     res,
                     400,
-                    `Field fields contains an unsupported value "${String(field)}". ` +
-                    `Only ${IMPORTABLE_FIELDS.map((f) => `"${f}"`).join(', ')} are importable.`,
+                    `File "${entry['path']}" has an unsupported action "${String(action)}". ` +
+                    `Allowed actions: ${VALID_FILE_IMPORT_ACTIONS.join(', ')}.`,
                 );
                 return undefined;
             }
+
+            validatedFiles.push({ path: entry['path'], action: action as RepositoryFileImportAction });
         }
 
-        return fields as RepositoryInfoImportField[];
+        return { fields: validatedFields, files: validatedFiles };
     }
 
     /**
@@ -342,13 +401,13 @@ export function registerRepositoryInfoSyncRoutes(
         const body = await readObjectBody(req, res);
         if (body === undefined) return;
 
-        const fields = validateFieldsInput(res, body);
-        if (fields === undefined) return;
+        const input = validateFieldsInput(res, body);
+        if (input === undefined) return;
 
         const repositoryId = params['id'];
 
         try {
-            const status = await infoSync.applyImport(repositoryId, fields);
+            const status = await infoSync.applyImport(repositoryId, input);
 
             // Best-effort: the import itself already succeeded; a failure
             // here is logged, not surfaced to the caller.
@@ -360,7 +419,25 @@ export function registerRepositoryInfoSyncRoutes(
 
             sendJson(res, 200, status);
         } catch (err) {
-            sendMappedError(res, err);
+            // `applyImport()` throws a plain `Error` (not one of the named
+            // error classes mapped by `sendMappedError()`) when `input.files`
+            // names a path outside the current diff, or requests an action
+            // disallowed for that diff's kind/problem state — both are client
+            // input mistakes, not server faults, so they resolve to 400
+            // rather than `sendMappedError()`'s 500 fallback.
+            if (
+                err instanceof NotFoundError ||
+                err instanceof PendingChangesError ||
+                err instanceof SyncPreconditionError ||
+                err instanceof MainFolderPreconditionError ||
+                err instanceof RemoteOperationError ||
+                err instanceof MainFolderGitError
+            ) {
+                sendMappedError(res, err);
+                return;
+            }
+
+            sendError(res, 400, err instanceof Error ? err.message : 'Could not apply the import.');
         }
     });
 

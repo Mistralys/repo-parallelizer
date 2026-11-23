@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { runGit } from '../git/git-cli.js';
 import { stripEmbeddedCredentials } from '../git/git-credentials.js';
 import { FILTER_UNSUPPORTED_WARNING } from '../git/git-clone.js';
@@ -11,13 +12,21 @@ import {
     countAheadBehind,
     changedPathsBetween,
 } from '../git/git-remote.js';
-import { stagePaths, commitPaths } from '../git/git-commit.js';
+import {
+    stagePaths,
+    getIndexModes,
+    setIndexExecutable,
+    getStagedPaths,
+    commitStaged,
+} from '../git/git-commit.js';
 import { NotFoundError } from '../errors.js';
 import { FETCH_TIMEOUT_MS, PUSH_TIMEOUT_MS } from './orchestration.types.js';
 import { INFO_COMMIT_AUTHOR_NAME, INFO_COMMIT_AUTHOR_EMAIL } from '../config/config.constants.js';
 import { resolveRemoteAuth } from './remote-auth.js';
 import {
     REPOSITORY_INFO_FOLDER_NAME,
+    REPOSITORY_INFO_FILE_NAME,
+    REPOSITORY_INFO_README_FILE_NAME,
     buildRepositoryInfoPayload,
     buildInformationalUrl,
     hashRepositoryInfoPayload,
@@ -25,13 +34,29 @@ import {
     renderRepositoryInfoFile,
     evaluateRepositoryInfoSync,
     diffRepositoryInfo,
+    diffRepositoryFiles,
+    resolveFileImportAction,
     writeRepositoryInfoFile,
     writeRepositoryInfoReadme,
     infoFolderPathspec,
+    type RepositoryInfoPayload,
+    type RepositoryInfoReadResult,
+    type RepositoryInfoFileEntry,
     type RepositoryInfoSyncState,
     type RepositoryInfoFieldDiff,
     type RepositoryInfoImportField,
+    type RepositoryFileDiff,
+    type RepositoryFileImportAction,
+    type RepositoryFileImportSelection,
 } from './repository-info.js';
+import {
+    readRepositoryFilesFolder,
+    writeRepositoryFiles,
+    canonicalFilesForHash,
+    REPOSITORY_FILES_FOLDER_NAME,
+    type RepositoryFolderFile,
+    type RepositoryFileMetadataEntry,
+} from './repository-files.js';
 import {
     resolveMainFolderPath,
     inspectMainFolder,
@@ -42,11 +67,140 @@ import {
     MainFolderPreconditionError,
     type MainFolderInspection,
 } from './repository-main-folder.js';
+import { guardedFileTarget } from '../utils/path-guard.js';
+import { repositoryFileRelativePath, type RepositoryFile } from '../models/repository/repository-file.js';
+import type { RepositoryFileManager } from '../models/repository/repository-file.manager.js';
 import type { HealthIssue, HealthReport } from './health.types.js';
 import type { AppConfig } from '../config/config.types.js';
 import type { RepositoryManager } from '../models/repository/repository.manager.js';
 import type { ErrorLogManager } from '../error-log/error-log.manager.js';
 import type { Repository, RepositoryInfoSyncSettings } from '../models/repository/repository.types.js';
+
+// ---------------------------------------------------------------------------
+// Files helpers — bridge RepositoryFileManager's data layer (model, real
+// `Content`) and `repository-files.ts`'s folder layer (reader/writer/hash).
+// ---------------------------------------------------------------------------
+
+/** Converts a repository's stored files (`RepositoryFileManager.list()`) into the shape `canonicalFilesForHash()` expects. */
+function toFolderFiles(files: readonly RepositoryFile[]): RepositoryFolderFile[] {
+    return files.map((file) => ({
+        path: repositoryFileRelativePath(file),
+        content: file.Content,
+        metadata: {
+            Label: file.Label,
+            Description: file.Description,
+            Executable: file.Executable,
+            ListInAgents: file.ListInAgents,
+        },
+    }));
+}
+
+/** Builds the synced payload for `repo`'s own data, including its current files. */
+function buildLocalPayload(repo: Repository, localFiles: readonly RepositoryFile[]): RepositoryInfoPayload {
+    const hashEntries = canonicalFilesForHash(toFolderFiles(localFiles));
+    return buildRepositoryInfoPayload(repo, hashEntries);
+}
+
+/**
+ * Reads `.workspace/files/` under `mainFolder` (via `readRepositoryFilesFolder()`),
+ * keyed by `payload`'s own `Files` metadata, and returns both the raw
+ * per-file folder reads (content, metadata, `problem`) and
+ * `canonicalFilesForHash()`'s hashed tuples converted into
+ * {@link RepositoryInfoFileEntry} objects. The single read both
+ * {@link withFolderFileHashesAndFiles} (which every sync-state evaluation
+ * needs) and the import preview/apply flow (which also needs each file's raw
+ * content and `problem`, to build the per-file diff and apply `add`/
+ * `overwrite`) are built from.
+ */
+function readFolderFiles(
+    mainFolder: string,
+    payload: RepositoryInfoPayload,
+): { folderFiles: RepositoryFolderFile[]; hashedEntries: RepositoryInfoFileEntry[] } {
+    const metadata: RepositoryFileMetadataEntry[] = (payload.Files ?? []).map((f) => ({
+        Path: f.Path,
+        Label: f.Label,
+        Description: f.Description,
+        Executable: f.Executable,
+        ListInAgents: f.ListInAgents,
+    }));
+
+    const { files: folderFiles } = readRepositoryFilesFolder(mainFolder, metadata);
+    const hashEntries = canonicalFilesForHash(folderFiles);
+    const hashedEntries: RepositoryInfoFileEntry[] = hashEntries.map(
+        ([entryPath, label, description, executable, listInAgents, contentHash]) => ({
+            Path: entryPath,
+            Label: label,
+            Description: description,
+            Executable: executable,
+            ListInAgents: listInAgents,
+            ContentHash: contentHash,
+        }),
+    );
+
+    return { folderFiles, hashedEntries };
+}
+
+/**
+ * Reconstructs `raw`'s payload with real per-file content hashes (see
+ * {@link readFolderFiles}), additionally returning the raw per-file folder
+ * reads for callers (the import preview/apply flow) that need each file's
+ * actual content and `problem` alongside the hashed payload.
+ * `readRepositoryInfoFile()` alone can never populate `ContentHash` (it only
+ * ever parses `info.json`, which never stores content) — this is what makes
+ * the folder-side hash sensitive to an incoming file's actual content, not
+ * just its metadata.
+ *
+ * A non-`'ok'` read (absent/invalid/unsupported-schema) is returned
+ * unchanged, with no folder files — there is no payload to reconstruct.
+ */
+function withFolderFileHashesAndFiles(
+    mainFolder: string,
+    raw: RepositoryInfoReadResult,
+): { read: RepositoryInfoReadResult; folderFiles: RepositoryFolderFile[] } {
+    if (raw.status !== 'ok' || !raw.payload) {
+        return { read: raw, folderFiles: [] };
+    }
+
+    const { folderFiles, hashedEntries } = readFolderFiles(mainFolder, raw.payload);
+    return { read: { ...raw, payload: { ...raw.payload, Files: hashedEntries } }, folderFiles };
+}
+
+/** Convenience wrapper over {@link withFolderFileHashesAndFiles} for callers that only need the hashed payload. */
+function withFolderFileHashes(mainFolder: string, raw: RepositoryInfoReadResult): RepositoryInfoReadResult {
+    return withFolderFileHashesAndFiles(mainFolder, raw).read;
+}
+
+/**
+ * Joins `diffRepositoryFiles()`'s pure diff against `folderFiles`' `problem`
+ * data (see {@link RepositoryFileDiff.problem}), by case-insensitive path.
+ * `local-only` entries never get a `problem` — that data only ever comes
+ * from the folder side.
+ */
+function buildFileDiffs(
+    local: readonly RepositoryInfoFileEntry[],
+    folder: readonly RepositoryInfoFileEntry[],
+    folderFiles: readonly RepositoryFolderFile[],
+): RepositoryFileDiff[] {
+    const problemsByPath = new Map<string, string>();
+    for (const file of folderFiles) {
+        if (file.problem !== undefined) {
+            problemsByPath.set(file.path.toLowerCase(), file.problem);
+        }
+    }
+
+    return diffRepositoryFiles(local, folder).map((diff) => {
+        const problem = problemsByPath.get(diff.path.toLowerCase());
+        return problem !== undefined ? { ...diff, problem } : diff;
+    });
+}
+
+/** Splits a `.workspace/files/`-relative path (`repositoryFileRelativePath()`'s output) back into `Directory`/`FileName`. */
+function splitFileRelativePath(relPath: string): { directory: string; fileName: string } {
+    const slashIndex = relPath.lastIndexOf('/');
+    return slashIndex === -1
+        ? { directory: '', fileName: relPath }
+        : { directory: relPath.slice(0, slashIndex), fileName: relPath.slice(slashIndex + 1) };
+}
 
 /**
  * Ties the pure `repository-info.ts` module and the git-backed
@@ -54,7 +208,7 @@ import type { Repository, RepositoryInfoSyncSettings } from '../models/repositor
  * GUI/REST layer drives: a synchronous, filesystem-only sync usable from the
  * existing artefact choke-point, plus the async settings/refresh/import/
  * commit-and-push/recreate operations, each serialised per repository via
- * {@link RepositoryInfoSyncOrchestrator.withRepositoryLock}.
+ * {@link RepositoryInfoSyncOrchestrator.runLocked}.
  *
  * `syncRepository()` is the only method intended to run on every artefact
  * regeneration; every other method performs real git I/O and is only ever
@@ -132,11 +286,53 @@ export class RemoteOperationError extends Error {
 // ---------------------------------------------------------------------------
 
 /**
- * Builds the default commit message offered by the Commit & Push dialog,
- * well within `MAX_INFO_COMMIT_MESSAGE_LENGTH`.
+ * Maps `pendingChanges` (relative paths, as reported by `inspectMainFolder()`'s
+ * `pendingChanges` / `getPathStatus()` scoped to `.workspace/`) onto the
+ * change areas named in the default commit message, in a fixed order with no
+ * duplicates: `info.json` for `.workspace/info.json`, `README` for
+ * `.workspace/README.md`, and `files` for any path under
+ * `.workspace/files/`. Any other pending path (there should be none, since
+ * the pathspec is already scoped to `.workspace/`) is silently ignored —
+ * this is a display helper, not a validator.
+ *
+ * @param pendingChanges The pending change paths to describe.
  */
-export function buildDefaultInfoCommitMessage(repositoryId: string): string {
-    return `Update ${REPOSITORY_INFO_FOLDER_NAME} for "${repositoryId}" via Paralizer`;
+export function describeInfoChangeAreas(pendingChanges: readonly string[]): string[] {
+    const infoJsonPath = `${REPOSITORY_INFO_FOLDER_NAME}/${REPOSITORY_INFO_FILE_NAME}`;
+    const readmePath = `${REPOSITORY_INFO_FOLDER_NAME}/${REPOSITORY_INFO_README_FILE_NAME}`;
+    const filesPrefix = `${REPOSITORY_INFO_FOLDER_NAME}/${REPOSITORY_FILES_FOLDER_NAME}/`;
+
+    const areas: string[] = [];
+    if (pendingChanges.includes(infoJsonPath)) {
+        areas.push('info.json');
+    }
+    if (pendingChanges.includes(readmePath)) {
+        areas.push('README');
+    }
+    if (pendingChanges.some((p) => p.startsWith(filesPrefix))) {
+        areas.push('files');
+    }
+
+    return areas;
+}
+
+/**
+ * Builds the default commit message offered by the Commit & Push dialog,
+ * well within `MAX_INFO_COMMIT_MESSAGE_LENGTH`. With no pending changes (or
+ * none that map to a known area), the message is exactly M1's
+ * `Update .workspace for "{repoId}" via Paralizer`; otherwise the areas
+ * (see {@link describeInfoChangeAreas}) are appended in parentheses, e.g.
+ * `Update .workspace for "{repoId}" via Paralizer (info.json, files)`.
+ *
+ * @param pendingChanges The pending change paths to describe, as reported by
+ *                       the current sync status. Defaults to `[]`, which
+ *                       keeps every pre-Milestone-2 call site compiling and
+ *                       behaving identically.
+ */
+export function buildDefaultInfoCommitMessage(repositoryId: string, pendingChanges: readonly string[] = []): string {
+    const base = `Update ${REPOSITORY_INFO_FOLDER_NAME} for "${repositoryId}" via Paralizer`;
+    const areas = describeInfoChangeAreas(pendingChanges);
+    return areas.length > 0 ? `${base} (${areas.join(', ')})` : base;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,13 +343,14 @@ export class RepositoryInfoSyncOrchestrator {
     /**
      * Per-repository async mutex: maps a repository ID to a promise that
      * resolves once every operation queued for it so far has settled (success
-     * or failure). See {@link withRepositoryLock}.
+     * or failure). See {@link runLocked}.
      */
     private readonly locks = new Map<string, Promise<unknown>>();
 
     constructor(
         private readonly config: AppConfig,
         private readonly repositoryManager: RepositoryManager,
+        private readonly repositoryFileManager: RepositoryFileManager,
         private readonly errorLogManager?: ErrorLogManager,
     ) {}
 
@@ -170,6 +367,23 @@ export class RepositoryInfoSyncOrchestrator {
     }
 
     /**
+     * Throws {@link SyncPreconditionError} when info sync is not enabled for
+     * the repository; otherwise returns normally. A thin, reusable guard for
+     * the mutation surfaces built on this orchestrator (REST routes, CLI
+     * commands) that need the same precondition every async method here
+     * already enforces for itself.
+     *
+     * @throws {NotFoundError} If no repository with this ID exists.
+     * @throws {SyncPreconditionError} Info sync is not enabled.
+     */
+    assertSyncEnabled(repositoryId: string): void {
+        const repo = this.getRepoOrThrow(repositoryId);
+        if (!repo.InfoSync?.Enabled) {
+            throw new SyncPreconditionError(`Info sync is not enabled for repository "${repositoryId}".`);
+        }
+    }
+
+    /**
      * Serialises every git-backed operation (`saveSettings`, `refresh`,
      * `applyImport`, `commitAndPush`, `recreateManagedClone`) on the same
      * repository, so two concurrent GUI requests can never run `git` commands
@@ -181,8 +395,14 @@ export class RepositoryInfoSyncOrchestrator {
      * succeeded or failed. The map entry is removed once no further operation
      * is queued behind it, so the map does not grow unbounded over a long
      * server lifetime.
+     *
+     * Public (formerly private `withRepositoryLock`) so the mutation surfaces
+     * built on top of this orchestrator (REST routes, CLI commands) can
+     * serialise their own multi-step operations (e.g. a file add followed by
+     * a folder write) behind the same per-repository lock this orchestrator
+     * itself uses.
      */
-    private withRepositoryLock<T>(repositoryId: string, fn: () => Promise<T>): Promise<T> {
+    runLocked<T>(repositoryId: string, fn: () => Promise<T>): Promise<T> {
         const prior = this.locks.get(repositoryId) ?? Promise.resolve();
         const result = prior.then(fn, fn);
         const bookkeeping = result.then(
@@ -202,15 +422,20 @@ export class RepositoryInfoSyncOrchestrator {
      * Builds the health report for `getStatus()`: remaps the main folder's
      * generic issue types onto the `info-sync-*` vocabulary this module owns,
      * adds sync-state-derived issues (only meaningful when the folder is
-     * usable), and a credential-availability check (meaningful regardless of
-     * folder usability, since it blocks every async operation this
-     * orchestrator offers).
+     * usable), a files-folder health sweep (Milestone 2 — also only
+     * meaningful when the folder is usable), and a credential-availability
+     * check (meaningful regardless of folder usability, since it blocks every
+     * async operation this orchestrator offers).
+     *
+     * @param mainFolder Absolute path to the repository's managed main
+     *   folder — only read from when `usable` (never written to).
      */
     private buildHealthReport(
         repo: Repository,
         inspection: MainFolderInspection,
         usable: boolean,
         state: RepositoryInfoSyncState,
+        mainFolder: string,
     ): HealthReport {
         const issues: HealthIssue[] = [];
 
@@ -295,6 +520,8 @@ export class RepositoryInfoSyncOrchestrator {
                     repositoryId: repo.Id,
                 });
             }
+
+            issues.push(...this.buildFilesHealthIssues(repo, mainFolder));
         }
 
         const credentials = this.config.gitCredentials ?? [];
@@ -312,6 +539,81 @@ export class RepositoryInfoSyncOrchestrator {
         return { healthy: issues.length === 0, issues };
     }
 
+    /**
+     * Milestone 2 files-folder health sweep, called only when the main
+     * folder is usable. Purely read-only (no write, including no dry-run
+     * `mkdir`): every check is a `fs` read/stat, so calling this from
+     * `getStatus()` on every poll never mutates the managed clone.
+     *
+     * - `info-sync-files-unsafe-entry` — a symlink or other non-regular
+     *   entry sits under `files/` ({@link readRepositoryFilesFolder}'s
+     *   `unsafeEntries`); it is never followed, read or deleted, so it stays
+     *   reported until a human removes it.
+     * - `info-sync-files-invalid-incoming` — a regular file under `files/`
+     *   cannot be treated as a normal repository file (binary, oversized,
+     *   unreadable, or an invalid/reserved path segment); resolving it
+     *   requires looking at the incoming change, hence `fixAction: 'import'`.
+     * - `info-sync-files-write-skipped` — one of the repository's own files
+     *   (`RepositoryFileManager.list()`) resolves to a write target that the
+     *   shared guard chain ({@link guardedFileTarget}) refuses (a symlink
+     *   escape, or a path segment already occupied by a plain file) — the
+     *   same check `writeRepositoryFiles()` itself applies before writing,
+     *   run here without writing so a refusal surfaces even outside a sync.
+     */
+    private buildFilesHealthIssues(repo: Repository, mainFolder: string): HealthIssue[] {
+        const issues: HealthIssue[] = [];
+
+        const localFiles = this.repositoryFileManager.list(repo.Id);
+        const metadata: RepositoryFileMetadataEntry[] = localFiles.map((f) => ({
+            Path: repositoryFileRelativePath(f),
+            Label: f.Label,
+            Description: f.Description,
+            Executable: f.Executable,
+            ListInAgents: f.ListInAgents,
+        }));
+        const { files: folderFiles, unsafeEntries } = readRepositoryFilesFolder(mainFolder, metadata);
+
+        if (unsafeEntries.length > 0) {
+            issues.push({
+                type: 'info-sync-files-unsafe-entry',
+                severity: 'warning',
+                message: `${unsafeEntries.length} symlink or other non-regular entr${unsafeEntries.length === 1 ? 'y' : 'ies'} ` +
+                    `found under the \`files/\` folder and left untouched: ${unsafeEntries.join(', ')}.`,
+                fixAction: 'none',
+                repositoryId: repo.Id,
+            });
+        }
+
+        const invalidFiles = folderFiles.filter((f) => f.problem !== undefined);
+        if (invalidFiles.length > 0) {
+            issues.push({
+                type: 'info-sync-files-invalid-incoming',
+                severity: 'warning',
+                message: `${invalidFiles.length} file(s) under the \`files/\` folder cannot be synced as-is: ` +
+                    `${invalidFiles.map((f) => `${f.path} (${f.problem})`).join('; ')}.`,
+                fixAction: 'import',
+                repositoryId: repo.Id,
+            });
+        }
+
+        const filesRoot = path.join(mainFolder, REPOSITORY_INFO_FOLDER_NAME, REPOSITORY_FILES_FOLDER_NAME);
+        const skippedTargets = localFiles
+            .map((f) => repositoryFileRelativePath(f))
+            .filter((rel) => guardedFileTarget(filesRoot, rel) === null);
+        if (skippedTargets.length > 0) {
+            issues.push({
+                type: 'info-sync-files-write-skipped',
+                severity: 'warning',
+                message: `${skippedTargets.length} file(s) could not be written under the \`files/\` folder because ` +
+                    `the write target was refused: ${skippedTargets.join(', ')}.`,
+                fixAction: 'none',
+                repositoryId: repo.Id,
+            });
+        }
+
+        return issues;
+    }
+
     // -------------------------------------------------------------------------
     // Synchronous, filesystem-only sync — safe to call from the artefact choke-point
     // -------------------------------------------------------------------------
@@ -319,12 +621,13 @@ export class RepositoryInfoSyncOrchestrator {
     /**
      * Synchronous and filesystem-only: resolves the managed main folder,
      * short-circuits when sync is disabled or the folder is unavailable,
-     * otherwise reads/hashes/evaluates and writes `.workspace/info.json` only
-     * when its rendered bytes differ. Safe to call repeatedly and cheaply
-     * (one small file read and a hash per call when nothing changed), which
-     * is what lets it run inside the existing synchronous artefact
-     * choke-point (`WorkspaceArtifactsOrchestrator`, WP-008) without making
-     * every regenerate caller async.
+     * otherwise reads/hashes/evaluates and writes `.workspace/info.json`,
+     * then the repository's files under `.workspace/files/` (Milestone 2),
+     * each only when its content actually differs. Safe to call repeatedly
+     * (a small file read, a files-folder read, and a hash per call when
+     * nothing changed), which is what lets it run inside the existing
+     * synchronous artefact choke-point (`WorkspaceArtifactsOrchestrator`,
+     * WP-008) without making every regenerate caller async.
      *
      * Never throws for an ordinary "nothing to do" outcome (disabled, no main
      * folder yet); only a genuinely unexpected failure (e.g. `NotFoundError`
@@ -344,9 +647,10 @@ export class RepositoryInfoSyncOrchestrator {
             return { state: 'main-folder-unavailable', written: false };
         }
 
-        const dataPayload = buildRepositoryInfoPayload(repo);
+        const localFiles = this.repositoryFileManager.list(repositoryId);
+        const dataPayload = buildLocalPayload(repo, localFiles);
         const dataHash = hashRepositoryInfoPayload(dataPayload);
-        const folderRead = readRepositoryInfoFile(mainFolder);
+        const folderRead = withFolderFileHashes(mainFolder, readRepositoryInfoFile(mainFolder));
         const state = evaluateRepositoryInfoSync({
             dataHash,
             folder: folderRead,
@@ -360,6 +664,7 @@ export class RepositoryInfoSyncOrchestrator {
             const informationalUrl = buildInformationalUrl(repo);
             const content = renderRepositoryInfoFile(dataPayload, informationalUrl, folderRead.raw);
             written = writeRepositoryInfoFile(mainFolder, content).written;
+            writeRepositoryFiles(mainFolder, localFiles);
             this.repositoryManager.recordInfoSyncWrite(repositoryId, dataHash);
         } else if (state === 'in-sync' && repo.InfoSync.LastWrittenHash !== dataHash) {
             // Stale or missing baseline on an otherwise-matching file: record
@@ -398,7 +703,6 @@ export class RepositoryInfoSyncOrchestrator {
      */
     async getStatus(repositoryId: string): Promise<RepositoryInfoSyncStatus> {
         const repo = this.getRepoOrThrow(repositoryId);
-        const defaultCommitMessage = buildDefaultInfoCommitMessage(repositoryId);
 
         if (!repo.InfoSync?.Enabled) {
             return {
@@ -406,7 +710,7 @@ export class RepositoryInfoSyncOrchestrator {
                 mainFolder: null,
                 state: 'disabled',
                 pendingChanges: [],
-                defaultCommitMessage,
+                defaultCommitMessage: buildDefaultInfoCommitMessage(repositoryId),
                 health: { healthy: true, issues: [] },
             };
         }
@@ -419,9 +723,10 @@ export class RepositoryInfoSyncOrchestrator {
         if (!usable) {
             state = 'main-folder-unavailable';
         } else {
-            const dataPayload = buildRepositoryInfoPayload(repo);
+            const localFiles = this.repositoryFileManager.list(repositoryId);
+            const dataPayload = buildLocalPayload(repo, localFiles);
             const dataHash = hashRepositoryInfoPayload(dataPayload);
-            const folderRead = readRepositoryInfoFile(mainFolder);
+            const folderRead = withFolderFileHashes(mainFolder, readRepositoryInfoFile(mainFolder));
             state = evaluateRepositoryInfoSync({
                 dataHash,
                 folder: folderRead,
@@ -430,7 +735,7 @@ export class RepositoryInfoSyncOrchestrator {
             });
         }
 
-        const health = this.buildHealthReport(repo, inspection, usable, state);
+        const health = this.buildHealthReport(repo, inspection, usable, state, mainFolder);
 
         return {
             enabled: true,
@@ -438,7 +743,7 @@ export class RepositoryInfoSyncOrchestrator {
             state,
             pendingChanges: inspection.pendingChanges,
             lastSyncedAt: repo.InfoSync.LastSyncedAt,
-            defaultCommitMessage,
+            defaultCommitMessage: buildDefaultInfoCommitMessage(repositoryId, inspection.pendingChanges),
             health,
         };
     }
@@ -471,7 +776,7 @@ export class RepositoryInfoSyncOrchestrator {
         repositoryId: string,
         input: RepositoryInfoSyncSettingsInput,
     ): Promise<RepositoryInfoSyncStatus> {
-        return this.withRepositoryLock(repositoryId, async () => {
+        return this.runLocked(repositoryId, async () => {
             const repo = this.getRepoOrThrow(repositoryId);
             const currentlyEnabled = repo.InfoSync?.Enabled ?? false;
 
@@ -559,7 +864,7 @@ export class RepositoryInfoSyncOrchestrator {
      * @throws {RemoteOperationError} No credential resolves, or the fetch/fast-forward fails.
      */
     async refresh(repositoryId: string): Promise<RepositoryInfoSyncStatus> {
-        return this.withRepositoryLock(repositoryId, async () => {
+        return this.runLocked(repositoryId, async () => {
             const repo = this.getRepoOrThrow(repositoryId);
             if (!repo.InfoSync?.Enabled) {
                 throw new SyncPreconditionError(`Info sync is not enabled for repository "${repositoryId}".`);
@@ -652,7 +957,7 @@ export class RepositoryInfoSyncOrchestrator {
      */
     async getImportPreview(
         repositoryId: string,
-    ): Promise<{ state: RepositoryInfoSyncState; fields: RepositoryInfoFieldDiff[] }> {
+    ): Promise<{ state: RepositoryInfoSyncState; fields: RepositoryInfoFieldDiff[]; files: RepositoryFileDiff[] }> {
         const repo = this.getRepoOrThrow(repositoryId);
         if (!repo.InfoSync?.Enabled) {
             throw new SyncPreconditionError(`Info sync is not enabled for repository "${repositoryId}".`);
@@ -666,9 +971,10 @@ export class RepositoryInfoSyncOrchestrator {
             );
         }
 
-        const dataPayload = buildRepositoryInfoPayload(repo);
+        const localFiles = this.repositoryFileManager.list(repositoryId);
+        const dataPayload = buildLocalPayload(repo, localFiles);
         const dataHash = hashRepositoryInfoPayload(dataPayload);
-        const folderRead = readRepositoryInfoFile(mainFolder);
+        const { read: folderRead, folderFiles } = withFolderFileHashesAndFiles(mainFolder, readRepositoryInfoFile(mainFolder));
         const state = evaluateRepositoryInfoSync({
             dataHash,
             folder: folderRead,
@@ -683,30 +989,46 @@ export class RepositoryInfoSyncOrchestrator {
         }
 
         const fields = diffRepositoryInfo(dataPayload, folderRead.payload!);
-        return { state, fields };
+        const files = buildFileDiffs(dataPayload.Files ?? [], folderRead.payload!.Files ?? [], folderFiles);
+        return { state, fields, files };
     }
 
     /**
-     * Applies the selected fields from the incoming file onto the
-     * repository's data (through `RepositoryManager.update()`, which enforces
-     * the description length limit), writes the merged result back (write-
-     * only-if-changed) and records the hash. An empty `fields` array is
-     * valid — it keeps every local value, still rewrites the file from
-     * Paralizer's data, and resolves the state to `in-sync`.
+     * Applies the selected fields and per-file actions from the incoming
+     * file onto the repository's data, writes the merged result back
+     * (write-only-if-changed) and records the hash. An empty/omitted
+     * `fields` or `files` array is valid — it keeps every local value, still
+     * rewrites the file from Paralizer's data, and resolves the state to
+     * `in-sync`.
      *
-     * Never touches `Url`, `CredentialId`, or the managed clone — `Url` is
-     * informational only and is not an importable field.
+     * Fields are applied through `RepositoryManager.update()`, which
+     * enforces the description length limit. Files are resolved per diff via
+     * `resolveFileImportAction()` (`repository-info.ts`) — a path in
+     * `input.files` not omitted from the request, or defaulted otherwise —
+     * then applied in one `RepositoryFileManager.replaceAll()` call:
+     * `'add'` creates a new file from the incoming folder content,
+     * `'overwrite'` replaces an existing file's content/metadata in place
+     * (keeping its `Id`), `'delete'` removes a local-only file, and
+     * `'discard'`/`'keep'` are no-ops on Paralizer's own data (the discarded
+     * or superseded file is removed from the managed clone by the merged
+     * write below, exactly like M1's `write-required` delete pass).
+     *
+     * Never touches `Url`, `CredentialId`, or the managed clone directly —
+     * `Url` is informational only and is not an importable field.
      *
      * @throws {NotFoundError} If no repository with this ID exists.
      * @throws {SyncPreconditionError} Sync is not enabled, the main folder is
      *   unusable, or re-evaluating the state no longer requires an import
      *   (e.g. another request already resolved it).
+     * @throws {Error} `input.files` names a path outside the current import
+     *   diff, or requests an action `resolveFileImportAction()` rejects
+     *   (unsupported for the diff's kind, or disallowed on a `problem` file).
      */
     async applyImport(
         repositoryId: string,
-        fields: RepositoryInfoImportField[],
+        input: { fields: RepositoryInfoImportField[]; files?: RepositoryFileImportSelection[] },
     ): Promise<RepositoryInfoSyncStatus> {
-        return this.withRepositoryLock(repositoryId, async () => {
+        return this.runLocked(repositoryId, async () => {
             const repo = this.getRepoOrThrow(repositoryId);
             if (!repo.InfoSync?.Enabled) {
                 throw new SyncPreconditionError(`Info sync is not enabled for repository "${repositoryId}".`);
@@ -722,10 +1044,11 @@ export class RepositoryInfoSyncOrchestrator {
 
             // Re-read and re-validate: the state must still call for an
             // import — a concurrent caller (serialised behind this one by
-            // withRepositoryLock) may already have resolved it.
-            const dataPayload = buildRepositoryInfoPayload(repo);
+            // runLocked) may already have resolved it.
+            const localFiles = this.repositoryFileManager.list(repositoryId);
+            const dataPayload = buildLocalPayload(repo, localFiles);
             const dataHash = hashRepositoryInfoPayload(dataPayload);
-            const folderRead = readRepositoryInfoFile(mainFolder);
+            const { read: folderRead, folderFiles } = withFolderFileHashesAndFiles(mainFolder, readRepositoryInfoFile(mainFolder));
             const state = evaluateRepositoryInfoSync({
                 dataHash,
                 folder: folderRead,
@@ -740,8 +1063,31 @@ export class RepositoryInfoSyncOrchestrator {
             }
 
             const incoming = folderRead.payload!;
+            const fields = input.fields;
             const selectedName = fields.includes('Name');
             const selectedDescription = fields.includes('Description');
+
+            // Resolve and validate every file diff's action up front — before
+            // the repository-fields mutation below — so a bad `files`
+            // selection (an unknown path, or an action `resolveFileImportAction()`
+            // rejects) never leaves a partial import behind (fields applied,
+            // files not).
+            const fileDiffs = buildFileDiffs(dataPayload.Files ?? [], incoming.Files ?? [], folderFiles);
+            const diffPathsLower = new Set(fileDiffs.map((d) => d.path.toLowerCase()));
+            const selectionByPath = new Map<string, RepositoryFileImportAction>();
+            for (const selection of input.files ?? []) {
+                if (!diffPathsLower.has(selection.path.toLowerCase())) {
+                    throw new Error(
+                        `Cannot apply import: file "${selection.path}" is not part of the current import diff.`,
+                    );
+                }
+                selectionByPath.set(selection.path.toLowerCase(), selection.action);
+            }
+
+            const resolvedActions = fileDiffs.map((diff) => ({
+                diff,
+                action: resolveFileImportAction(diff, selectionByPath.get(diff.path.toLowerCase())),
+            }));
 
             let updatedRepo = repo;
             if (selectedName || selectedDescription) {
@@ -751,13 +1097,74 @@ export class RepositoryInfoSyncOrchestrator {
                 });
             }
 
-            const mergedPayload = buildRepositoryInfoPayload(updatedRepo);
+            const folderFilesByPath = new Map<string, RepositoryFolderFile>();
+            for (const file of folderFiles) {
+                folderFilesByPath.set(file.path.toLowerCase(), file);
+            }
+            const localFilesByPath = new Map<string, RepositoryFile>();
+            for (const file of localFiles) {
+                localFilesByPath.set(repositoryFileRelativePath(file).toLowerCase(), file);
+            }
+
+            const resultFiles: RepositoryFile[] = [...localFiles];
+            const now = new Date().toISOString();
+
+            for (const { diff, action } of resolvedActions) {
+                const lowerPath = diff.path.toLowerCase();
+
+                if (action === 'add') {
+                    const folderFile = folderFilesByPath.get(lowerPath)!;
+                    const { directory, fileName } = splitFileRelativePath(diff.path);
+                    resultFiles.push({
+                        Id: randomUUID(),
+                        Directory: directory,
+                        FileName: fileName,
+                        Label: folderFile.metadata.Label,
+                        Description: folderFile.metadata.Description,
+                        Content: folderFile.content,
+                        Executable: folderFile.metadata.Executable,
+                        ListInAgents: folderFile.metadata.ListInAgents,
+                        DateModified: now,
+                    });
+                } else if (action === 'overwrite') {
+                    const folderFile = folderFilesByPath.get(lowerPath)!;
+                    const existing = localFilesByPath.get(lowerPath)!;
+                    const index = resultFiles.findIndex((f) => f.Id === existing.Id);
+                    resultFiles[index] = {
+                        ...existing,
+                        Label: folderFile.metadata.Label,
+                        Description: folderFile.metadata.Description,
+                        Content: folderFile.content,
+                        Executable: folderFile.metadata.Executable,
+                        ListInAgents: folderFile.metadata.ListInAgents,
+                        DateModified: now,
+                    };
+                } else if (action === 'delete') {
+                    const existing = localFilesByPath.get(lowerPath)!;
+                    const index = resultFiles.findIndex((f) => f.Id === existing.Id);
+                    if (index !== -1) {
+                        resultFiles.splice(index, 1);
+                    }
+                }
+                // 'discard' and 'keep' leave resultFiles untouched.
+            }
+
+            if (resolvedActions.length > 0) {
+                this.repositoryFileManager.replaceAll(repositoryId, resultFiles);
+            }
+
+            const mergedPayload = buildLocalPayload(updatedRepo, resultFiles);
             const mergedHash = hashRepositoryInfoPayload(mergedPayload);
             const informationalUrl = buildInformationalUrl(updatedRepo);
             const content = renderRepositoryInfoFile(mergedPayload, informationalUrl, folderRead.raw);
             writeRepositoryInfoFile(mainFolder, content);
+            writeRepositoryFiles(mainFolder, resultFiles);
             writeRepositoryInfoReadme(mainFolder);
             this.repositoryManager.recordInfoSyncWrite(repositoryId, mergedHash);
+
+            const fileActionsDescription = resolvedActions.length > 0
+                ? resolvedActions.map(({ diff, action }) => `${action}: ${diff.path}`).join(', ')
+                : '(none)';
 
             this.errorLogManager?.append({
                 Severity: 'audit',
@@ -765,7 +1172,7 @@ export class RepositoryInfoSyncOrchestrator {
                 Operation: 'import',
                 Context: { RepositoryId: repositoryId },
                 Message: `Imported repository info field(s) [${fields.join(', ') || '(none — kept local values)'}] ` +
-                    `for repository "${repositoryId}".`,
+                    `and file action(s) [${fileActionsDescription}] for repository "${repositoryId}".`,
             });
 
             return this.getStatus(repositoryId);
@@ -798,7 +1205,7 @@ export class RepositoryInfoSyncOrchestrator {
         repositoryId: string,
         options: { message?: string } = {},
     ): Promise<CommitPushResult> {
-        return this.withRepositoryLock(repositoryId, async () => {
+        return this.runLocked(repositoryId, async () => {
             const repo = this.getRepoOrThrow(repositoryId);
             if (!repo.InfoSync?.Enabled) {
                 throw new SyncPreconditionError(`Info sync is not enabled for repository "${repositoryId}".`);
@@ -819,9 +1226,10 @@ export class RepositoryInfoSyncOrchestrator {
                 );
             }
 
-            const dataPayload = buildRepositoryInfoPayload(repo);
+            const localFiles = this.repositoryFileManager.list(repositoryId);
+            const dataPayload = buildLocalPayload(repo, localFiles);
             const dataHash = hashRepositoryInfoPayload(dataPayload);
-            const folderRead = readRepositoryInfoFile(mainFolder);
+            const folderRead = withFolderFileHashes(mainFolder, readRepositoryInfoFile(mainFolder));
             const state = evaluateRepositoryInfoSync({
                 dataHash,
                 folder: folderRead,
@@ -910,14 +1318,66 @@ export class RepositoryInfoSyncOrchestrator {
                 );
             }
 
+            // The managed clone is Paralizer's alone — anything staged
+            // outside its own info-sync artefacts is unexpected and should
+            // abort rather than be silently committed.
+            const infoFolderPrefix = `${REPOSITORY_INFO_FOLDER_NAME}/`;
+            const stagedPaths = await getStagedPaths(mainFolder);
+            const pathOutsideInfoFolder = stagedPaths.find(
+                (p) => p !== REPOSITORY_INFO_FOLDER_NAME && !p.startsWith(infoFolderPrefix),
+            );
+            if (pathOutsideInfoFolder !== undefined) {
+                throw new SyncPreconditionError(
+                    `Cannot commit & push: a staged path lies outside "${REPOSITORY_INFO_FOLDER_NAME}/" ` +
+                    `("${pathOutsideInfoFolder}").`,
+                );
+            }
+
+            // Fix up the executable bit on the staged index for repository
+            // files: `update-index --chmod` is the only cross-platform way
+            // to commit it (see `setIndexExecutable()`'s docs) — a newly
+            // staged file's index mode otherwise reflects the working tree's
+            // actual file mode (or `core.filemode`'s default when that is
+            // unreliable), not necessarily `RepositoryFile.Executable`.
+            const filesPathspec = `${REPOSITORY_INFO_FOLDER_NAME}/${REPOSITORY_FILES_FOLDER_NAME}`;
+            const indexModes = await getIndexModes(mainFolder, filesPathspec);
+            const toMarkExecutable: string[] = [];
+            const toClearExecutable: string[] = [];
+            for (const file of localFiles) {
+                const indexPath = `${filesPathspec}/${repositoryFileRelativePath(file)}`;
+                const currentMode = indexModes.get(indexPath);
+                if (currentMode === undefined) {
+                    // Not staged — either unchanged since the last commit
+                    // (already has the correct mode) or not yet written to
+                    // the managed clone at all.
+                    continue;
+                }
+
+                const isCurrentlyExecutable = currentMode === '100755';
+                if (file.Executable && !isCurrentlyExecutable) {
+                    toMarkExecutable.push(indexPath);
+                } else if (!file.Executable && isCurrentlyExecutable) {
+                    toClearExecutable.push(indexPath);
+                }
+            }
+
+            for (const [paths, executable] of [[toMarkExecutable, true], [toClearExecutable, false]] as const) {
+                const chmodResult = await setIndexExecutable(mainFolder, paths, executable);
+                if (chmodResult.exitCode !== 0) {
+                    throw new RemoteOperationError(
+                        `Failed to set the executable bit for repository "${repositoryId}": ` +
+                        stripEmbeddedCredentials(chmodResult.stderr.trim()),
+                    );
+                }
+            }
+
             const trimmedMessage = options.message?.trim();
             const commitMessage = trimmedMessage && trimmedMessage.length > 0
                 ? trimmedMessage
-                : buildDefaultInfoCommitMessage(repositoryId);
+                : buildDefaultInfoCommitMessage(repositoryId, inspection.pendingChanges);
 
-            const commitResult = await commitPaths(
+            const commitResult = await commitStaged(
                 mainFolder,
-                infoFolderPathspec(),
                 commitMessage,
                 { name: INFO_COMMIT_AUTHOR_NAME, email: INFO_COMMIT_AUTHOR_EMAIL },
             );
@@ -995,7 +1455,7 @@ export class RepositoryInfoSyncOrchestrator {
         repositoryId: string,
         options: { discardPendingChanges?: boolean } = {},
     ): Promise<RepositoryInfoSyncStatus> {
-        return this.withRepositoryLock(repositoryId, async () => {
+        return this.runLocked(repositoryId, async () => {
             const repo = this.getRepoOrThrow(repositoryId);
             if (!repo.InfoSync?.Enabled) {
                 throw new SyncPreconditionError(`Info sync is not enabled for repository "${repositoryId}".`);

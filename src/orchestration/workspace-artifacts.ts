@@ -3,6 +3,7 @@ import type { AppConfig } from '../config/config.types.js';
 import type { ProjectManager } from '../models/project/project.manager.js';
 import type { RepositoryManager } from '../models/repository/repository.manager.js';
 import type { ProjectWorkspace } from '../models/project/project.types.js';
+import type { Repository } from '../models/repository/repository.types.js';
 import { generateWorkspaceFile, removeWorkspaceFile, getWorkspaceFilePath } from './vscode-workspace.js';
 import {
     writeWorkspaceIndexFiles,
@@ -11,10 +12,12 @@ import {
 } from './workspace-index.js';
 import { writeCustomFiles, removeCustomFileCopy } from './custom-files.js';
 import { customFileRelativePath, type CustomFile } from '../models/project/custom-file.js';
+import { repositoryFileRelativePath } from '../models/repository/repository-file.js';
 import { getToolVersion } from '../utils/version.js';
 import { getToolRoot } from '../utils/paths.js';
 import type { RepositoryInfoSyncOrchestrator } from './repository-info-sync.js';
 import type { ErrorLogManager } from '../error-log/error-log.manager.js';
+import type { RepositoryFileManager } from '../models/repository/repository-file.manager.js';
 
 /**
  * Overrides accepted by {@link WorkspaceArtifactsOrchestrator.regenerateWorkspace}.
@@ -77,6 +80,14 @@ export class WorkspaceArtifactsOrchestrator {
         private readonly repositoryManager: RepositoryManager,
         private readonly repositoryInfoSync?: RepositoryInfoSyncOrchestrator,
         private readonly errorLogManager?: ErrorLogManager,
+        /**
+         * Source of the `AGENTS.md` "Repository Files" table's `ListInAgents`
+         * rows (Milestone 2). Optional — kept at the end and defaulted so
+         * every existing construction site (most of this project's tests)
+         * keeps compiling unchanged; `repositoryFiles` in the rendered
+         * context is simply omitted (no section rendered) when not injected.
+         */
+        private readonly repositoryFileManager?: RepositoryFileManager,
     ) {}
 
     // -------------------------------------------------------------------------
@@ -117,6 +128,33 @@ export class WorkspaceArtifactsOrchestrator {
 
     private guiUrl(projectId: string, workspaceId: string): string {
         return `http://localhost:${this.config.serverPort}/#/projects/${projectId}/workspaces/${workspaceId}`;
+    }
+
+    /**
+     * Builds the `AGENTS.md` "Repository Files" rows: `ListInAgents` files of
+     * sync-enabled repositories only, in `repositories`' own order (which is
+     * already `project.Repositories` order — see {@link regenerateWorkspace}).
+     * No filesystem check — sourced entirely from
+     * `RepositoryFileManager.list()`, Paralizer's own data. Returns `[]` when
+     * no `RepositoryFileManager` was injected (see the constructor doc).
+     */
+    private buildRepositoryFileRows(repositories: readonly Repository[]) {
+        if (!this.repositoryFileManager) {
+            return [];
+        }
+        const manager = this.repositoryFileManager;
+        return repositories
+            .filter((repo) => repo.InfoSync?.Enabled === true)
+            .flatMap((repo) =>
+                manager.list(repo.Id)
+                    .filter((file) => file.ListInAgents)
+                    .map((file) => ({
+                        repositoryId: repo.Id,
+                        path: repositoryFileRelativePath(file),
+                        label: file.Label,
+                        description: file.Description,
+                    })),
+            );
     }
 
     // -------------------------------------------------------------------------
@@ -195,6 +233,7 @@ export class WorkspaceArtifactsOrchestrator {
                     label: file.Label,
                     description: file.Description,
                 })),
+            repositoryFiles: this.buildRepositoryFileRows(repositories),
             guiUrl: this.guiUrl(projectId, workspaceId),
             toolVersion: getToolVersion(),
             toolRoot: getToolRoot(),

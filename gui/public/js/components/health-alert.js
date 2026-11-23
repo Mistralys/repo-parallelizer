@@ -124,6 +124,15 @@ function buildActionCell(issue, action) {
         btn.textContent = action.loadingLabel || action.label;
         try {
             await action.onClick(issue);
+        } catch (err) {
+            // Defensive safety net: every current caller already catches its
+            // own `onClick` rejections internally, but this component stays
+            // free of imports (no toast.js/error-log dependency) by logging
+            // instead — this still prevents an unhandled promise rejection
+            // from a future caller that forgets to catch its own chain
+            // (e.g. the import → discard-confirmation → apply chain this
+            // plan lengthens).
+            console.error('[health-alert] fix action failed:', err);
         } finally {
             btn.disabled = false;
             btn.textContent = action.label;

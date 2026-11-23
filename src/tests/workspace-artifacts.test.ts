@@ -5,6 +5,7 @@ import * as path from 'node:path';
 
 import { initializeStorage } from '../storage/json-storage.js';
 import { RepositoryManager } from '../models/repository/repository.manager.js';
+import { RepositoryFileManager } from '../models/repository/repository-file.manager.js';
 import { ProjectManager } from '../models/project/project.manager.js';
 import { WorkspaceManager } from '../models/workspace/workspace.manager.js';
 import { WorkspaceArtifactsOrchestrator } from '../orchestration/workspace-artifacts.js';
@@ -328,4 +329,106 @@ test('regenerateForRepository: a throwing sync for the up-front call is logged a
     assert.ok(fs.existsSync(path.join(wsFolder(config, 'test-project', STABLE_WORKSPACE_ID), 'README.md')));
     const { entries } = errorLogManager.list({ source: 'workspace-info' });
     assert.ok(entries.length >= 1);
+});
+
+// ---------------------------------------------------------------------------
+// Milestone 2: "Repository Files" AGENTS.md listing
+// ---------------------------------------------------------------------------
+
+function fileInput(overrides: Partial<Parameters<RepositoryFileManager['add']>[1]> = {}) {
+    return {
+        Directory: '', FileName: 'hello.sh', Label: 'Hello', Description: 'A greeting script.',
+        Content: '#!/bin/sh\necho hello\n', ListInAgents: true,
+        ...overrides,
+    };
+}
+
+test('regenerateWorkspace: AGENTS.md lists a ListInAgents file of a sync-enabled repository; README does not', () => {
+    const { config, repoManager, projectManager, projectId, repoId } = makeFixture();
+    const repoFileManager = new RepositoryFileManager(config, repoManager);
+    const orchestrator = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager, undefined, undefined, repoFileManager);
+
+    repoManager.setInfoSyncSettings(repoId, { Enabled: true });
+    repoFileManager.add(repoId, fileInput());
+
+    fs.mkdirSync(wsFolder(config, projectId, STABLE_WORKSPACE_ID), { recursive: true });
+    orchestrator.regenerateWorkspace(projectId, STABLE_WORKSPACE_ID);
+
+    const agents = fs.readFileSync(path.join(wsFolder(config, projectId, STABLE_WORKSPACE_ID), 'AGENTS.md'), 'utf8');
+    const readme = fs.readFileSync(path.join(wsFolder(config, projectId, STABLE_WORKSPACE_ID), 'README.md'), 'utf8');
+
+    assert.match(agents, /## Repository Files/);
+    assert.ok(agents.includes(`\`${repoId}/.workspace/files/hello.sh\``), 'expected the workspace-relative path');
+    assert.ok(agents.includes('Hello'));
+    assert.ok(agents.includes('A greeting script.'));
+    assert.match(agents, /paralizer repo-files/);
+    assert.doesNotMatch(readme, /Repository Files/);
+});
+
+test('regenerateWorkspace: a file not flagged ListInAgents is omitted from the table', () => {
+    const { config, repoManager, projectManager, projectId, repoId } = makeFixture();
+    const repoFileManager = new RepositoryFileManager(config, repoManager);
+    const orchestrator = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager, undefined, undefined, repoFileManager);
+
+    repoManager.setInfoSyncSettings(repoId, { Enabled: true });
+    repoFileManager.add(repoId, fileInput({ ListInAgents: false }));
+
+    fs.mkdirSync(wsFolder(config, projectId, STABLE_WORKSPACE_ID), { recursive: true });
+    orchestrator.regenerateWorkspace(projectId, STABLE_WORKSPACE_ID);
+
+    const agents = fs.readFileSync(path.join(wsFolder(config, projectId, STABLE_WORKSPACE_ID), 'AGENTS.md'), 'utf8');
+    assert.doesNotMatch(agents, /Repository Files/);
+});
+
+test('regenerateWorkspace: a ListInAgents file of a repository with sync not enabled is omitted', () => {
+    const { config, repoManager, projectManager, projectId, repoId } = makeFixture();
+    const repoFileManager = new RepositoryFileManager(config, repoManager);
+    const orchestrator = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager, undefined, undefined, repoFileManager);
+
+    // InfoSync left disabled (never set).
+    repoFileManager.add(repoId, fileInput());
+
+    fs.mkdirSync(wsFolder(config, projectId, STABLE_WORKSPACE_ID), { recursive: true });
+    orchestrator.regenerateWorkspace(projectId, STABLE_WORKSPACE_ID);
+
+    const agents = fs.readFileSync(path.join(wsFolder(config, projectId, STABLE_WORKSPACE_ID), 'AGENTS.md'), 'utf8');
+    assert.doesNotMatch(agents, /Repository Files/);
+});
+
+test('regenerateWorkspace: rows follow project.Repositories order across repositories, and no filesystem check is involved', () => {
+    const { config, repoManager, projectManager, projectId, repoId } = makeFixture();
+    repoManager.add({ url: 'https://example.com/org/second-repo.git', id: 'second-repo', name: 'Second Repo' });
+    projectManager.addRepository(projectId, 'second-repo');
+
+    const repoFileManager = new RepositoryFileManager(config, repoManager);
+    const orchestrator = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager, undefined, undefined, repoFileManager);
+
+    repoManager.setInfoSyncSettings(repoId, { Enabled: true });
+    repoManager.setInfoSyncSettings('second-repo', { Enabled: true });
+    repoFileManager.add(repoId, fileInput({ FileName: 'a.sh' }));
+    repoFileManager.add('second-repo', fileInput({ FileName: 'b.sh' }));
+
+    // Deliberately never create `.workspace/files/` on disk for either
+    // repository — the listing must still be built, proving it is sourced
+    // entirely from Paralizer's own data with no filesystem check.
+    fs.mkdirSync(wsFolder(config, projectId, STABLE_WORKSPACE_ID), { recursive: true });
+    orchestrator.regenerateWorkspace(projectId, STABLE_WORKSPACE_ID);
+
+    const agents = fs.readFileSync(path.join(wsFolder(config, projectId, STABLE_WORKSPACE_ID), 'AGENTS.md'), 'utf8');
+    const firstIndex = agents.indexOf(`${repoId}/.workspace/files/a.sh`);
+    const secondIndex = agents.indexOf('second-repo/.workspace/files/b.sh');
+    assert.ok(firstIndex !== -1 && secondIndex !== -1 && firstIndex < secondIndex, 'rows must follow project.Repositories order');
+});
+
+test('regenerateWorkspace: omits the Repository Files section entirely when no RepositoryFileManager is injected', () => {
+    const { config, repoManager, projectManager, projectId, repoId } = makeFixture();
+    repoManager.setInfoSyncSettings(repoId, { Enabled: true });
+    const orchestrator = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+
+    fs.mkdirSync(wsFolder(config, projectId, STABLE_WORKSPACE_ID), { recursive: true });
+    orchestrator.regenerateWorkspace(projectId, STABLE_WORKSPACE_ID);
+
+    const agents = fs.readFileSync(path.join(wsFolder(config, projectId, STABLE_WORKSPACE_ID), 'AGENTS.md'), 'utf8');
+    assert.doesNotMatch(agents, /Repository Files/);
+    assert.doesNotMatch(agents, /paralizer repo-files/);
 });

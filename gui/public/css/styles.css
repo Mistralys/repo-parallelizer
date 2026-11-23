@@ -2367,3 +2367,57 @@ input.notes-display-input {
 .info-commit-pending-files li + li {
     border-top: 1px solid var(--color-border-light);
 }
+
+/* --------------------------------------------------------------------------
+   Repository Files Section (views/repository-files-section.js) — M2
+   -------------------------------------------------------------------------- */
+
+.repository-files-section {
+    margin-bottom: 32px;
+}
+
+.repository-files-intro {
+    max-width: 75ch;
+    margin-bottom: 16px;
+}
+
+.repository-files-body > * + * {
+    margin-top: 16px;
+}
+
+.repository-files-enable-hint {
+    margin: 0;
+}
+
+.repository-files-empty {
+    margin: 0;
+    font-size: var(--font-size-sm);
+}
+
+/* --------------------------------------------------------------------------
+   Import Modal — Files table (components/repository-info-import-modal.js) — M2
+   -------------------------------------------------------------------------- */
+
+.info-import-files-heading {
+    margin: 24px 0 12px;
+    font-size: var(--font-size-base);
+}
+
+/* Each file row reuses .info-import-field's fieldset/legend/choice layout;
+   the extra kind/changes/problem lines stack below the legend like a short
+   summary, not a separate grid, since there is only ever one of each. */
+.info-import-file__kind {
+    font-size: var(--font-size-sm);
+    color: var(--color-text-secondary);
+}
+
+.info-import-file__changes {
+    font-size: var(--font-size-xs);
+    color: var(--color-text-secondary);
+}
+
+.info-import-file__problem {
+    margin: 4px 0 0;
+    font-size: var(--font-size-sm);
+    color: var(--badge-error);
+}

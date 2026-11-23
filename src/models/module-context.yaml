@@ -27,8 +27,9 @@ documents:
     outputPath: 'modules/models/architecture-core.md'
     sources:
       - type: file
-        description: 'Data types and manager classes for all three model domains'
+        description: 'Data types and manager classes for all three model domains, plus shared scope-neutral file-definition rules'
         sourcePaths:
+          - ./
           - ./project
           - ./repository
           - ./workspace
