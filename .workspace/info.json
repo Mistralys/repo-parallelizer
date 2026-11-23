@@ -3,7 +3,7 @@
     "Id": "paralizer",
     "Name": "Repo Parallelizer",
     "Url": "https://github.com/Mistralys/repo-parallelizer.git",
-    "Description": "Library used to programmatically switch between Composer PROD and DEV dependencies to facilitate local multi-repo development by setting up symlinks in DEV mode.",
+    "Description": "Local web app used to set up and manage multi-repository workspaces for different purposes (e.g. STABLE & DEV). Generates agent-friendly workspace indexes and guidance.",
     "Settings": {},
     "Files": []
 }
