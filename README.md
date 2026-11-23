@@ -12,14 +12,16 @@ Set up a project once, then spin up as many parallel workspaces as you need — 
 
 - **Project-based repo grouping** — register repositories once, then combine them into projects.
 - **Parallel workspaces** — create multiple independent workspaces per project, each with its own branch assignments and cloned copies.
-- **One-click branch switching** — switch branches across all repos in a workspace in a single operation, with conflict detection.
-- **VS Code integration** — auto-generated `.code-workspace` files let you open an entire workspace in VS Code instantly.
-- **Auto-generated workspace index** — each workspace also gets a generated `README.md`/`AGENTS.md`/`CLAUDE.md` listing its repositories, links, and agent directives; hand-added prose outside the generated block is preserved on regeneration.
-- **Web GUI** — a built-in browser UI for managing repositories, projects, workspaces, and branches — no terminal required after setup. The project dashboard supports real-time filtering by name/ID/description, repository filtering, and sort by alphabetical or last-activity order.
-- **Live git status** — automatic polling shows current branches, uncommitted changes, and unfetched commits at a glance.
-- **Workspace health checks** — detect and fix configuration drift (missing repos, stale workspace files, credential errors).
-- **Repository workspace info sync** — opt in per repository to share its name and description through version control: Paralizer keeps a small `.workspace/info.json` file up to date in a managed clone, offers an import when the repository and Paralizer's data diverge, and commits/pushes the change for you.
-- **Interactive CLI** — a keyboard-driven terminal menu for quick access to setup, server launch, and documentation generation.
+- **Coordinated branch switching** — switch branches across the repos in a workspace in a single operation, with conflict detection.
+- **VS Code integration** — generated `.code-workspace` files let you open a workspace in VS Code.
+- **Workspace index files** — each workspace gets a generated `README.md`, `AGENTS.md`, and `CLAUDE.md` listing its repositories, links, and agent directives; hand-added content outside the generated block is preserved on regeneration.
+- **Project custom files** — define files (scripts, notes, config) once on a project and have them written into its workspaces and kept in sync when you edit or delete them.
+- **Descriptions** — give repositories and workspaces a short description, shown throughout the GUI.
+- **Web GUI** — a built-in browser UI for managing repositories, projects, workspaces, and branches. The project dashboard can be filtered by name, ID, description, or repository, and sorted alphabetically or by last activity.
+- **Git status overview** — periodic polling shows current branches, uncommitted changes, and unfetched commits.
+- **Workspace health checks** — detect and fix configuration drift such as missing repos, stale workspace files, missing or hand-edited index files, and credential errors.
+- **Repository info sync** — opt in per repository to share its name, description, and custom files through version control via a managed clone, with import and Commit & Push support in the GUI.
+- **Command-line access** — an interactive terminal menu, plus commands for managing custom files without the GUI.
 - **Private repo support** — per-host credential management for cloning private repositories.
 
 ## How Does This Compare to Git Worktrees?
@@ -29,9 +31,9 @@ Git worktrees let you check out multiple branches of a **single** repository sid
 | | Git Worktrees | Repository Parallelizer |
 |---|---|---|
 | **Scope** | One repository, multiple branches | Multiple repositories, multiple branches |
-| **Branch switching** | Per-repo only | Coordinated across all repos at once |
-| **VS Code workspace** | Manual setup | Auto-generated `.code-workspace` files |
-| **Status overview** | Per-repo (`git status`) | Aggregated across all repos in a workspace |
+| **Branch switching** | Per-repo only | Coordinated across the repos in a workspace |
+| **VS Code workspace** | Manual setup | Generated `.code-workspace` files |
+| **Status overview** | Per-repo (`git status`) | Aggregated across the repos in a workspace |
 
 If your project is a single repo, worktrees are the simpler choice. If you're juggling a frontend, backend, shared library, and infrastructure repo that all need to be on the same feature branch — that's where this tool comes in.
 
@@ -60,15 +62,7 @@ paralizer serve
 
 The setup wizard walks you through creating a `config.json` with your projects folder and storage location. Once complete, open `http://localhost:4200` in your browser to start managing your repositories.
 
-### Alternative: run without installing globally
-
-```bash
-# Unix / macOS
-./menu.sh
-
-# Windows
-menu.cmd
-```
+To run without installing globally, use `./menu.sh` (Unix / macOS) or `menu.cmd` (Windows).
 
 ### CLI commands
 
@@ -78,60 +72,27 @@ menu.cmd
 | `paralizer serve` | Start the GUI server directly |
 | `paralizer setup` | Run the setup wizard |
 | `paralizer docs` | Generate project documentation |
-| `paralizer custom-files <subcommand>` | Manage a project's custom files (list, show, add, update, delete) without the GUI |
-| `paralizer repo-files <subcommand>` | Manage a repository's own files (list, show, add, update, delete) synced via git — publish with Commit & Push in the GUI |
-| `paralizer help` | Show all commands, including the full custom-files/repo-files documentation |
+| `paralizer custom-files <subcommand>` | Manage a project's custom files (list, show, add, update, delete) |
+| `paralizer repo-files <subcommand>` | Manage a repository's own files, synced via git — publish with Commit & Push in the GUI |
+| `paralizer help` | Show all commands and their options |
 
-The generated `AGENTS.md` of every workspace tells agents where Paralizer is installed and to run `paralizer help`, so agents can update a project's custom files themselves, for example:
+Each workspace's generated `AGENTS.md` points to the Paralizer install and to `paralizer help`, so scripts and agents can manage custom files from the command line:
 
-```
+```bash
 paralizer custom-files update my-project scripts/deploy.sh --content-file ./deploy.sh
 ```
-
-`paralizer repo-files` follows the same subcommands and flags (identified by `--repo <repo-id>` instead of a leading project ID), but operates on a repository's own files (requires info sync to be enabled for that repository) and never commits or pushes on its own — run Commit & Push from the Paralizer GUI to publish the change:
-
-```
-paralizer repo-files update --repo my-repo scripts/deploy.sh --content-file ./deploy.sh
-```
-
-## Start with Windows
-
-1. Press `Win + R`, type the following command to open your user Startup folder, and press **Enter**:
-   ```
-   shell:startup
-   ```
-   *(This opens the folder: `C:\Users\<YourUsername>\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup`)*
-
-2. In that folder, right-click an empty area and select **New** > **Text Document**.
-3. Name it `start-repo-parallelizer.vbs` (ensure you delete the `.txt` extension!).
-4. Right-click the new file, select **Edit** (or open it with Notepad/VS Code), and paste the following code into it:
-
-   ```vbscript
-   Set WshShell = CreateObject("WScript.Shell")
-   ' 0 means the window will be hidden, so you don't have a lingering terminal
-   WshShell.Run "cmd /c paralizer serve", 0
-   Set WshShell = Nothing
-   ```
-
-   > **Requires `npm link`** — run `npm link` once in the project folder so `paralizer` is available globally.
-
-5. Save and close the file.
-
-### How it works:
-Every time you log into Windows, this script will seamlessly launch the server in the background without leaving an unused command prompt window taking up space on your taskbar. The background Node.js process will execute exactly as it normally does. 
-
-*(If you ever want to stop it from starting automatically, just delete the `start-repo-parallelizer.vbs` file from that Startup folder.)*
 
 ## Learn More
 
 | Resource | Description |
 |----------|-------------|
+| [Start with Windows](docs/start-with-windows.md) | Launch the GUI server at Windows login |
 | [Project Manifest](docs/agents/project-manifest/README.md) | Architecture overview and document index |
-| [REST API](docs/agents/project-manifest/rest-api.md) | All HTTP endpoints with methods, paths, and response shapes |
+| [REST API](docs/agents/project-manifest/rest-api.md) | HTTP endpoints with methods, paths, and response shapes |
 | [GUI Frontend](docs/agents/project-manifest/gui-frontend.md) | SPA architecture, routes, and components |
 | [Tech Stack](docs/agents/project-manifest/tech-stack.md) | Runtime, dependencies, and architectural patterns |
 | [API Surface](docs/agents/project-manifest/api-surface.md) | Exported types, classes, and function signatures |
-| [Configuration](docs/agents/project-manifest/constraints.md) | Conventions, validation rules, and config schema |
+| [Constraints](docs/agents/project-manifest/constraints.md) | Conventions, validation rules, and config schema |
 | [Contributing](CONTRIBUTING.md) | Development setup, build commands, and test instructions |
 | [Changelog](CHANGELOG.md) | Release history |
 
