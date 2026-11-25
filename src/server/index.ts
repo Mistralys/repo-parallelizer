@@ -113,6 +113,7 @@ export function startServer(config: ServerConfig): Promise<void> {
         repoManager,
         repositoryInfoSyncOrchestrator,
         errorLogManager,
+        repositoryFileManager,
     );
     const workspaceOrchestrator = new WorkspaceOrchestrator(
         config.appConfig,

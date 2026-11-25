@@ -35,6 +35,17 @@ import type { CustomFileInput } from '../../models/project/custom-file.js';
  * | POST   | /api/projects/:id/custom-files            | 201     | 404/400 |
  * | PUT    | /api/projects/:id/custom-files/:fileId    | 200     | 404/400 |
  * | DELETE | /api/projects/:id/custom-files/:fileId    | 204     | 404     |
+ * | GET    | /api/projects/:id/directives              | 200     | 404     |
+ * | POST   | /api/projects/:id/directives              | 201     | 404/400 |
+ * | PUT    | /api/projects/:id/directives/:directiveId | 200     | 404/400 |
+ * | DELETE | /api/projects/:id/directives/:directiveId | 204     | 404     |
+ * | PUT    | /api/projects/:id/repositories/:repoId/role | 200   | 404/400 |
+ *
+ * The directive and role mutations (request bodies `{ text }` and `{ role }`)
+ * are followed by a best-effort `refreshProjectIndexes()` that rewrites the
+ * index files of every workspace of the project; a failure is logged as a
+ * warning and does not change the response. Workspace-scoped directives live
+ * in `routes/workspaces.ts`.
  *
  * The four lifecycle handlers that mutate a project's metadata or
  * workspace/repository set — `PUT /:id`, `DELETE /:id`, `PUT /:id/rename`,
@@ -500,6 +511,144 @@ export function registerProjectRoutes(
             res.end('');
         } catch (err) {
             sendError(res, 404, err instanceof Error ? err.message : 'Custom file not found.');
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // Directives — /api/projects/:id/directives[/:directiveId]
+    // Repository role — PUT /api/projects/:id/repositories/:repoId/role
+    //
+    //   Request bodies are `{ text: string }` (directives) and
+    //   `{ role: string }` (role; empty clears it). Every mutation refreshes
+    //   the index files of all workspaces, best-effort.
+    // ------------------------------------------------------------------
+
+    /**
+     * Rewrites the index files of every workspace of the project. Never
+     * throws: a thrown error or a per-workspace failure is logged as a warning.
+     */
+    function refreshIndexesBestEffort(operation: string, projectId: string): void {
+        try {
+            const result = workspaceArtifacts.refreshProjectIndexes(projectId);
+            for (const failure of result.failed) {
+                logArtifactWarning(operation, projectId, failure.workspaceId, new Error(failure.error));
+            }
+        } catch (err) {
+            logArtifactWarning(operation, projectId, undefined, err);
+        }
+    }
+
+    /** Reads a JSON object body with one required string field; sends a 400 and returns `undefined` otherwise. */
+    async function readStringField(
+        req: IncomingMessage,
+        res: ServerResponse,
+        field: string,
+    ): Promise<string | undefined> {
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return undefined;
+        }
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return undefined;
+        }
+        const value = (body as Record<string, unknown>)[field];
+        if (typeof value !== 'string') {
+            sendError(res, 400, `Missing required field: ${field} (string).`);
+            return undefined;
+        }
+        return value;
+    }
+
+    router.get('/api/projects/:id/directives', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        try {
+            sendJson(res, 200, projectManager.listDirectives(params['id'], { kind: 'project' }));
+        } catch (err) {
+            sendError(res, err instanceof NotFoundError ? 404 : 400, err instanceof Error ? err.message : 'Project not found.');
+        }
+    });
+
+    router.post('/api/projects/:id/directives', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const projectId = params['id'];
+        if (resolveProject(res, projectId) === undefined) return;
+
+        const text = await readStringField(req, res, 'text');
+        if (text === undefined) return;
+
+        try {
+            const created = projectManager.addDirective(projectId, { kind: 'project' }, { Text: text });
+            refreshIndexesBestEffort('add-directive', projectId);
+            sendJson(res, 201, created);
+        } catch (err) {
+            sendError(res, err instanceof NotFoundError ? 404 : 400, err instanceof Error ? err.message : 'Could not add directive.');
+        }
+    });
+
+    router.put('/api/projects/:id/directives/:directiveId', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const projectId = params['id'];
+        if (resolveProject(res, projectId) === undefined) return;
+
+        const text = await readStringField(req, res, 'text');
+        if (text === undefined) return;
+
+        try {
+            const updated = projectManager.updateDirective(projectId, { kind: 'project' }, params['directiveId'], { Text: text });
+            refreshIndexesBestEffort('update-directive', projectId);
+            sendJson(res, 200, updated);
+        } catch (err) {
+            sendError(res, err instanceof NotFoundError ? 404 : 400, err instanceof Error ? err.message : 'Could not update directive.');
+        }
+    });
+
+    router.delete('/api/projects/:id/directives/:directiveId', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        const projectId = params['id'];
+        try {
+            projectManager.removeDirective(projectId, { kind: 'project' }, params['directiveId']);
+        } catch (err) {
+            sendError(res, err instanceof NotFoundError ? 404 : 400, err instanceof Error ? err.message : 'Directive not found.');
+            return;
+        }
+        refreshIndexesBestEffort('delete-directive', projectId);
+        res.writeHead(204, {});
+        res.end('');
+    });
+
+    router.put('/api/projects/:id/repositories/:repoId/role', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const projectId = params['id'];
+        if (resolveProject(res, projectId) === undefined) return;
+
+        const role = await readStringField(req, res, 'role');
+        if (role === undefined) return;
+
+        try {
+            const stored = projectManager.setRepositoryRole(projectId, params['repoId'], role);
+            refreshIndexesBestEffort('set-repository-role', projectId);
+            sendJson(res, 200, { role: stored });
+        } catch (err) {
+            sendError(res, err instanceof NotFoundError ? 404 : 400, err instanceof Error ? err.message : 'Could not set repository role.');
         }
     });
 

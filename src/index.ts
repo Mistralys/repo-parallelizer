@@ -11,7 +11,10 @@
  *   paralizer setup     → Run the setup wizard (no config.json required)
  *   paralizer docs      → Generate CTX documentation (no config.json required)
  *   paralizer custom-files <subcommand> → Manage a project's custom files (non-interactive)
+ *   paralizer directives <subcommand> → Manage agent directives (non-interactive)
  *   paralizer repo-files <subcommand> → Manage a repository's files (non-interactive)
+ *   paralizer repo-roles <subcommand> → Manage per-project repository roles (non-interactive)
+ *   paralizer regenerate [<project-id>] → Re-render generated workspace files (non-interactive)
  *   paralizer help      → Print the full command documentation and exit with code 0
  *   paralizer <other>   → Print usage help and exit with code 1
  *
@@ -31,10 +34,25 @@ import {
     EXIT_ERROR,
 } from './cli/custom-files.js';
 import {
+    DIRECTIVES_HELP,
+    createDefaultDirectivesDeps,
+    runDirectivesCommand,
+} from './cli/directives.js';
+import {
     REPO_FILES_HELP,
     createDefaultRepoFilesDeps,
     runRepoFilesCommand,
 } from './cli/repo-files.js';
+import {
+    REPO_ROLES_HELP,
+    createDefaultRepoRolesDeps,
+    runRepoRolesCommand,
+} from './cli/repo-roles.js';
+import {
+    REGENERATE_HELP,
+    createDefaultRegenerateDeps,
+    runRegenerateCommand,
+} from './cli/regenerate.js';
 import { getToolRoot } from './utils/paths.js';
 
 // ---------------------------------------------------------------------------
@@ -65,8 +83,20 @@ const command = process.argv[2] ?? 'menu';
             await runCustomFilesCliCommand();
             break;
 
+        case 'directives':
+            await runDirectivesCliCommand();
+            break;
+
         case 'repo-files':
             await runRepoFilesCliCommand();
+            break;
+
+        case 'repo-roles':
+            await runRepoRolesCliCommand();
+            break;
+
+        case 'regenerate':
+            await runRegenerateCliCommand();
             break;
 
         case 'help':
@@ -166,6 +196,34 @@ async function runCustomFilesCliCommand(): Promise<void> {
 }
 
 /**
+ * Runs the 'directives' command group. The help subcommand needs no config;
+ * everything else loads `config.json` first. Sets `process.exitCode` rather
+ * than calling `process.exit()` so piped output is flushed.
+ */
+async function runDirectivesCliCommand(): Promise<void> {
+    const args = process.argv.slice(3);
+    const wantsHelp = args.length === 0 || ['help', '--help', '-h'].includes(args[0]);
+
+    if (wantsHelp) {
+        console.log(DIRECTIVES_HELP);
+        process.exitCode = args.length === 0 ? EXIT_ERROR : 0;
+        return;
+    }
+
+    let deps;
+    try {
+        deps = createDefaultDirectivesDeps();
+    } catch (err) {
+        process.stderr.write(`repo-parallelizer error: ${(err as Error).message}\n`);
+        process.stderr.write(`Run 'paralizer setup' to create a config file.\n`);
+        process.exitCode = EXIT_ERROR;
+        return;
+    }
+
+    process.exitCode = await runDirectivesCommand(args, deps);
+}
+
+/**
  * Runs the 'repo-files' command group. The help subcommand needs no config;
  * everything else loads `config.json` first. Sets `process.exitCode` rather
  * than calling `process.exit()` so piped output is flushed.
@@ -195,6 +253,63 @@ async function runRepoFilesCliCommand(): Promise<void> {
 }
 
 /**
+ * Runs the 'repo-roles' command group. The help subcommand needs no config;
+ * everything else loads `config.json` first. Sets `process.exitCode` rather
+ * than calling `process.exit()` so piped output is flushed.
+ */
+async function runRepoRolesCliCommand(): Promise<void> {
+    const args = process.argv.slice(3);
+    const wantsHelp = args.length === 0 || ['help', '--help', '-h'].includes(args[0]);
+
+    if (wantsHelp) {
+        // Help never touches the data layer, so it works without a config file.
+        console.log(REPO_ROLES_HELP);
+        process.exitCode = args.length === 0 ? EXIT_ERROR : 0;
+        return;
+    }
+
+    let deps;
+    try {
+        deps = createDefaultRepoRolesDeps();
+    } catch (err) {
+        process.stderr.write(`repo-parallelizer error: ${(err as Error).message}\n`);
+        process.stderr.write(`Run 'paralizer setup' to create a config file.\n`);
+        process.exitCode = EXIT_ERROR;
+        return;
+    }
+
+    process.exitCode = await runRepoRolesCommand(args, deps);
+}
+
+/**
+ * Runs the 'regenerate' command. Help needs no config; everything else loads
+ * `config.json` first. Sets `process.exitCode` rather than calling
+ * `process.exit()` so piped output is flushed.
+ */
+async function runRegenerateCliCommand(): Promise<void> {
+    const args = process.argv.slice(3);
+
+    if (['help', '--help', '-h'].includes(args[0])) {
+        // Help never touches the data layer, so it works without a config file.
+        console.log(REGENERATE_HELP);
+        process.exitCode = 0;
+        return;
+    }
+
+    let deps;
+    try {
+        deps = createDefaultRegenerateDeps();
+    } catch (err) {
+        process.stderr.write(`repo-parallelizer error: ${(err as Error).message}\n`);
+        process.stderr.write(`Run 'paralizer setup' to create a config file.\n`);
+        process.exitCode = EXIT_ERROR;
+        return;
+    }
+
+    process.exitCode = await runRegenerateCommand(args, deps);
+}
+
+/**
  * Prints the full command documentation (`paralizer help`) to stdout.
  * This is the single place agents are pointed to, so it includes the
  * documentation of every command group.
@@ -202,7 +317,10 @@ async function runRepoFilesCliCommand(): Promise<void> {
 function printFullHelp(): void {
     printUsage();
     console.log(`\n${CUSTOM_FILES_HELP}`);
+    console.log(`\n${DIRECTIVES_HELP}`);
     console.log(`\n${REPO_FILES_HELP}`);
+    console.log(`\n${REPO_ROLES_HELP}`);
+    console.log(`\n${REGENERATE_HELP}`);
 }
 
 /**
@@ -217,7 +335,10 @@ Commands:
   setup   Run the setup wizard
   docs    Generate CTX documentation
   custom-files  Manage a project's custom files (list, show, add, update, delete)
+  directives    Manage agent directives (list, add, update, delete)
   repo-files    Manage a repository's files (list, show, add, update, delete)
+  repo-roles    Manage per-project repository roles (list, set, clear)
+  regenerate    Re-render the generated workspace files of all or one project/workspace
   help    Show this help including the full command documentation
 
 Options:

@@ -2421,3 +2421,105 @@ input.notes-display-input {
     font-size: var(--font-size-sm);
     color: var(--badge-error);
 }
+
+/* --------------------------------------------------------------------------
+   Directives — project tab and shared list editor
+   (views/project-directives.js, components/directive-list-editor.js)
+   -------------------------------------------------------------------------- */
+
+.directives-intro {
+    max-width: 75ch;
+    margin-bottom: 16px;
+}
+
+.directive-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.directive-item {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.directive-item[hidden] {
+    display: none;
+}
+
+.directive-text {
+    margin: 0;
+    max-width: 85ch;
+    overflow-wrap: anywhere;
+}
+
+.directive-actions {
+    display: flex;
+    gap: 6px;
+    white-space: nowrap;
+}
+
+.directive-toolbar {
+    margin-top: 16px;
+}
+
+.directive-form {
+    margin: 12px 0;
+    max-width: 85ch;
+}
+
+.directive-form .form-textarea {
+    width: 100%;
+    margin-top: 4px;
+}
+
+.directive-counter {
+    display: block;
+    margin-top: 4px;
+    font-size: var(--font-size-xs);
+}
+
+.directive-counter--over {
+    color: var(--color-danger);
+}
+
+/* --------------------------------------------------------------------------
+   Repository role cell — inline click-to-edit (views/project-repository-roles.js)
+   -------------------------------------------------------------------------- */
+
+.repo-role-cell {
+    min-width: 200px;
+}
+
+.repo-role-display {
+    display: block;
+    width: 100%;
+    padding: 2px 4px;
+    border: 1px dashed transparent;
+    border-radius: var(--radius-sm, 4px);
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: text;
+}
+
+.repo-role-display:hover,
+.repo-role-display:focus-visible {
+    border-color: var(--color-border);
+}
+
+.repo-role-display--empty {
+    color: var(--color-text-secondary);
+    font-style: italic;
+}
+
+.repo-role-input {
+    width: 100%;
+    padding: 2px 4px;
+    font: inherit;
+}

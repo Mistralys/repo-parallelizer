@@ -521,6 +521,22 @@ const projects = {
     },
 
     /**
+     * Set or clear the "Role / relations" text of a repository in a project.
+     * Empty text clears the role.
+     * @param {string} projectId
+     * @param {string} repoId
+     * @param {string} role
+     * @returns {Promise<{ role: string }>} The stored (normalised) role.
+     */
+    setRepositoryRole(projectId, repoId, role) {
+        return request(
+            'PUT',
+            `/api/projects/${encodeURIComponent(projectId)}/repositories/${encodeURIComponent(repoId)}/role`,
+            { role },
+        );
+    },
+
+    /**
      * Custom-file endpoints — files copied into every workspace of a project.
      * Request bodies are camelCase; responses use the stored PascalCase shape.
      * @namespace api.projects.customFiles
@@ -566,6 +582,59 @@ const projects = {
             return request(
                 'DELETE',
                 `/api/projects/${encodeURIComponent(projectId)}/custom-files/${encodeURIComponent(fileId)}`,
+            );
+        },
+    },
+
+    /**
+     * Project-wide agent directives — owner-defined rules rendered into the
+     * generated AGENTS.md of every workspace of the project. Request bodies
+     * are `{ text }`; responses use the stored PascalCase shape
+     * (`{ Id, Text }`). The server re-renders the generated files after
+     * every mutation.
+     * @namespace api.projects.directives
+     */
+    directives: {
+        /**
+         * @param {string} projectId
+         * @returns {Promise<Array<{ Id: string, Text: string }>>}
+         */
+        list(projectId) {
+            return request('GET', `/api/projects/${encodeURIComponent(projectId)}/directives`);
+        },
+
+        /**
+         * @param {string} projectId
+         * @param {string} text - Directive text (single paragraph).
+         * @returns {Promise<{ Id: string, Text: string }>} The created directive (HTTP 201).
+         */
+        create(projectId, text) {
+            return request('POST', `/api/projects/${encodeURIComponent(projectId)}/directives`, { text });
+        },
+
+        /**
+         * @param {string} projectId
+         * @param {string} directiveId
+         * @param {string} text - The replacement text.
+         * @returns {Promise<{ Id: string, Text: string }>} The updated directive.
+         */
+        update(projectId, directiveId, text) {
+            return request(
+                'PUT',
+                `/api/projects/${encodeURIComponent(projectId)}/directives/${encodeURIComponent(directiveId)}`,
+                { text },
+            );
+        },
+
+        /**
+         * @param {string} projectId
+         * @param {string} directiveId
+         * @returns {Promise<void>}
+         */
+        remove(projectId, directiveId) {
+            return request(
+                'DELETE',
+                `/api/projects/${encodeURIComponent(projectId)}/directives/${encodeURIComponent(directiveId)}`,
             );
         },
     },
@@ -768,7 +837,72 @@ const workspaces = {
             );
         },
     },
+
+    /**
+     * Workspace-scoped agent directives — rendered into the generated
+     * AGENTS.md of that one workspace only. Same request/response shapes as
+     * {@link api.projects.directives}.
+     * @namespace api.workspaces.directives
+     */
+    directives: {
+        /**
+         * @param {string} projectId
+         * @param {string} wid - Workspace ID.
+         * @returns {Promise<Array<{ Id: string, Text: string }>>}
+         */
+        list(projectId, wid) {
+            return request('GET', workspaceDirectivesUrl(projectId, wid));
+        },
+
+        /**
+         * @param {string} projectId
+         * @param {string} wid
+         * @param {string} text
+         * @returns {Promise<{ Id: string, Text: string }>} The created directive (HTTP 201).
+         */
+        create(projectId, wid, text) {
+            return request('POST', workspaceDirectivesUrl(projectId, wid), { text });
+        },
+
+        /**
+         * @param {string} projectId
+         * @param {string} wid
+         * @param {string} directiveId
+         * @param {string} text
+         * @returns {Promise<{ Id: string, Text: string }>} The updated directive.
+         */
+        update(projectId, wid, directiveId, text) {
+            return request(
+                'PUT',
+                `${workspaceDirectivesUrl(projectId, wid)}/${encodeURIComponent(directiveId)}`,
+                { text },
+            );
+        },
+
+        /**
+         * @param {string} projectId
+         * @param {string} wid
+         * @param {string} directiveId
+         * @returns {Promise<void>}
+         */
+        remove(projectId, wid, directiveId) {
+            return request(
+                'DELETE',
+                `${workspaceDirectivesUrl(projectId, wid)}/${encodeURIComponent(directiveId)}`,
+            );
+        },
+    },
 };
+
+/**
+ * Base URL of a workspace's directive collection.
+ * @param {string} projectId
+ * @param {string} wid
+ * @returns {string}
+ */
+function workspaceDirectivesUrl(projectId, wid) {
+    return `/api/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(wid)}/directives`;
+}
 
 /**
  * Branch endpoints.

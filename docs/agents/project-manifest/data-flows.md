@@ -276,6 +276,29 @@ User → POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file
 
 ---
 
+## 13a. Agent Directives (data layer)
+
+```
+ProjectManager.add/update/removeDirective(projectId, scope, ...)
+  └→ resolveDirectiveScope()      # scope required; project -> ProjectData.Directives, workspace -> ProjectWorkspace.Directives (own-property lookup)
+  └→ validateDirectiveInput()     # normaliseSingleParagraph + duplicate + count limit
+  └→ persist in projects/{id}.json (Directives); refresh DateModified (directive, project, and workspace for workspace scope)
+```
+
+Directives are stored inline in the project JSON (no separate store file), so they travel with `renameWorkspace()` and disappear with `removeWorkspace()`. A legacy record without `Directives` lists `[]`. As of WP-012 the generated-file rendering consumes them: `buildIndexContext()` passes the texts (stored order) as `projectDirectives`/`workspaceDirectives`, and `renderAgentDirectives()` appends them (via `sanitiseListText()`) to the single `## Agent Directives` list of `AGENTS.md`.
+
+## 13a-2. Repository Roles (data layer)
+
+```
+ProjectManager.setRepositoryRole(projectId, repositoryId, text)
+  └→ repository must be listed in ProjectData.Repositories (else NotFoundError)
+  └→ validateRepositoryRole()     # '' = clear; else normaliseSingleParagraph, max 500
+  └→ persist in projects/{id}.json (RepositoryRoles); empty map is deleted; refresh DateModified
+ProjectManager.removeRepository() └→ drops the repository's RepositoryRoles entry
+```
+
+Roles are per-project and optional, stored inline in the project JSON (the global `Repository` and the `.workspace/info.json` sync payload are untouched). A legacy record without `RepositoryRoles` reads as `{}`. Data layer only as of WP-011: nothing renders the roles yet.
+
 ## 13b. Custom Files Sync
 
 ```
@@ -296,7 +319,11 @@ The folder-must-exist rule applies: an uninitialised workspace receives nothing 
 
 > **Repository info sync shares the same choke-point.** Every `regenerateWorkspace()`/`regenerateProject()`/`regenerateForRepository()` call above also runs `RepositoryInfoSyncOrchestrator.syncRepository()` for each resolved repository (`regenerateForRepository()` runs it once up front, independent of project membership) — so a custom-files add/update/delete, a project/workspace/repository edit, or a manual regenerate all keep `.workspace/info.json` current as a side effect, with no separate trigger wiring. See §16.
 
-> **Repository Files listing in `AGENTS.md` (Milestone 2):** `writeWorkspaceIndexFiles()` now also renders a "Repository Files" table into `AGENTS.md` from `WorkspaceIndexContext.repositoryFiles` — `ListInAgents` files from sync-enabled repositories only, built with no filesystem check (so it stays accurate regardless of whether a teammate has pulled the file yet). `WorkspaceArtifactsOrchestrator` takes an optional, last constructor parameter (`repositoryFileManager?: RepositoryFileManager`) to populate this; as of WP-011, `src/cli/custom-files.ts` and the new `src/cli/repo-files.ts` both pass one through their `createDefault*Deps()` factories, so the section renders for both CLI paths' regeneration calls. `src/server/index.ts` still does not pass one, so the section does not yet render for GUI-triggered regeneration. See `api-surface.md`'s `workspace-index.ts`/`WorkspaceArtifactsOrchestrator` entries.
+> **Sibling workspaces listing in `AGENTS.md`:** `WorkspaceArtifactsOrchestrator.buildIndexContext()` fills `WorkspaceIndexContext.siblingWorkspaces` via `buildSiblingWorkspaceRows()`, deriving one row per entry of `project.Workspaces` (STABLE first, then alphabetical; `../<id>` folder, `path.join(projectsFolder, projectId, id)` absolute path, GUI URL) with no filesystem access. During a rename the new ID is listed and the old ID is excluded (recognised by its metadata matching the `workspaceMeta` override). `renderWorkspaceAgents()` renders the `## Workspaces` table into `AGENTS.md` only — never `README.md` — after the index body and before `## Custom Files`, and omits it when fewer than two workspaces exist. See `api-surface.md`.
+
+> **Sibling refresh on workspace create, rename and delete:** because every workspace's `AGENTS.md` lists all siblings, a lifecycle change makes the other workspaces' tables stale. After the primary mutation (and, for rename/delete, after the existing artefact block) the change calls `WorkspaceArtifactsOrchestrator.refreshProjectIndexes(projectId)` best-effort, which rewrites only the index files of every workspace of the project. There are two trigger sites: (1) the REST handlers `POST /api/projects/:id/workspaces`, `PUT .../workspaces/:wid/rename` and `DELETE .../workspaces/:wid` (the GUI path), via the router-local `refreshSiblingsBestEffort()` helper; delete only refreshes when `workspaceManager.remove` succeeded, so a 404 triggers nothing; and (2) the last step of `WorkspaceOrchestrator.renameWorkspace()` and `deleteWorkspace()`. The REST routes do **not** call those orchestrator methods (they rename/delete the record only and carry their own refresh), so the two sites never double-fire. The refresh runs even when the preceding artefact block threw, and never changes the response or throws out of the orchestrator: a thrown error or a `failed` entry is logged as a `warning` (Source `workspace-index`, Operation `refresh-siblings`). Project rename already regenerates every workspace and needs no extra trigger.
+
+> **Repository Files listing in `AGENTS.md` (Milestone 2):** `writeWorkspaceIndexFiles()` now also renders a "Repository Files" table into `AGENTS.md` from `WorkspaceIndexContext.repositoryFiles` — `ListInAgents` files from sync-enabled repositories only, built with no filesystem check (so it stays accurate regardless of whether a teammate has pulled the file yet). `WorkspaceArtifactsOrchestrator` takes an optional, last constructor parameter (`repositoryFileManager?: RepositoryFileManager`) to populate this; as of WP-011, `src/cli/custom-files.ts` and the new `src/cli/repo-files.ts` both pass one through their `createDefault*Deps()` factories, so the section renders for both CLI paths' regeneration calls. `src/server/index.ts` passes the same `RepositoryFileManager` as the sixth constructor argument, so GUI-triggered and CLI-triggered regeneration produce the same context. See `api-surface.md`'s `workspace-index.ts`/`WorkspaceArtifactsOrchestrator` entries.
 
 ## 14. Credential Success Log Entry and Stale Badge Suppression
 

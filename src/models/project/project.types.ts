@@ -1,5 +1,6 @@
 import type { BaseStore } from '../../storage/storage.types.js';
 import type { CustomFile } from './custom-file.js';
+import type { AgentDirective } from './directive.js';
 
 /**
  * Represents a single workspace within a project.
@@ -17,6 +18,13 @@ export interface ProjectWorkspace {
 
     /** Optional free-text notes about this workspace. */
     Notes?: string;
+
+    /**
+     * Agent directives that apply to this workspace only. Optional; absent
+     * means none. Travels with the workspace on rename. No `SCHEMA_VERSION`
+     * bump was needed.
+     */
+    Directives?: AgentDirective[];
 }
 
 /**
@@ -54,6 +62,20 @@ export interface ProjectData {
      * adding it needed no `SCHEMA_VERSION` bump.
      */
     CustomFiles?: CustomFile[];
+
+    /**
+     * Agent directives that apply to every workspace of this project.
+     * Optional and absent on older projects (treat as `[]`); adding it needed
+     * no `SCHEMA_VERSION` bump.
+     */
+    Directives?: AgentDirective[];
+
+    /**
+     * Optional "Role / relations" text per repository, keyed by repository
+     * ID. Absent on older projects (treat as `{}`); adding it needed no
+     * `SCHEMA_VERSION` bump.
+     */
+    RepositoryRoles?: Record<string, string>;
 
     /**
      * ISO 8601 timestamp of the most recent activity recorded against this

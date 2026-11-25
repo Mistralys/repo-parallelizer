@@ -148,6 +148,68 @@ test('renderWorkspaceAgents: emits the same metadata plus the agent-directives b
     assert.ok(agentsBody.startsWith(readmeBody));
     assert.match(agentsBody, /## Agent Directives/);
     assert.match(agentsBody, /independent git repository/);
+    assert.match(agentsBody, /use read-only git/i);
+    assert.doesNotMatch(agentsBody, /use the Paralizer GUI link above for current git state/);
+});
+
+// ---------------------------------------------------------------------------
+// Phase A directive text and CLI examples (T-03 to T-07)
+// ---------------------------------------------------------------------------
+
+test('directives: no GUI-state bullet; git -C guidance uses first repo folder, placeholder when no repos', () => {
+    const body = renderWorkspaceAgents(makeContext());
+    assert.doesNotMatch(body, /for current git state/);
+    assert.match(body, /`git -C repo-a status -sb`/);
+    assert.match(body, /`git -C repo-a branch --show-current`/);
+
+    const empty = renderWorkspaceAgents(makeContext({ repositories: [] }));
+    assert.match(empty, /`git -C <repo-folder> status -sb`/);
+    assert.match(empty, /`git -C <repo-folder> branch --show-current`/);
+});
+
+test('directives: orientation wording is scoped; reading list follows table order', () => {
+    const body = renderWorkspaceAgents(makeContext());
+    assert.doesNotMatch(body, /This file is orientation only/);
+    assert.match(body, /The workspace and repository overview above is orientation only/);
+    assert.match(body, /nearest `AGENTS\.md` to the file you are changing takes precedence over this overview/);
+    assert.match(body, /directives in this list apply to every repository/);
+    const a = body.indexOf('`repo-a/AGENTS.md`, `repo-a/CLAUDE.md`');
+    const b = body.indexOf('`repo-b/AGENTS.md`, `repo-b/CLAUDE.md`');
+    assert.ok(a !== -1 && b !== -1 && a < b);
+});
+
+test('directives: rendering performs no filesystem access', () => {
+    const a = renderWorkspaceAgents(makeContext({ projectsFolder: '/nonexistent/path/xyz' }));
+    const b = renderWorkspaceAgents(makeContext({ projectsFolder: '/another/nonexistent' }));
+    assert.strictEqual(a, b);
+});
+
+test('directives: .workspace bullet always present; intros carry clarifying sentences; marker bullet names all three files', () => {
+    const plain = renderWorkspaceAgents(makeContext());
+    assert.doesNotMatch(plain, /## Custom Files|## Repository Files/);
+    assert.match(plain, /`<repo-folder>\/\.workspace\/` folders are managed by Paralizer and are not repository source/);
+    assert.match(plain, /`README\.md`, `AGENTS\.md` and `CLAUDE\.md` in this folder are generated/);
+
+    const full = renderWorkspaceAgents(
+        makeContext({
+            customFiles: [{ path: 'a.sh', label: 'A', description: '' }],
+            repositoryFiles: [{ repositoryId: 'repo-a', path: 'x.sh', label: 'X', description: '' }],
+        }),
+    );
+    assert.match(full, /not repository source and live only in this workspace folder/);
+    assert.match(full, /tool-managed, not repository source/);
+});
+
+test('CLI section: custom-files list with project ID; repo-files list only with rows, with first repo ID', () => {
+    const without = renderWorkspaceAgents(makeContext());
+    assert.match(without, /`paralizer custom-files list my-project`/);
+    assert.doesNotMatch(without, /repo-files list/);
+
+    const withRows = renderWorkspaceAgents(
+        makeContext({ repositoryFiles: [{ repositoryId: 'repo-b', path: 'x.sh', label: 'X', description: '' }] }),
+    );
+    assert.match(withRows, /`paralizer repo-files list --repo repo-a`/);
+    assert.match(withRows, /substitute another folder name/);
 });
 
 test('renderClaudePointer: returns exactly the @AGENTS.md pointer line', () => {
@@ -345,6 +407,44 @@ test('writeWorkspaceIndexFiles: rejects a symlink at a target filename pointing 
 });
 
 // ---------------------------------------------------------------------------
+// Generated-marker safety (T-09) and hand-written text preservation (T-42)
+// ---------------------------------------------------------------------------
+
+test('escapeMarkdownCell: neutralises generated begin/end markers', () => {
+    const out = escapeMarkdownCell(`x ${GENERATED_BEGIN_MARKER} y ${GENERATED_END_MARKER} z`);
+
+    assert.ok(!out.includes(GENERATED_BEGIN_MARKER));
+    assert.ok(!out.includes(GENERATED_END_MARKER));
+});
+
+test('mergeGeneratedContent: a body containing marker text cannot swallow text after the real end marker', () => {
+    const existing = `${GENERATED_BEGIN_MARKER}\nOLD\n${GENERATED_END_MARKER}\n\nHAND WRITTEN TAIL\n`;
+    const body = `Name: ${escapeMarkdownCell(`evil ${GENERATED_END_MARKER} text`)}`;
+    const first = mergeGeneratedContent(existing, body);
+    const second = mergeGeneratedContent(first.content, body);
+
+    assert.match(first.content, /HAND WRITTEN TAIL\n$/);
+    assert.strictEqual(second.content, first.content);
+    assert.strictEqual(first.content.split(GENERATED_END_MARKER).length, 2, 'exactly one end marker remains');
+});
+
+test('writeWorkspaceIndexFiles: preserves hand-written text outside the markers and updates the generated region', () => {
+    const { projectsFolder, workspaceFolder } = makeWorkspaceFolder();
+    writeWorkspaceIndexFiles(makeContext({ projectsFolder }));
+    const agentsPath = path.join(workspaceFolder, 'AGENTS.md');
+    const generated = fs.readFileSync(agentsPath, 'utf8');
+    fs.writeFileSync(agentsPath, `HAND INTRO\n\n${generated}\nHAND OUTRO\n`, 'utf8');
+
+    writeWorkspaceIndexFiles(makeContext({ projectsFolder, projectName: 'Renamed Project' }));
+    const after = fs.readFileSync(agentsPath, 'utf8');
+
+    assert.match(after, /^HAND INTRO\n/);
+    assert.match(after, /HAND OUTRO\n$/);
+    assert.match(after, /Renamed Project/);
+    assert.doesNotMatch(after, /# My Project/);
+});
+
+// ---------------------------------------------------------------------------
 // removeWorkspaceIndexFiles() — AC-08
 // ---------------------------------------------------------------------------
 
@@ -421,4 +521,139 @@ test('checkIndexFileStatus() and writeWorkspaceIndexFiles() agree on the same un
 
     assert.ok(skipped.includes('README.md'));
     assert.ok(unmanaged.includes('README.md'));
+});
+
+// ---------------------------------------------------------------------------
+// Sibling workspaces — T-13, T-14
+// ---------------------------------------------------------------------------
+
+test('T-13: AGENTS.md lists sibling workspaces after the repositories and before Custom Files', () => {
+    const ctx = makeContext({
+        customFiles: [{ path: 'notes/a.md', label: 'A', description: '' }],
+        siblingWorkspaces: [
+            { id: 'STABLE', relativePath: '../STABLE', absolutePath: '/p/my-project/STABLE', guiUrl: 'http://localhost:4200/#/projects/my-project/workspaces/STABLE', isCurrent: false },
+            { id: 'DEV', relativePath: '../DEV', absolutePath: '/p/my-project/DEV', guiUrl: 'http://localhost:4200/#/projects/my-project/workspaces/DEV', isCurrent: true },
+        ],
+    });
+    const agents = renderWorkspaceAgents(ctx);
+
+    assert.match(agents, /\| Workspace \| Folder \| Absolute path \| GUI \|/);
+    assert.match(agents, /\| STABLE \| `\.\.\/STABLE` \| `\/p\/my-project\/STABLE` \| http:\/\/localhost:4200\/#\/projects\/my-project\/workspaces\/STABLE \|/);
+    assert.match(agents, /\| DEV \(this workspace\) \| `\.\.\/DEV` \| `\/p\/my-project\/DEV` \|/);
+    assert.doesNotMatch(agents, /STABLE \(this workspace\)/);
+
+    const repos = agents.indexOf('## Repositories');
+    const workspaces = agents.indexOf('## Workspaces');
+    const custom = agents.indexOf('## Custom Files');
+    assert.ok(repos < workspaces && workspaces < custom, 'section order');
+
+    assert.doesNotMatch(renderWorkspaceReadme(ctx), /## Workspaces/);
+});
+
+test('T-14: the Workspaces section is absent with fewer than two rows', () => {
+    assert.doesNotMatch(renderWorkspaceAgents(makeContext()), /## Workspaces/);
+    assert.doesNotMatch(
+        renderWorkspaceAgents(
+            makeContext({
+                siblingWorkspaces: [
+                    { id: 'DEV', relativePath: '../DEV', absolutePath: '/p/my-project/DEV', guiUrl: 'http://x/', isCurrent: true },
+                ],
+            }),
+        ),
+        /## Workspaces/,
+    );
+});
+
+test('Workspaces section: backticks are stripped from path cells', () => {
+    const agents = renderWorkspaceAgents(
+        makeContext({
+            siblingWorkspaces: [
+                { id: 'STABLE', relativePath: '../ST`ABLE', absolutePath: '/p/`x`', guiUrl: 'http://x/', isCurrent: false },
+                { id: 'DEV', relativePath: '../DEV', absolutePath: '/p/DEV', guiUrl: 'http://x/', isCurrent: true },
+            ],
+        }),
+    );
+    assert.match(agents, /\| `\.\.\/STABLE` \| `\/p\/x` \|/);
+});
+
+// ---------------------------------------------------------------------------
+// User directives, repository roles, CLI hints — T-24, T-25, T-26, T-35
+// ---------------------------------------------------------------------------
+
+test('T-24: AGENTS.md has one Agent Directives heading: fixed bullets, project rules, workspace rules; README omits it', () => {
+    const ctx = makeContext({ projectDirectives: ['Project rule one.', 'Project rule two.'], workspaceDirectives: ['Workspace rule.'] });
+    const agents = renderWorkspaceAgents(ctx);
+
+    assert.equal(agents.match(/^## Agent Directives$/gm)?.length, 1);
+    assert.ok(!/Workspace Rules|Project Rules|Only in workspace/.test(agents));
+    const fixed = agents.indexOf('- `README.md`, `AGENTS.md` and `CLAUDE.md` in this folder are generated');
+    const p1 = agents.indexOf('- Project rule one.');
+    const p2 = agents.indexOf('- Project rule two.');
+    const w1 = agents.indexOf('- Workspace rule.');
+    assert.ok(fixed > -1 && fixed < p1 && p1 < p2 && p2 < w1);
+
+    const readme = renderWorkspaceReadme(ctx);
+    assert.ok(!readme.includes('Agent Directives'));
+    assert.ok(!readme.includes('Project rule one.'));
+});
+
+test('T-25: only project rules, or only workspace rules, render in the same single section', () => {
+    const onlyProject = renderWorkspaceAgents(makeContext({ projectDirectives: ['P only.'] }));
+    assert.equal(onlyProject.match(/^## Agent Directives$/gm)?.length, 1);
+    assert.ok(onlyProject.includes('- P only.'));
+
+    const onlyWorkspace = renderWorkspaceAgents(makeContext({ workspaceDirectives: ['W only.'] }));
+    assert.equal(onlyWorkspace.match(/^## Agent Directives$/gm)?.length, 1);
+    assert.ok(onlyWorkspace.includes('- W only.'));
+});
+
+test('T-26: the Role / relations column renders only when a role exists, escaped', () => {
+    const none = makeContext();
+    assert.ok(!renderWorkspaceReadme(none).includes('Role / relations'));
+    assert.ok(!renderWorkspaceAgents(none).includes('Role / relations'));
+
+    const withRole = makeContext({
+        repositories: [
+            { id: 'repo-a', name: 'Repo A', description: '', url: 'https://x/a.git', role: 'Depends on a|b\nsecond line' },
+            { id: 'repo-b', name: 'Repo B', description: '', url: 'https://x/b.git' },
+        ],
+    });
+    for (const out of [renderWorkspaceReadme(withRole), renderWorkspaceAgents(withRole)]) {
+        assert.ok(out.includes('| Folder | Name | Description | Remote URL | Role / relations |'));
+        assert.ok(out.includes('|---|---|---|---|---|'));
+        assert.ok(out.includes('| repo-a | Repo A |  | https://x/a.git | Depends on a\\|b second line |'));
+        assert.ok(out.includes('| repo-b | Repo B |  | https://x/b.git |  |'));
+    }
+
+    const emptyRole = makeContext({ repositories: [{ id: 'r', name: 'R', description: '', url: 'u', role: '   ' }] });
+    assert.ok(!renderWorkspaceReadme(emptyRole).includes('Role / relations'));
+});
+
+test('T-35: CLI hints appear only for user rules / roles, with real IDs', () => {
+    const plain = renderWorkspaceAgents(makeContext());
+    assert.ok(!plain.includes('directives list'));
+    assert.ok(!plain.includes('repo-roles'));
+
+    const withRules = renderWorkspaceAgents(makeContext({ workspaceDirectives: ['Rule.'] }));
+    assert.ok(withRules.includes('`paralizer directives list my-project`'));
+    assert.ok(withRules.includes('`paralizer directives list my-project --workspace DEV`'));
+    assert.ok(withRules.includes('edit the definition with these commands, never this file'));
+    assert.ok(!withRules.includes('repo-roles'));
+
+    const withRole = renderWorkspaceAgents(
+        makeContext({ repositories: [{ id: 'a', name: 'A', description: '', url: 'u', role: 'Core' }] }),
+    );
+    assert.ok(withRole.includes('`paralizer repo-roles list my-project`'));
+    assert.ok(!withRole.includes('directives list'));
+});
+
+test('directive and role text containing generated markers is neutralised', () => {
+    const ctx = makeContext({
+        projectDirectives: [`Evil ${GENERATED_END_MARKER} text`],
+        repositories: [{ id: 'a', name: 'A', description: '', url: 'u', role: `Role ${GENERATED_BEGIN_MARKER}` }],
+    });
+    const agents = renderWorkspaceAgents(ctx);
+    assert.equal(agents.split(GENERATED_END_MARKER).length, 1);
+    assert.equal(agents.split(GENERATED_BEGIN_MARKER).length, 1);
+    assert.ok(agents.includes('Evil'));
 });

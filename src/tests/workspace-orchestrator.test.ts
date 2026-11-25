@@ -632,3 +632,81 @@ test('createWorkspace does NOT write a credentials/info log entry for SSH clones
     const infoEntry = entries.find((e) => e.Severity === 'info');
     assert.strictEqual(infoEntry, undefined, 'SSH clones (credential === null) must NOT produce a credentials/info entry');
 });
+
+// ─── Sibling refresh (T-16) ───────────────────────────────────────────────────
+
+test('T-16: renameWorkspace refreshes the sibling workspaces\' index files', async () => {
+    const { config, orchestrator, workspaceManager, projectId } = makeFixture(makeTempDir());
+    workspaceManager.create(projectId, 'DEV');
+    await orchestrator.createWorkspace(projectId, 'STABLE');
+    await orchestrator.createWorkspace(projectId, 'DEV');
+
+    orchestrator.renameWorkspace(projectId, 'DEV', 'FEAT');
+
+    const stableAgents = fs.readFileSync(path.join(config.projectsFolder, projectId, 'STABLE', 'AGENTS.md'), 'utf8');
+    assert.ok(stableAgents.includes('../FEAT'), 'sibling AGENTS.md should list the renamed workspace');
+    assert.ok(!stableAgents.includes('../DEV'), 'sibling AGENTS.md should no longer list the old workspace ID');
+});
+
+test('T-16: deleteWorkspace refreshes the sibling workspaces\' index files', async () => {
+    const { config, orchestrator, workspaceManager, projectId } = makeFixture(makeTempDir());
+    workspaceManager.create(projectId, 'DEV');
+    await orchestrator.createWorkspace(projectId, 'STABLE');
+    await orchestrator.createWorkspace(projectId, 'DEV');
+    const stableAgentsPath = path.join(config.projectsFolder, projectId, 'STABLE', 'AGENTS.md');
+    assert.ok(fs.readFileSync(stableAgentsPath, 'utf8').includes('../DEV'), 'precondition: sibling lists DEV');
+
+    orchestrator.deleteWorkspace(projectId, 'DEV');
+
+    const after = fs.readFileSync(stableAgentsPath, 'utf8');
+    assert.ok(!after.includes('../DEV'), 'sibling AGENTS.md should drop the deleted workspace');
+});
+
+function makeRefreshFailureFixture(base: string, refresh: () => unknown) {
+    const config = makeTestConfig(base);
+    initializeStorage(config);
+    const repoManager = new RepositoryManager(config);
+    const projectManager = new ProjectManager(config, repoManager);
+    const workspaceManager = new WorkspaceManager(projectManager);
+    const realArtifacts = new WorkspaceArtifactsOrchestrator(config, projectManager, repoManager);
+    const artifacts = Object.create(realArtifacts) as WorkspaceArtifactsOrchestrator;
+    artifacts.refreshProjectIndexes = refresh as never;
+    const entries: { Severity: string; Operation: string; Message: string }[] = [];
+    const errorLog = { append: (e: { Severity: string; Operation: string; Message: string }) => { entries.push(e); } };
+    const orchestrator = new WorkspaceOrchestrator(config, projectManager, workspaceManager, repoManager, artifacts, errorLog as never);
+    repoManager.add({ url: originRepoPath, id: 'test-repo' });
+    projectManager.create('Test Project', ['test-repo'], undefined, 'test-project');
+    workspaceManager.create('test-project', 'DEV');
+    workspaceManager.create('test-project', 'QA');
+    return { orchestrator, workspaceManager, entries };
+}
+
+test('T-16: a thrown refresh does not throw out of renameWorkspace / deleteWorkspace and is logged', () => {
+    const { orchestrator, workspaceManager, entries } = makeRefreshFailureFixture(makeTempDir(), () => {
+        throw new Error('refresh exploded');
+    });
+
+    orchestrator.renameWorkspace('test-project', 'DEV', 'FEAT');
+    orchestrator.deleteWorkspace('test-project', 'QA');
+
+    assert.ok(workspaceManager.getById('test-project', 'FEAT') !== undefined);
+    assert.strictEqual(workspaceManager.getById('test-project', 'QA'), undefined);
+    assert.strictEqual(entries.length, 2);
+    for (const e of entries) {
+        assert.strictEqual(e.Severity, 'warning');
+        assert.strictEqual(e.Operation, 'refresh-siblings');
+        assert.ok(e.Message.includes('refresh exploded'));
+    }
+});
+
+test('T-16: failed entries in the refresh result are logged and do not throw', () => {
+    const { orchestrator, entries } = makeRefreshFailureFixture(makeTempDir(), () => ({
+        refreshed: [],
+        failed: [{ workspaceId: 'STABLE', error: 'disk full' }],
+    }));
+
+    orchestrator.renameWorkspace('test-project', 'DEV', 'FEAT');
+
+    assert.strictEqual(entries.length, 1);
+    assert.ok(entries[0].Message.includes('STABLE') && entries[0].Message.includes('disk full'));
+});

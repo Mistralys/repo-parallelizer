@@ -447,6 +447,7 @@ interface ProjectWorkspace {
     DateCreated: string;
     DateModified: string;
     Notes?: string;         // Optional free-text notes. Absent on pre-existing records — reads as '' via WorkspaceManager.
+    Directives?: AgentDirective[];  // Workspace-scope agent directives; absent on older records (reads as []). Travels with renameWorkspace(), dropped by removeWorkspace(). No SCHEMA_VERSION bump.
 }
 
 interface ProjectData {
@@ -458,6 +459,8 @@ interface ProjectData {
     Repositories: string[];
     Workspaces: Record<string, ProjectWorkspace>;
     CustomFiles?: CustomFile[];  // Files copied into every workspace; absent on older records (reads as []). No SCHEMA_VERSION bump.
+    Directives?: AgentDirective[];  // Project-scope agent directives (apply to every workspace); absent on older records (reads as []). No SCHEMA_VERSION bump.
+    RepositoryRoles?: Record<string, string>;  // Optional per-project "Role / relations" text keyed by repository ID; absent on older records (reads as {}). Removed with the repository. No SCHEMA_VERSION bump.
     LastActivity?: string;  // ISO 8601 — most recent activity timestamp; updated by updateLastActivity(), does NOT affect DateModified
     SchemaVersion: number;
 }
@@ -539,8 +542,35 @@ class ProjectManager {
     addCustomFile(projectId: string, input: CustomFileInput): CustomFile              // validates via validateCustomFileInput()
     updateCustomFile(projectId: string, fileId: string, input: CustomFileInput): { previous: CustomFile; updated: CustomFile }
     removeCustomFile(projectId: string, fileId: string): CustomFile                   // returns the removed definition
+    listDirectives(projectId: string, scope: DirectiveScope): AgentDirective[]        // [] when the scope has none
+    addDirective(projectId: string, scope: DirectiveScope, input: AgentDirectiveInput): AgentDirective   // validates via validateDirectiveInput(); UUID Id
+    updateDirective(projectId: string, scope: DirectiveScope, directiveId: string, input: AgentDirectiveInput): AgentDirective
+    removeDirective(projectId: string, scope: DirectiveScope, directiveId: string): AgentDirective      // returns the removed directive
+    getRepositoryRoles(projectId: string): Record<string, string>                     // copy; {} when none. Unknown project throws NotFoundError
+    setRepositoryRole(projectId: string, repositoryId: string, text: string): string  // validateRepositoryRole(); '' clears the entry; returns stored text. Repository must be listed on the project (else NotFoundError); refreshes DateModified
 }
 ```
+
+#### Agent Directives (`directive.ts`)
+
+Pure module (no fs): owner-defined, single-paragraph rules for agents, stored at two scopes — project-wide (`ProjectData.Directives`) and per workspace (`ProjectWorkspace.Directives`). Modelled on `custom-file.ts`.
+
+```typescript
+const DIRECTIVE_MAX_LENGTH = 1000;     // characters, after normalisation
+const DIRECTIVES_MAX_COUNT = 50;       // per scope
+
+interface AgentDirective { Id: string /* UUID */; Text: string; DateModified: string }
+interface AgentDirectiveInput { Text: string }
+type DirectiveScope = { kind: 'project' } | { kind: 'workspace'; workspaceId: string }
+
+validateDirectiveInput(input: AgentDirectiveInput, others: readonly AgentDirective[]): AgentDirectiveInput  // throws Error with a user-presentable message
+```
+
+> **`validateDirectiveInput()`:** normalises `Text` via `normaliseSingleParagraph(text, DIRECTIVE_MAX_LENGTH, 'Directive')` (newlines collapse to spaces, trim, non-empty, max length, no generated-marker text), then rejects a case-insensitive duplicate among `others` and a scope already at `DIRECTIVES_MAX_COUNT`. Pass the other directives of the same scope, excluding the one being edited.
+
+> **No default scope:** every `ProjectManager` directive method requires `scope`. A missing/unknown `kind`, or a workspace scope with an empty/blank `workspaceId`, throws a validation error rather than falling back to project scope. Unknown project, workspace or directive throws `NotFoundError`. Both scopes go through one private `resolveDirectiveScope()`, which resolves the workspace with an own-property check (`Object.prototype.hasOwnProperty.call`), so inherited keys such as `__proto__`, `constructor` or `toString` throw `NotFoundError` instead of reaching `Object.prototype`. Add/update/remove refresh the directive's and the project's `DateModified`; workspace-scope mutations also refresh the workspace's `DateModified`.
+
+> **Known gap:** the other `project.Workspaces[id]` lookups in `ProjectManager` (`updateWorkspace`, `renameWorkspace`, `removeWorkspace`, `addWorkspace`) are not yet guarded against inherited keys; harden them before routes pass user-supplied workspace IDs.
 
 ### Workspace
 
@@ -577,6 +607,19 @@ class WorkspaceManager {
     isStable(workspaceId: string): boolean
 }
 ```
+
+
+#### Repository Roles (`repository-role.ts`)
+
+Pure module (no fs): an optional, owner-defined "Role / relations" text per repository, stored on the project (`ProjectData.RepositoryRoles`, keyed by repository ID) rather than on the global `Repository`, so it never leaks across projects and does not touch the `.workspace/info.json` sync payload or hash.
+
+```typescript
+const REPOSITORY_ROLE_MAX_LENGTH = 500;   // characters, after normalisation
+
+validateRepositoryRole(raw: string): string  // '' when empty after trim (= clear); else normaliseSingleParagraph(raw, 500, 'Repository role'); throws Error with a user-presentable message
+```
+
+> `removeRepository()` drops the repository's role entry. An emptied `RepositoryRoles` map is deleted from the stored JSON to keep the legacy shape. As of WP-011 this is the data layer only; no route or generated-file rendering consumes the roles yet.
 
 ---
 
@@ -1014,8 +1057,10 @@ interface WorkspaceIndexRepositoryRow {
     name: string;
     description: string;  // empty string when none is set
     url: string;
+    role?: string;        // owner-defined "Role / relations" text (ProjectData.RepositoryRoles); absent/empty/sanitises-to-empty = no role
 }
 
+interface WorkspaceIndexSiblingRow { id: string; relativePath: string; absolutePath: string; guiUrl: string; isCurrent: boolean }   // AGENTS.md "Workspaces" table row; relativePath = `../<id>`, absolutePath = path.join(projectsFolder, projectId, id); derived from project.Workspaces, never from the filesystem
 interface WorkspaceIndexCustomFileRow { path: string; label: string; description: string }   // AGENTS.md "Custom Files" table row
 interface WorkspaceIndexRepositoryFileRow { repositoryId: string; path: string; label: string; description: string }   // AGENTS.md "Repository Files" table row (Milestone 2); path is relative to the repo's .workspace/files/
 
@@ -1028,8 +1073,11 @@ interface WorkspaceIndexContext {
     workspaceDescription: string; // empty string when none is set
     workspaceNotes: string;       // empty string when none are set
     repositories: WorkspaceIndexRepositoryRow[]; // project.Repositories order
+    siblingWorkspaces?: WorkspaceIndexSiblingRow[];       // all workspaces of the project incl. this one, STABLE first then alphabetical; AGENTS.md "Workspaces" section only (never README.md), omitted when absent or fewer than two rows
     customFiles?: WorkspaceIndexCustomFileRow[];          // ListInAgents custom files, project order; AGENTS.md "Custom Files" section, omitted when empty/absent
     repositoryFiles?: WorkspaceIndexRepositoryFileRow[];  // ListInAgents repository files from sync-enabled repos only, project.Repositories order (Milestone 2); AGENTS.md "Repository Files" section, omitted when empty/absent; built with no filesystem check
+    projectDirectives?: string[];   // owner-defined project-wide directive texts, stored order; appended to the AGENTS.md "Agent Directives" list after the fixed bullets
+    workspaceDirectives?: string[]; // owner-defined directive texts of this workspace only, stored order; appended after projectDirectives in the same flat list
     guiUrl: string;                // built from config.serverPort
     toolVersion: string;           // from getToolVersion()
     toolRoot: string;              // from getToolRoot(); rendered into the AGENTS.md "Paralizer CLI" section
@@ -1037,8 +1085,10 @@ interface WorkspaceIndexContext {
 }
 
 function escapeMarkdownCell(value: string): string
+function sanitiseListText(value: string): string                                               // list-item counterpart of escapeMarkdownCell(): neutraliseGeneratedMarkers() + collapseToSingleLine(), leaves `|` alone; applied to every user directive
 function renderWorkspaceReadme(ctx: WorkspaceIndexContext): string
-function renderWorkspaceAgents(ctx: WorkspaceIndexContext): string                             // only file that renders customFiles/repositoryFiles — never README.md
+function renderAgentDirectives(ctx: WorkspaceIndexContext): string                             // replaces the former AGENT_DIRECTIVES_BLOCK constant; uses ctx.repositories only (static per-repo AGENTS.md/CLAUDE.md reading list in table order; `git -C <first repo id or <repo-folder>>` read-only guidance); bullet 1 scopes "orientation only"/nearest-AGENTS.md precedence to the generated overview; then appends ctx.projectDirectives followed by ctx.workspaceDirectives as further bullets in the same single `## Agent Directives` list (no extra headings; scope is invisible to the reading agent; entries that sanitise to empty are skipped); no filesystem access
+function renderWorkspaceAgents(ctx: WorkspaceIndexContext): string                             // only file that renders customFiles/repositoryFiles — never README.md; sections built from one ordered array (index body, sibling workspaces, custom files, repository files, Paralizer CLI, agent directives), empties filtered
 function renderClaudePointer(): string
 function mergeGeneratedContent(existing: string | null, generatedBody: string): { content: string; skipped: boolean }
 function writeWorkspaceIndexFiles(ctx: WorkspaceIndexContext): { written: string[]; skipped: string[] }
@@ -1048,13 +1098,31 @@ function checkIndexFileStatus(projectsFolder: string, projectId: string, workspa
 
 > **The marker fence:** every generated file has its regenerated region wrapped in `GENERATED_BEGIN_MARKER`/`GENERATED_END_MARKER` HTML comments. `mergeGeneratedContent()` replaces only the text between the markers on regeneration, preserving hand-added prose before/after the fence verbatim. When a file exists but contains no begin marker, it is treated as fully hand-authored: `mergeGeneratedContent()` returns it unchanged with `skipped: true`, and both `writeWorkspaceIndexFiles()` and `removeWorkspaceIndexFiles()` leave it untouched. All three behaviours (merge, write-skip, remove-skip) and the read-only `checkIndexFileStatus()` probe share one private predicate, `hasBeginMarker()`, so "managed" vs. "unmanaged" is defined exactly once in the module.
 
-> **`escapeMarkdownCell()`:** escapes `|`, collapses CR/LF to a single space, and trims. Applied to every user-supplied string embedded in the generated body — `projectDescription`, `workspaceDescription`, `workspaceNotes`, and each repository row's `name`/`description`/`url` (`id` is not escaped, since `RepositoryManager` already restricts it to kebab-case). This exists because none of `Repository.Url`, `.Description`, or workspace `notes`/`description` are validated against `|`/newline by their respective managers — only `escapeMarkdownCell()` prevents a value containing either from corrupting the generated Markdown table or, for `url` specifically, being stored as raw unescaped content in a file designed to be committed to shared git repos (closed as a Medium-severity finding during this WP's security audit).
+> **User rules and roles in the index:** `buildIndexContext()` copies directive texts only (`ProjectData.Directives`, `ProjectWorkspace.Directives`; stored order) into `projectDirectives`/`workspaceDirectives`, and looks up `RepositoryRoles` per repository with an own-property check (prototype keys never resolve). A legacy project without these fields yields `undefined` roles and empty directive lists. The Repositories table (README and AGENTS) gains a fifth column `Role / relations` only when at least one repository has a role that is non-empty after `escapeMarkdownCell()`; otherwise the four-column output is byte-identical to the pre-feature golden. README never renders `## Agent Directives`. `renderCliSection()` adds a pointer naming `paralizer directives list {projectId}` and `paralizer directives list {projectId} --workspace {workspaceId}` (edit via those commands, never the file) only when a non-empty user rule exists, and a `paralizer repo-roles list {projectId}` pointer only when a role exists.
+
+> **`escapeMarkdownCell()`:** escapes `|`, neutralises generated-marker text (`neutraliseGeneratedMarkers()`), collapses CR/LF to a single space and trims (`collapseToSingleLine()`) — both helpers from `src/utils/single-paragraph-text.ts` (see `Single-Paragraph Text`, below). Applied to every user-supplied string embedded in the generated body — `projectDescription`, `workspaceDescription`, `workspaceNotes`, and each repository row's `name`/`description`/`url` (`id` is not escaped, since `RepositoryManager` already restricts it to kebab-case). This exists because none of `Repository.Url`, `.Description`, or workspace `notes`/`description` are validated against `|`/newline by their respective managers — only `escapeMarkdownCell()` prevents a value containing either from corrupting the generated Markdown table or, for `url` specifically, being stored as raw unescaped content in a file designed to be committed to shared git repos (closed as a Medium-severity finding during this WP's security audit).
 
 > **`writeWorkspaceIndexFiles()` write guards:** for each target file, runs — in order, before any read or write — a lexical containment check (`isLexicallyContained()`, `path.resolve`-based, no filesystem access), a realpath symlink-escape check (`escapesRootViaRealpath()`, built on `bestEffortRealpath()`, which `lstat`s the exact target path first so it also catches a *broken* symlink planted at the target's leaf position — a case a naive `fs.existsSync()`-based ancestor walk misses), and a directory-shape check (`isDirectoryShaped()`). All five guard functions now live in the shared `src/utils/path-guard.ts` module (see `Path Guard`, below) rather than being defined locally in this file — `repository-orchestrator.ts`'s delete-path guard reuses the same realpath/root-resolution helpers. A target that fails any guard, or that exists without the begin marker, is reported in `skipped` and never throws. **No `mkdir`:** the function is a complete no-op when the workspace folder does not exist — that absence is a meaningful signal elsewhere in the system (an uninitialised workspace is reported healthy; `POST …/regenerate-workspace-file` returns 400 when absent), so fabricating the folder here would misrepresent an uninitialised workspace as set up.
 
 > **Two distinct roots in the guard chain:** the lexical check compares a lexically-resolved target against `path.resolve(projectsFolder)`; the realpath check compares a realpath'd target against a separately realpath'd `projectsFolder` (via `resolveRootRealPath()`). Unifying them into one resolved root causes every legitimate write to be falsely rejected whenever the configured root itself sits behind a symlink (e.g. macOS's `/tmp` → `/private/tmp`) — the same pattern reused by `RepositoryOrchestrator.removeRepositoryFromProject()`'s delete guard (see `Path Guard`, below, and `RepositoryOrchestrator`, above).
 
 > **`checkIndexFileStatus()`:** read-only, no writes, no `mkdir`; returns both arrays empty when the workspace folder is absent. Consumed by `checkWorkspaceHealth()` (`workspace-health.ts`, below). Classifies each of the three files as missing (absent array entry), present-managed (absent from both arrays), or present-unmanaged (in `unmanaged`) — guaranteed consistent with what the writer/remover would do to the same file, since all three share `hasBeginMarker()`.
+
+### Single-Paragraph Text (`single-paragraph-text.ts`)
+
+Shared helpers (`src/utils/`, importable by models and orchestration alike) for embedding user-supplied text into generated Markdown without letting it forge a generated-region marker or break line structure. The marker rule lives here once, rather than being copied into the renderer and each validator. Every helper is the identity function for marker-free input; `collapseToSingleLine()` additionally rewrites line breaks.
+
+```typescript
+const GENERATED_MARKER_TOKEN = 'paralizer:generated:'   // substring common to GENERATED_BEGIN_MARKER and GENERATED_END_MARKER
+function containsGeneratedMarker(value: string): boolean           // true for a begin/end marker or the bare token
+function neutraliseGeneratedMarkers(value: string): string         // rewrites the token to 'paralizer-generated:'; identity when absent
+function collapseToSingleLine(value: string): string               // CR / LF / CRLF -> one space each, then trim
+function normaliseSingleParagraph(raw: string, maxLength: number, what: string): string  // collapse + trim; throws Error naming `what` when empty, over maxLength, or containing marker text
+```
+
+> **`normaliseSingleParagraph()`:** the shared validator for text that must render as one Markdown list item (used by `validateDirectiveInput()`). Unlike the other helpers it rejects marker text rather than neutralising it. Error messages: `<what> is required.`, `<what> must be at most <n> characters.`, `<what> must not contain generated-region marker text ("paralizer:generated:").`
+
+> **Invariant:** `GENERATED_BEGIN_MARKER` and `GENERATED_END_MARKER` (in `workspace-index.ts`) both contain `GENERATED_MARKER_TOKEN`; the marker literals are not yet derived from the token, so a test guards this. `mergeGeneratedContent()` truncates at the first end marker, which is why unneutralised marker text in a user value would corrupt the region.
 
 ### Custom Files (`custom-files.ts`)
 
@@ -1082,11 +1150,17 @@ interface RegenerateWorkspaceOverrides {
     workspaceMeta?: ProjectWorkspace;  // see note below
 }
 
+interface ProjectIndexRefreshResult {
+    refreshed: string[];                                  // workspace IDs processed without error
+    failed: { workspaceId: string; error: string }[];     // workspaces whose refresh threw
+}
+
 class WorkspaceArtifactsOrchestrator {
     constructor(config: AppConfig, projectManager: ProjectManager, repositoryManager: RepositoryManager, repositoryInfoSync?: RepositoryInfoSyncOrchestrator, errorLogManager?: ErrorLogManager, repositoryFileManager?: RepositoryFileManager)
 
     regenerateWorkspace(projectId: string, workspaceId: string, overrides?: RegenerateWorkspaceOverrides): void
     regenerateProject(projectId: string): void
+    refreshProjectIndexes(projectId: string): ProjectIndexRefreshResult  // index-only, per-workspace isolated
     regenerateForRepository(repositoryId: string): void
     removeWorkspace(projectId: string, workspaceId: string): void
     removeCustomFileCopies(projectId: string, file: CustomFile): void  // deletes a custom file's copies from every workspace (pass the PREVIOUS definition when moving/renaming)
@@ -1095,13 +1169,19 @@ class WorkspaceArtifactsOrchestrator {
 
 > **Custom files:** `regenerateWorkspace()` also calls `writeCustomFiles()` (see `custom-files.ts` below), so every existing trigger of the artefact set (project/workspace/repository edits, setup, regenerate) syncs custom files too, and `WorkspaceIndexContext.customFiles` carries the `ListInAgents` rows rendered into the `AGENTS.md` "Custom Files" table (README.md is unaffected; the section is omitted when no file is listed).
 
-> **Repository files listing (Milestone 2):** `repositoryFileManager` is an optional, last constructor parameter. When present, a private `buildRepositoryFileRows()` fills `WorkspaceIndexContext.repositoryFiles` by filtering `repositories` to `InfoSync?.Enabled === true`, listing each via `RepositoryFileManager.list()`, keeping only `ListInAgents` entries, and mapping to rows in `repositories`' own (`project.Repositories`) order — with **no filesystem check** against the workspace clone, so the "Repository Files" table in `AGENTS.md` is deterministic regardless of whether a teammate has actually pulled the file yet. `renderCliSection()` adds one `paralizer repo-files` pointer line only when `repositoryFiles` has at least one row. **Wiring status (as of WP-011):** `src/cli/custom-files.ts`'s `createDefaultCustomFilesDeps()` and `src/cli/repo-files.ts`'s `createDefaultRepoFilesDeps()` both now pass a real `RepositoryFileManager` as this argument, so the "Repository Files" table renders for both CLI paths' `regenerateProject()`/`regenerateForRepository()` calls; `src/server/index.ts` still constructs `WorkspaceArtifactsOrchestrator` without it, so the section does not yet render for GUI-triggered regeneration.
+> **Repository files listing (Milestone 2):** `repositoryFileManager` is an optional, last constructor parameter. When present, a private `buildRepositoryFileRows()` fills `WorkspaceIndexContext.repositoryFiles` by filtering `repositories` to `InfoSync?.Enabled === true`, listing each via `RepositoryFileManager.list()`, keeping only `ListInAgents` entries, and mapping to rows in `repositories`' own (`project.Repositories`) order — with **no filesystem check** against the workspace clone, so the "Repository Files" table in `AGENTS.md` is deterministic regardless of whether a teammate has actually pulled the file yet. `renderCliSection()` always renders a `paralizer custom-files list <projectId>` example, and adds the `paralizer repo-files` pointer line plus a `paralizer repo-files list --repo <firstRepoId>` example (the latter also needs at least one repository) only when `repositoryFiles` has at least one row. **Wiring status (as of WP-011):** `src/cli/custom-files.ts`'s `createDefaultCustomFilesDeps()` and `src/cli/repo-files.ts`'s `createDefaultRepoFilesDeps()` both now pass a real `RepositoryFileManager` as this argument, so the "Repository Files" table renders for both CLI paths' `regenerateProject()`/`regenerateForRepository()` calls; `src/server/index.ts` now also passes its `RepositoryFileManager` as the sixth constructor argument, so the table renders for GUI-triggered regeneration too and all three trigger paths produce the same context.
+
+> **`buildIndexContext()` (private):** `buildIndexContext(project, workspaceId, workspaceMeta, repositories)` is the single place `regenerateWorkspace()` builds the `WorkspaceIndexContext` handed to `writeWorkspaceIndexFiles()` (it takes the `ProjectData` returned by `ProjectManager.getById()` and derives the project ID from `project.Id`). It calls `buildRepositoryFileRows()` for `repositoryFiles` and `buildSiblingWorkspaceRows()` for `siblingWorkspaces`. Add new derived index-context fields there rather than inline in `regenerateWorkspace()`.
+
+> **`buildSiblingWorkspaceRows()` (private):** builds `siblingWorkspaces` from `project.Workspaces` (ordered `STABLE` first, then alphabetical) with `relativePath = '../' + id`, `absolutePath = path.join(projectsFolder, projectId, id)` and `guiUrl` via `this.guiUrl()`. No filesystem check, so a not-yet-set-up workspace is still listed. The current `workspaceId` is always included. **Rename case:** when `workspaceId` is not yet in `project.Workspaces` (rename in flight), the old ID is excluded by matching its stored metadata JSON against the `workspaceMeta` override (the pre-rename entry), which keeps the `RegenerateWorkspaceOverrides` contract unchanged; an explicit old-ID override would be sturdier. The renderer (`renderSiblingWorkspacesSection()`) is pure and emits the `## Workspaces` table `| Workspace | Folder | Absolute path | GUI |` with the current row marked `<id> (this workspace)`, paths in code spans (backticks stripped), placed right after the index body and before `## Custom Files`.
 
 > **`.code-workspace` vs. index-file initialisation asymmetry:** `regenerateWorkspace()` preserves `generateWorkspaceFile()`'s existing unconditional-write behaviour (it writes, and `mkdir -p`s its parent, even for a workspace whose own folder does not exist yet), but `writeWorkspaceIndexFiles()` is a deliberate no-op in that same case (see `workspace-index.ts` above). Calling `regenerateWorkspace()` on an uninitialised workspace therefore still produces a `.code-workspace` file while silently skipping the three index files.
 
 > **Repository resolution:** `regenerateWorkspace()` resolves `project.Repositories` against the live `RepositoryManager` store, silently skipping any ID no longer present (a repository can be deleted globally while still transiently listed on a project) — the deleted repository is omitted from both the `.code-workspace` folder list and the index-file repository table, never throwing.
 
 > **`overrides.workspaceMeta`:** `WorkspaceOrchestrator.renameWorkspace()` moves the workspace folder on disk and regenerates the artefact set for the *new* workspace ID before `WorkspaceManager.rename()` updates `project.Workspaces` — at that point `project.Workspaces[newId]` does not exist yet. Passing the pre-rename `ProjectWorkspace` entry via `overrides.workspaceMeta` lets `regenerateWorkspace()` render the new artefacts without requiring the rename orchestration to reorder its own filesystem-before-metadata-validation flow. When omitted, `regenerateWorkspace()` throws if `workspaceId` is not present in `project.Workspaces`.
+
+> **`refreshProjectIndexes()`:** index-only refresh of every workspace of a project. Per workspace, in its own `try/catch`, it resolves repositories (skipping IDs no longer in `RepositoryManager`), calls `buildIndexContext()` and `writeWorkspaceIndexFiles()` — it writes **no** `.code-workspace` file, **no** custom files and invokes **no** repository-info sync (`safeSync()`). A workspace whose write throws is recorded in `failed` (with the error message) while the remaining workspaces are still refreshed, unlike `regenerateProject()`, which aborts at the first failing workspace and repeats the repository-info sync per workspace and repository. A workspace whose folder does not exist is a no-op (`writeWorkspaceIndexFiles()` skips it) and is still listed in `refreshed`. Throws only when the project does not exist. Use it for changes that affect only the generated index files (e.g. sibling-workspace rows); `regenerateProject()` itself is unchanged.
 
 > **`regenerateProject()`/`regenerateForRepository()`:** the former iterates every `project.Workspaces` entry; the latter enumerates all projects via `ProjectManager.list()` + `getById()`, regenerating (via `regenerateProject()`) each project that lists the given repository ID and skipping the rest.
 
@@ -1246,6 +1326,47 @@ createDefaultCustomFilesDeps(): CustomFilesCliDeps                          // l
 - Content sources for `add`/`update`: `--content-file <path>` (`-` = stdin), `--stdin`, `--content <text>` (mutually exclusive). `update` changes only the given fields.
 - `paralizer help` (`src/index.ts`) prints the general usage plus `CUSTOM_FILES_HELP`; it needs no `config.json`. Workspace `AGENTS.md` files point agents at this command instead of duplicating the docs.
 
+## Directives CLI (`src/cli/directives.ts`)
+
+Non-interactive `paralizer directives <list|add|update|delete|help> <project-id> [directive] [options]` command group for owner-defined agent directives. Dependency-injected for tests; mirrors the directive REST routes (validate and persist via `ProjectManager`, then re-render the generated index files).
+
+```typescript
+interface DirectivesCliDeps {
+    projectManager: Pick<ProjectManager, 'listDirectives' | 'addDirective' | 'updateDirective' | 'removeDirective'>;
+    artifacts: Pick<WorkspaceArtifactsOrchestrator, 'refreshProjectIndexes' | 'regenerateWorkspace'>;
+    readStdin: () => Promise<string>; out: (text: string) => void; err: (text: string) => void;
+}
+const DIRECTIVES_HELP: string                                               // shown by `paralizer help` / `directives help`
+runDirectivesCommand(args: string[], deps: DirectivesCliDeps): Promise<number>   // args after "directives"; returns exit code, never throws for user errors
+createDefaultDirectivesDeps(): DirectivesCliDeps                            // loads config.json; throws if missing
+```
+
+- **Scope:** no `--workspace` maps to `{ kind: 'project' }` (project-wide), `--workspace <ID>` to `{ kind: 'workspace', workspaceId }`; an empty `--workspace` value is a usage error (exit 1). The explicit-scope rule of the manager is preserved.
+- **Options:** `--text <text>` or `--stdin` supply the text for `add`/`update`; `--json` makes `list` machine-readable.
+- **References:** `<directive>` resolves by exact ID or unique ID prefix (>= 4 chars) through `resolveFileReference()` without `relativePath`.
+- **Sync and exit codes:** project scope calls `refreshProjectIndexes()` (exit 2 when any workspace failed); workspace scope calls `regenerateWorkspace()`. 0 = success, 1 = error (nothing changed), 2 = saved but sync failed — same as `custom-files`.
+- `createDefaultDirectivesDeps()` wires the managers and `WorkspaceArtifactsOrchestrator` like `createDefaultCustomFilesDeps()`. `paralizer help` prints `DIRECTIVES_HELP` alongside the other command groups.
+
+## Repo Roles CLI (`src/cli/repo-roles.ts`)
+
+Non-interactive `paralizer repo-roles <list|set|clear|help> <project-id> [repo-id] [options]` command group for the per-project repository role text (the `Role / relations` column of the generated files). Dependency-injected for tests; reuses the exit codes and `parseCommandArgs()`/`UsageError` from `file-command-helpers.ts`.
+
+```typescript
+interface RepoRolesCliDeps {
+    projectManager: Pick<ProjectManager, 'getById' | 'getRepositoryRoles' | 'setRepositoryRole'>;
+    artifacts: Pick<WorkspaceArtifactsOrchestrator, 'refreshProjectIndexes'>;
+    out: (text: string) => void; err: (text: string) => void;
+}
+const REPO_ROLES_HELP: string                                               // shown by `paralizer help` / `repo-roles help`
+runRepoRolesCommand(args: string[], deps: RepoRolesCliDeps): Promise<number>     // args after "repo-roles"; returns exit code, never throws for user errors
+createDefaultRepoRolesDeps(): RepoRolesCliDeps                              // loads config.json; throws if missing
+```
+
+- **Subcommands:** `list <project-id> [repo-id]` reports every repository of the project (or only `repo-id`), showing `(no role)` for an empty role; `--json` prints `[{ repositoryId, role }]`. `set <project-id> <repo-id> --text <text>` requires a non-blank `--text`; `clear <project-id> <repo-id>` removes the role (stores an empty text).
+- **Validation:** the project must exist and `repo-id` must be listed in it (checked before mutating); role text is validated by `ProjectManager.setRepositoryRole()` (single paragraph, max 500 characters, no generated-marker text).
+- **Sync and exit codes:** every `set`/`clear` is followed by `refreshProjectIndexes()`. 0 = success, 1 = error (nothing changed), 2 = saved but sync failed. `help` exits 0; calling with no subcommand prints help and exits 1.
+- `paralizer help` prints `REPO_ROLES_HELP` alongside the other command groups.
+
 ## File Command Helpers (`src/cli/file-command-helpers.ts`)
 
 Milestone 2: the scope-neutral parts of `custom-files.ts`'s CLI plumbing, extracted so `repo-files.ts` (below) can reuse them without duplicating logic. Every per-scope difference (noun, list-hint text, how to render a relative path) is passed in by the caller rather than branched on internally.
@@ -1260,13 +1381,13 @@ function requirePositionals(positionals: string[], count: number, usage: string,
 const FILE_FIELD_OPTIONS: Record<string, { type: 'string' | 'boolean' }>   // the add/update option schema shared by both command groups
 function readContentSource(values: Record<string, unknown>, readStdin: () => Promise<string>): Promise<string | undefined>   // enforces "exactly one of --content-file/--stdin/--content"; '-' as --content-file reads stdin
 function readFlagPair(values: Record<string, unknown>, name: string): boolean | undefined   // resolves a --name/--no-name pair; undefined when neither given (update keeps the existing value)
-function resolveFileReference<T>(files: readonly T[], ref: string, options: { relativePath: (file: T) => string; noun: string; listHint: string }): T   // exact ID -> case-insensitive relative path -> unique ID prefix (>= 4 chars), in that order
+function resolveFileReference<T>(files: readonly T[], ref: string, options: { relativePath?: (file: T) => string; noun: string; listHint: string }): T   // exact ID -> case-insensitive relative path (only when relativePath is given) -> unique ID prefix (>= 4 chars), in that order
 function readStdin(): Promise<string>
 ```
 
 > **Extraction boundary:** dispatch (the subcommand `switch`), help text, the post-mutation sync hook (`regenerateProject()` vs. `regenerateForRepository()`), and success/error wording stay in `custom-files.ts`/`repo-files.ts` respectively — only parsing, content-source resolution, flag-pair resolution, and reference resolution moved here. `custom-files.ts`'s behaviour (output, exit codes, `CustomFilesCliDeps`) is byte-identical before and after this extraction.
 >
-> **`resolveFileReference()`'s resolution order and `listHint`:** tries an exact `Id` match first, then a case-insensitive relative-path match (via the caller's `relativePath()`, with `\` accepted as well as `/`), then a unique prefix of the ID of at least 4 characters (ambiguous or too-short prefixes are rejected). `noun` and `listHint` customise the "not found"/"ambiguous" error text per caller (e.g. `'custom file'` / `'paralizer custom-files list <project-id>'` vs. `'repository file'` / `'paralizer repo-files list --repo <repo-id>'`).
+> **`resolveFileReference()`'s resolution order and `listHint`:** tries an exact `Id` match first, then a case-insensitive relative-path match (via the caller's optional `relativePath()`, with `\` accepted as well as `/`; skipped when the option is omitted, as for `directives`, which have no path), then a unique prefix of the ID of at least 4 characters (ambiguous or too-short prefixes are rejected). `noun` and `listHint` customise the "not found"/"ambiguous" error text per caller (e.g. `'custom file'` / `'paralizer custom-files list <project-id>'` vs. `'repository file'` / `'paralizer repo-files list --repo <repo-id>'`).
 
 ## Repository Files CLI (`src/cli/repo-files.ts`)
 
@@ -1287,6 +1408,25 @@ createDefaultRepoFilesDeps(): RepoFilesCliDeps                              // l
 > **Validation and sync path mirror the REST routes (WP-008):** every mutation (`add`/`update`/`delete`) calls `infoSync.assertSyncEnabled(repoId)` first — sync disabled throws `SyncPreconditionError`, mapped to exit `1` with nothing written; `list`/`show` work regardless of sync state. On success, `fileManager.add()`/`update()`/`remove()` runs the same `validateRepositoryFileInput()` validation as the REST layer — `applyImport()`'s `replaceAll()` path now validates too, via `validateRepositoryFileSet()` — then `artifacts.regenerateForRepository(repoId)` runs — a regeneration failure returns `EXIT_SYNC_FAILED` (`2`, "saved but regeneration failed"), matching `custom-files.ts`'s existing exit-code convention. `repo-files.ts` never shells out to git; its success/help text says "Commit & Push in the Paralizer GUI to publish" rather than describing a commit it never performs.
 >
 > **`createDefaultRepoFilesDeps()`:** constructs its own `RepositoryManager`/`RepositoryFileManager`/`ProjectManager`/`RepositoryInfoSyncOrchestrator`/`WorkspaceArtifactsOrchestrator` instances (no `errorLogManager`, same as `createDefaultCustomFilesDeps()`), passing the shared `RepositoryFileManager` into both `RepositoryInfoSyncOrchestrator`'s required constructor parameter and `WorkspaceArtifactsOrchestrator`'s optional trailing one, so the "Repository Files" `AGENTS.md` table (see `workspace-index.ts`, above) renders for `repo-files`-triggered regeneration too.
+
+## Regenerate CLI (`src/cli/regenerate.ts`)
+
+Non-interactive `paralizer regenerate [<project-id>] [--workspace <ID>]` command. Re-renders the generated workspace artefacts for every workspace, one project's workspaces, or a single workspace, without writing any stored project data — so existing workspaces pick up new generated text after an upgrade. Dependency-injected for tests, like the custom-files CLI.
+
+```typescript
+interface RegenerateCliDeps {
+    projectManager: Pick<ProjectManager, 'list' | 'getById'>;
+    artifacts: Pick<WorkspaceArtifactsOrchestrator, 'regenerateWorkspace'>;
+    out: (text: string) => void; err: (text: string) => void;
+}
+const REGENERATE_HELP: string                                               // shown by `paralizer help` / `regenerate help`
+runRegenerateCommand(args: string[], deps: RegenerateCliDeps): Promise<number>   // args after "regenerate"; returns exit code, never throws for user errors
+createDefaultRegenerateDeps(): RegenerateCliDeps                            // loads config.json; wires RepositoryFileManager so the AGENTS.md Repository Files section is rendered
+```
+
+> **Behaviour:** each workspace is regenerated independently through `regenerateWorkspace()` inside its own try/catch; one failure does not stop the rest. One line per workspace is printed to stdout (`ok` or `failed: <message>`). Usage and unknown-project/workspace errors go to stderr. `--workspace` requires a project ID; `help`/`--help`/`-h` as the first argument prints `REGENERATE_HELP`.
+>
+> **Exit codes:** `0` all ok, `1` usage error or unknown project/workspace, `2` at least one workspace failed. The generated "Paralizer CLI" section of workspace `AGENTS.md` deliberately does not mention `regenerate` (owner-only command).
 
 ## CLI Terminal UI (`src/cli/`)
 

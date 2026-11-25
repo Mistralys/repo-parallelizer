@@ -211,6 +211,10 @@ export class WorkspaceOrchestrator {
      *
      * The workspace folder is silently skipped if it does not exist on disk.
      *
+     * As its last step, best-effort refreshes the index files of the remaining
+     * workspaces. The REST routes do not use this method; they carry their own
+     * refresh.
+     *
      * @throws {Error} If attempting to delete the STABLE workspace.
      * @throws {Error} If the computed workspace path is not under `projectsFolder`
      *   (path-traversal guard).
@@ -242,6 +246,8 @@ export class WorkspaceOrchestrator {
 
         this.workspaceArtifacts.removeWorkspace(projectId, workspaceId);
         this.workspaceManager.remove(projectId, workspaceId);
+
+        this.refreshSiblingsBestEffort(projectId, workspaceId, 'delete-workspace');
     }
 
     /**
@@ -251,6 +257,10 @@ export class WorkspaceOrchestrator {
      *
      * The workspace folder rename is skipped if the folder does not exist on
      * disk (e.g. workspace was created but `createWorkspace()` was never called).
+     *
+     * As its last step, best-effort refreshes the index files of every
+     * workspace. The REST routes do not use this method; they carry their own
+     * refresh.
      *
      * @throws {Error} If attempting to rename the STABLE workspace.
      * @throws {Error} If the project does not exist.
@@ -338,5 +348,34 @@ export class WorkspaceOrchestrator {
 
         // Update the workspace data entry (also validates newId format/uniqueness).
         this.workspaceManager.rename(projectId, oldId, newId);
+
+        this.refreshSiblingsBestEffort(projectId, newId, 'rename-workspace');
+    }
+
+    /**
+     * Best-effort index refresh of every workspace of `projectId`, so sibling
+     * tables reflect a just-completed rename/delete. Never throws: a thrown
+     * error and each `failed` entry are logged as warnings (when an
+     * `errorLogManager` is injected).
+     */
+    private refreshSiblingsBestEffort(projectId: string, workspaceId: string, operation: string): void {
+        const warn = (message: string): void => {
+            this.errorLogManager?.append({
+                Severity: 'warning',
+                Source: 'workspace-index',
+                Operation: 'refresh-siblings',
+                Context: { ProjectId: projectId, WorkspaceId: workspaceId },
+                Message: message,
+            });
+        };
+        try {
+            const result = this.workspaceArtifacts.refreshProjectIndexes(projectId);
+            for (const failure of result.failed) {
+                warn(`Failed to refresh sibling workspace "${failure.workspaceId}" after "${operation}": ${failure.error}`);
+            }
+        } catch (error) {
+            warn(`Failed to refresh sibling workspaces of project "${projectId}" after "${operation}": ` +
+                `${error instanceof Error ? error.message : String(error)}`);
+        }
     }
 }

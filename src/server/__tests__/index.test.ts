@@ -327,3 +327,17 @@ function getFreePort(): Promise<number> {
         srv.on('error', reject);
     });
 }
+
+// ---------------------------------------------------------------------------
+// T-11: server wires repositoryFileManager into the artefact orchestrator
+// ---------------------------------------------------------------------------
+
+test('T-11: server passes repositoryFileManager to WorkspaceArtifactsOrchestrator', () => {
+    // The harness cannot drive regeneration through startServer(), so assert on
+    // the construction site in the source (tests run from dist/ with cwd = repo root).
+    const source = fs.readFileSync(path.join(process.cwd(), 'src', 'server', 'index.ts'), 'utf8');
+    const match = /new WorkspaceArtifactsOrchestrator\(([\s\S]*?)\n    \);/.exec(source);
+    assert.ok(match, 'construction site not found');
+    const args = match[1].split(',').map((a) => a.trim()).filter(Boolean);
+    assert.equal(args[5], 'repositoryFileManager');
+});

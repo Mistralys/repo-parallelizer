@@ -11,9 +11,12 @@ Paralizer ships a `paralizer` command (available after `npm link`). Without a gl
 | `paralizer setup` | Run the setup wizard |
 | `paralizer custom-files <subcommand>` | Manage a project's custom files: `list`, `show`, `add`, `update`, `delete` |
 | `paralizer repo-files <subcommand>` | Manage a repository's own files, synced via git: `list`, `show`, `add`, `update`, `delete`. The command never commits or pushes; publish changes with Commit & Push in the GUI |
+| `paralizer directives <subcommand>` | Manage owner-defined agent directives for a project or, with `--workspace <ID>`, a single workspace: `list`, `add`, `update`, `delete`. Rules are rendered into the `AGENTS.md` of every affected workspace |
+| `paralizer repo-roles <subcommand>` | Manage per-project repository roles (the `Role / relations` text in the generated workspace files): `list`, `set`, `clear`. `--json` for `list`; exit 0 success, 1 error, 2 saved but workspace sync failed |
+| `paralizer regenerate [<project-id>] [--workspace <ID>]` | Re-render the generated workspace files for all workspaces, one project, or one workspace, without changing stored data. Use it after upgrading so existing workspaces get new generated text |
 | `paralizer help` | Show all commands and their options |
 
-Run `paralizer custom-files help` or `paralizer repo-files help` for the full option list of each command group.
+Run `paralizer custom-files help`, `paralizer repo-files help`, `paralizer directives help` or `paralizer repo-roles help` for the full option list of each command group.
 
 ### Contributor command
 

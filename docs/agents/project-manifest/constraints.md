@@ -114,6 +114,29 @@ The `SchemaVersion` field on `BaseStore` tracks structural changes to persisted 
 - **Agent pointer, not docs:** the generated workspace `AGENTS.md` carries a short "Paralizer CLI" section (installation path + `paralizer help`). Command documentation lives only in `CUSTOM_FILES_HELP` / `printUsage()`; do not duplicate it into generated files.
 - Adding `CustomFiles` was an optional-field addition: no `SCHEMA_VERSION` bump.
 
+## Generated-Marker Safety
+
+- Any user-supplied text embedded in a generated file (`README.md` / `AGENTS.md` / `CLAUDE.md`) must pass through `neutraliseGeneratedMarkers()` (`src/utils/single-paragraph-text.ts`). `mergeGeneratedContent()` truncates at the first end marker, so marker text inside a value would corrupt the regenerated region and hand-written text after it.
+- Table cells go through `escapeMarkdownCell()`, which applies the neutraliser plus `collapseToSingleLine()`. Do not re-implement the marker rule in a model or validator; import the shared utility (models must not import from the orchestration layer).
+- `GENERATED_BEGIN_MARKER` and `GENERATED_END_MARKER` must both contain `GENERATED_MARKER_TOKEN`.
+- Free text that must render as one list item (e.g. agent directives) is validated with `normaliseSingleParagraph()`, which rejects marker text instead of neutralising it.
+
+## Agent Directives
+
+- Directives live in the data model (`ProjectData.Directives` project-wide, `ProjectWorkspace.Directives` per workspace) and are accessed only through `ProjectManager`'s `listDirectives`/`addDirective`/`updateDirective`/`removeDirective` — never edit them in the generated region, which is overwritten.
+- **Explicit scope, no default.** Every directive method requires a `DirectiveScope`; a missing/unknown kind or blank `workspaceId` is a validation error, so an undefined route parameter can never silently edit project-wide rules.
+- A directive is one paragraph: newlines collapse to spaces, max `DIRECTIVE_MAX_LENGTH` (1000) characters, at most `DIRECTIVES_MAX_COUNT` (50) per scope, unique case-insensitively within its scope, and free of generated-marker text (rejected via `normaliseSingleParagraph()`, not neutralised).
+- Workspace lookups for directives must use an own-property check; a bare `project.Workspaces[id]` resolves inherited keys (`__proto__`, `constructor`, `toString`) and allows `Object.prototype` pollution. Other `Workspaces[id]` lookups in `ProjectManager` are still unguarded — harden before exposing user-supplied IDs.
+- Renderers must escape directive text on output (it is user-controlled). `workspace-index.ts` does this with `sanitiseListText()` (marker neutralisation + single-line collapse); user rules render as bullets in the one flat `## Agent Directives` list (project rules, then workspace rules, after the fixed bullets) — never under separate scope headings. A directive that sanitises to empty is treated as absent.
+- Adding `Directives` was an optional-field addition: no `SCHEMA_VERSION` bump.
+
+## Repository Roles
+
+- A repository's "Role / relations" text lives per project (`ProjectData.RepositoryRoles`, keyed by repository ID), never on the global `Repository` or in `.workspace/info.json` — that would leak one project's relations into every project and change the sync payload/hash contract.
+- Access only through `ProjectManager.setRepositoryRole()`/`getRepositoryRoles()`. The text is one paragraph, max `REPOSITORY_ROLE_MAX_LENGTH` (500) characters, free of generated-marker text (`validateRepositoryRole()`); empty text clears the role. The repository must be listed on the project.
+- Optional and removed with the repository (`removeRepository()`). Repository IDs are immutable keys. Adding `RepositoryRoles` was an optional-field addition: no `SCHEMA_VERSION` bump.
+- Renderers must escape role text on output (it is user-controlled). The `Role / relations` column goes through `escapeMarkdownCell()` (pipes escaped, newlines collapsed, markers neutralised) and is rendered only when at least one repository has a non-empty role. `buildIndexContext()` reads roles with an own-property check.
+
 ## Repository Custom Files (Milestone 2)
 
 Conventions for the repository-level counterpart to project custom files (`src/models/repository/repository-file.ts`, `repository-file.manager.ts`, `src/orchestration/repository-files.ts`). See `data-flows.md` §11 for the storage layout and `api-surface.md` for the model/manager/orchestration signatures.

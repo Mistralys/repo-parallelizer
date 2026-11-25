@@ -85,6 +85,7 @@ import { createFormField, validateRequired, WORKSPACE_ID_PATTERN } from '../comp
 import { normaliseProject, normaliseWorkspace } from '../utils/normalise.js';
 import { STABLE_WS_ID, APP_NAME_SHORT, CREDENTIAL_MISSING_SENTINEL } from '../utils/constants.js';
 import { clearElement } from '../utils/dom.js';
+import { buildWorkspaceDirectivesSection } from './workspace-directives.js';
 
 // ---------------------------------------------------------------------------
 // Router reference — injected from app.js via setRouter()
@@ -1446,6 +1447,9 @@ export function renderWorkspaceDetail(container, params) {
         container.appendChild(buildNotesSection(workspace.notes, async (notes) => {
             await api.workspaces.update(projectId, wid, { notes });
         }));
+
+        // Workspace directives — rules rendered into this workspace's AGENTS.md.
+        container.appendChild(buildWorkspaceDirectivesSection(projectId, wid));
 
         // Start polling countdown when there are repos to update.
         if (tbody && repos.length > 0) {

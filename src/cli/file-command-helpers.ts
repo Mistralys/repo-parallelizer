@@ -155,9 +155,10 @@ const MIN_ID_PREFIX = 4;
  * accepted), then by unique ID prefix (at least {@link MIN_ID_PREFIX}
  * characters).
  *
- * @param relativePath - Computes the scope-specific relative path for a
- *                       file, used both for path matching and in resolved
- *                       messages.
+ * @param relativePath - Optional. Computes the scope-specific relative path
+ *                       for a file, used for path matching. Omit it for items
+ *                       that have no path (e.g. directives): resolution is
+ *                       then by ID or unique ID prefix only.
  * @param noun         - Human-readable singular noun for this scope (e.g.
  *                       `"custom file"`, `"repository file"`), interpolated
  *                       into the ambiguous/no-match messages.
@@ -169,7 +170,7 @@ const MIN_ID_PREFIX = 4;
 export function resolveFileReference<T extends { Id: string }>(
     files: readonly T[],
     ref: string,
-    options: { relativePath: (file: T) => string; noun: string; listHint: string },
+    options: { relativePath?: (file: T) => string; noun: string; listHint: string },
 ): T {
     const { relativePath, noun, listHint } = options;
     const normalised = ref.trim().replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
@@ -177,8 +178,10 @@ export function resolveFileReference<T extends { Id: string }>(
     const byId = files.find((f) => f.Id.toLowerCase() === normalised);
     if (byId) return byId;
 
-    const byPath = files.find((f) => relativePath(f).toLowerCase() === normalised);
-    if (byPath) return byPath;
+    if (relativePath !== undefined) {
+        const byPath = files.find((f) => relativePath(f).toLowerCase() === normalised);
+        if (byPath) return byPath;
+    }
 
     if (normalised.length >= MIN_ID_PREFIX) {
         const byPrefix = files.filter((f) => f.Id.toLowerCase().startsWith(normalised));

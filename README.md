@@ -14,12 +14,13 @@ Set up a project once, then spin up parallel workspaces for the main branch, a f
 - **Parallel workspaces** — create multiple independent workspaces per project, each with its own branch assignments and cloned copies.
 - **Coordinated branch switching** — switch branches across the repos in a workspace in one operation, with conflict detection.
 - **Open in VS Code** — generated `.code-workspace` files let you open a workspace right away.
-- **Workspace index files** — each workspace gets a generated `README.md`, `AGENTS.md`, and `CLAUDE.md` listing its repositories; content you add by hand outside the generated block is preserved.
+- **Workspace index files** — each workspace gets a generated `README.md`, `AGENTS.md`, and `CLAUDE.md` listing its repositories, directives, and an optional role per repository; content you add by hand outside the generated block is preserved.
 - **Project custom files** — define scripts, notes, or config once on a project and have them written into its workspaces.
 - **Git status overview** — see current branches, uncommitted changes, and unfetched commits in the GUI.
 - **Workspace health checks** — detect and fix drift such as missing repos, stale workspace files, and credential errors.
 - **Share repository info through git** — opt in per repository to sync its name, description, and custom files.
 - **Private repository support** — per-host credential management for cloning private repositories.
+- **Agent directives and repository roles** — define durable rules and per-repository roles once, and have them rendered into the generated workspace files.
 - **Web GUI and command line** — manage everything in the browser, or use the interactive terminal menu.
 
 ## Requirements

@@ -138,3 +138,12 @@ test('resolveFileReference() reports no match with the scope-specific list hint'
         /No test item matches "does-not-exist"\. Run 'paralizer test list' to see them\./,
     );
 });
+
+test('resolveFileReference() works without relativePath: ID, unique prefix, ambiguous prefix, no match', () => {
+    const noPath = { noun: 'directive', listHint: 'paralizer directives list <project-id>' };
+    assert.equal(resolveFileReference(makeItems(), 'ABCDEF12', noPath).path, 'scripts/deploy.sh');
+    assert.equal(resolveFileReference(makeItems(), '1111', noPath).path, 'notes.txt');
+    assert.throws(() => resolveFileReference(makeItems(), 'abcdef', noPath), /matches several directives/);
+    // A path is not a valid reference when no relativePath callback is given.
+    assert.throws(() => resolveFileReference(makeItems(), 'notes.txt', noPath), /No directive matches/);
+});

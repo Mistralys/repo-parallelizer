@@ -10,7 +10,14 @@ Shared test utilities and all unit test suites for the `src/` server layer.
 
 ## Folder Structure
 
-All files live flat in this directory — there are no subdirectories. `test-helpers.ts` is the only non-test file; every other `*.test.ts` file is a self-contained test suite.
+Files live flat in this directory, plus a `fixtures/` subfolder. `test-helpers.ts` and `fixtures/` hold the non-test modules; every `*.test.ts` file is a self-contained test suite.
+
+`fixtures/` holds the workspace-index golden-baseline material (compiled to `dist/tests/fixtures/`, not matched by the `npm test` globs):
+
+- `workspace-index-contexts.ts` — fixed `WorkspaceIndexContext` fixtures A (minimal), B (custom/repository files, descriptions) and C (hostile strings).
+- `workspace-index-baseline.ts` — generated `BASELINE_README_A/B/C` constants (the README.md output must stay byte-identical; the AGENTS.md baseline was retired because its text now changes deliberately). Do not edit by hand.
+- `workspace-index-postB.ts` — generated post-Phase-B regression snapshot: `POSTB_AGENTS_*` and `POSTB_README_*` for contexts A, B, C and their two-workspace variants (`A_TWO`, `B_TWO`, `C_TWO`). Captured from reviewed output; a regression snapshot, not a correctness oracle. `POSTB_README_A/B/C` equal `BASELINE_README_A/B/C`. Do not edit by hand.
+- `capture-golden.ts` — the capture script. Invocation: `npm run build && node dist/tests/fixtures/capture-golden.js <target> [--check]`. Target `baseline` rewrites the baseline file; target `postB` rewrites the post-B snapshot; `--check` writes nothing and exits non-zero, printing the first differing line, when the renderer output differs from the committed baseline.
 
 ## Integration Points
 

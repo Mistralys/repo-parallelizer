@@ -43,6 +43,22 @@ class MockWorkspaceArtifacts {
     regenerateProject(projectId: string): void {
         this.record('regenerateProject', [projectId]);
     }
+
+    // Sibling refresh is tracked separately from `calls` / `shouldThrow` so
+    // the AC-20 assertions on the per-workspace choke-point stay unaffected.
+    refreshCalls: string[] = [];
+    refreshShouldThrow = false;
+    refreshResult: { refreshed: string[]; failed: { workspaceId: string; error: string }[] } = { refreshed: [], failed: [] };
+    onRefresh: ((projectId: string) => void) | undefined;
+
+    refreshProjectIndexes(projectId: string): { refreshed: string[]; failed: { workspaceId: string; error: string }[] } {
+        this.refreshCalls.push(projectId);
+        this.onRefresh?.(projectId);
+        if (this.refreshShouldThrow) {
+            throw new Error('Simulated refreshProjectIndexes failure.');
+        }
+        return this.refreshResult;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -659,4 +675,204 @@ test('POST /api/projects/:id/workspaces/:wid/regenerate-workspace-file: returns 
     assert.strictEqual(mock.statusCode, 400);
 
     fs.rmSync(projectsFolder, { recursive: true, force: true });
+});
+
+
+// ---------------------------------------------------------------------------
+// WP-008 — sibling refresh on create / rename / delete (T-17)
+// ---------------------------------------------------------------------------
+
+test('T-17: POST create refreshes the project indexes once', async () => {
+    const { router, wm, artifacts } = buildSut();
+    wm.seedProject('proj-a', ['STABLE']);
+
+    const mock = mockResponse();
+    router.handle(mockRequest('POST', '/api/projects/proj-a/workspaces', { workspaceId: 'DEV' }), mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 201);
+    assert.deepEqual(artifacts.refreshCalls, ['proj-a']);
+});
+
+test('T-17: PUT rename refreshes once, after the rename, listing the new ID and not the old', async () => {
+    const { router, wm, artifacts } = buildSut();
+    wm.seedProject('proj-a', ['STABLE', 'DEV']);
+    let listed: string[] = [];
+    artifacts.onRefresh = (pid) => { listed = wm.list(pid).map((w) => w.WorkspaceID); };
+
+    const mock = mockResponse();
+    router.handle(mockRequest('PUT', '/api/projects/proj-a/workspaces/DEV/rename', { newId: 'QA' }), mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.deepEqual(artifacts.refreshCalls, ['proj-a']);
+    assert.ok(listed.includes('QA'));
+    assert.ok(!listed.includes('DEV'));
+});
+
+test('T-17: PUT rename still refreshes when the artefact block throws', async () => {
+    const { router, wm, artifacts } = buildSut();
+    wm.seedProject('proj-a', ['STABLE', 'DEV']);
+    artifacts.shouldThrow = true;
+
+    const mock = mockResponse();
+    router.handle(mockRequest('PUT', '/api/projects/proj-a/workspaces/DEV/rename', { newId: 'QA' }), mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 200);
+    assert.deepEqual(artifacts.refreshCalls, ['proj-a']);
+});
+
+test('T-17: DELETE refreshes once, also when the artefact block throws', () => {
+    const { router, wm, artifacts } = buildSut();
+    wm.seedProject('proj-a', ['STABLE', 'DEV', 'QA']);
+    artifacts.shouldThrow = true;
+
+    const mock = mockResponse();
+    router.handle(mockRequest('DELETE', '/api/projects/proj-a/workspaces/DEV'), mock.res);
+
+    assert.strictEqual(mock.statusCode, 204);
+    assert.deepEqual(artifacts.refreshCalls, ['proj-a']);
+});
+
+test('T-17: DELETE of an unknown workspace (404) and of STABLE (400) does not refresh', () => {
+    const { router, wm, artifacts } = buildSut();
+    wm.seedProject('proj-a', ['STABLE']);
+
+    const m1 = mockResponse();
+    router.handle(mockRequest('DELETE', '/api/projects/proj-a/workspaces/GHOST'), m1.res);
+    const m2 = mockResponse();
+    router.handle(mockRequest('DELETE', '/api/projects/proj-a/workspaces/STABLE'), m2.res);
+
+    assert.strictEqual(m1.statusCode, 404);
+    assert.strictEqual(m2.statusCode, 400);
+    assert.deepEqual(artifacts.refreshCalls, []);
+});
+
+test('T-17: a thrown refresh error is logged as a warning and leaves create/rename/delete responses unchanged', async () => {
+    const { router, wm, artifacts, errorLog } = buildSut();
+    wm.seedProject('proj-a', ['STABLE']);
+    artifacts.refreshShouldThrow = true;
+
+    const created = mockResponse();
+    router.handle(mockRequest('POST', '/api/projects/proj-a/workspaces', { workspaceId: 'DEV' }), created.res);
+    await flushAsync();
+    const renamed = mockResponse();
+    router.handle(mockRequest('PUT', '/api/projects/proj-a/workspaces/DEV/rename', { newId: 'QA' }), renamed.res);
+    await flushAsync();
+    const deleted = mockResponse();
+    router.handle(mockRequest('DELETE', '/api/projects/proj-a/workspaces/QA'), deleted.res);
+
+    assert.strictEqual(created.statusCode, 201);
+    assert.strictEqual((JSON.parse(created.body) as WorkspaceInfo).WorkspaceID, 'DEV');
+    assert.strictEqual(renamed.statusCode, 200);
+    assert.strictEqual((JSON.parse(renamed.body) as WorkspaceInfo).WorkspaceID, 'QA');
+    assert.strictEqual(deleted.statusCode, 204);
+    assert.strictEqual(errorLog.appendedEntries.length, 3);
+    for (const entry of errorLog.appendedEntries) {
+        assert.strictEqual(entry.Severity, 'warning');
+        assert.strictEqual(entry.Operation, 'refresh-siblings');
+    }
+});
+
+test('T-17: each failed entry of the refresh result is logged as a warning without changing the response', async () => {
+    const { router, wm, artifacts, errorLog } = buildSut();
+    wm.seedProject('proj-a', ['STABLE']);
+    artifacts.refreshResult = {
+        refreshed: [],
+        failed: [{ workspaceId: 'STABLE', error: 'boom' }, { workspaceId: 'QA', error: 'bang' }],
+    };
+
+    const mock = mockResponse();
+    router.handle(mockRequest('POST', '/api/projects/proj-a/workspaces', { workspaceId: 'DEV' }), mock.res);
+    await flushAsync();
+
+    assert.strictEqual(mock.statusCode, 201);
+    assert.strictEqual(errorLog.appendedEntries.length, 2);
+    assert.ok(errorLog.appendedEntries[0].Message.includes('boom'));
+    assert.strictEqual(errorLog.appendedEntries[0].Operation, 'refresh-siblings');
+});
+
+// ---------------------------------------------------------------------------
+// Workspace directives — T-30
+// ---------------------------------------------------------------------------
+
+function buildDirectiveSut() {
+    const calls: { method: string; args: unknown[] }[] = [];
+    const stored = (id: string, text: string) => ({ Id: id, Text: text, DateModified: '2026-01-01T00:00:00.000Z' });
+    const guard = (projectId: string, scope: { workspaceId: string }): void => {
+        if (projectId !== 'proj-a') throw new NotFoundError(`project "${projectId}" does not exist`);
+        if (scope.workspaceId !== 'DEV') throw new NotFoundError(`workspace "${scope.workspaceId}" does not exist`);
+    };
+    const projectManager = {
+        listDirectives(projectId: string, scope: { workspaceId: string }) { calls.push({ method: 'list', args: [projectId, scope] }); guard(projectId, scope); return [stored('d1', 'One')]; },
+        addDirective(projectId: string, scope: { workspaceId: string }, input: { Text: string }) {
+            calls.push({ method: 'add', args: [projectId, scope, input] });
+            guard(projectId, scope);
+            if (input.Text.trim() === '') throw new Error('Directive must not be empty.');
+            return stored('d2', input.Text);
+        },
+        updateDirective(projectId: string, scope: { workspaceId: string }, id: string, input: { Text: string }) {
+            calls.push({ method: 'update', args: [projectId, scope, id, input] });
+            guard(projectId, scope);
+            if (id !== 'd1') throw new NotFoundError(`Directive "${id}" does not exist`);
+            return stored(id, input.Text);
+        },
+        removeDirective(projectId: string, scope: { workspaceId: string }, id: string) {
+            calls.push({ method: 'remove', args: [projectId, scope, id] });
+            guard(projectId, scope);
+            if (id !== 'd1') throw new NotFoundError(`Directive "${id}" does not exist`);
+            return stored(id, 'One');
+        },
+    };
+    return { ...buildSut({ projectManager }), calls };
+}
+
+async function sendWs(router: Router, method: string, url: string, body?: unknown): Promise<MockResponse> {
+    const mock = mockResponse();
+    router.handle(mockRequest(method, url, body), mock.res);
+    await flushAsync();
+    return mock;
+}
+
+test('T-30: workspace directive endpoints use workspace scope with the route wid and regenerate that workspace', async () => {
+    const { router, artifacts, calls } = buildDirectiveSut();
+    const base = '/api/projects/proj-a/workspaces/DEV/directives';
+
+    assert.strictEqual((await sendWs(router, 'GET', base)).statusCode, 200);
+    assert.strictEqual((await sendWs(router, 'POST', base, { text: 'Rule.' })).statusCode, 201);
+    assert.strictEqual((await sendWs(router, 'PUT', `${base}/d1`, { text: 'Changed.' })).statusCode, 200);
+    assert.strictEqual((await sendWs(router, 'DELETE', `${base}/d1`)).statusCode, 204);
+
+    for (const call of calls) {
+        assert.deepEqual(call.args[1], { kind: 'workspace', workspaceId: 'DEV' });
+    }
+    assert.deepEqual(artifacts.calls, [
+        { method: 'regenerateWorkspace', args: ['proj-a', 'DEV'] },
+        { method: 'regenerateWorkspace', args: ['proj-a', 'DEV'] },
+        { method: 'regenerateWorkspace', args: ['proj-a', 'DEV'] },
+    ]);
+});
+
+test('T-30: workspace directive endpoints return 404 for unknown workspace/directive and 400 for bad input', async () => {
+    const { router, artifacts } = buildDirectiveSut();
+
+    assert.strictEqual((await sendWs(router, 'GET', '/api/projects/proj-a/workspaces/NOPE/directives')).statusCode, 404);
+    assert.strictEqual((await sendWs(router, 'POST', '/api/projects/proj-a/workspaces/NOPE/directives', { text: 'x' })).statusCode, 404);
+    assert.strictEqual((await sendWs(router, 'PUT', '/api/projects/proj-a/workspaces/DEV/directives/zzz', { text: 'x' })).statusCode, 404);
+    assert.strictEqual((await sendWs(router, 'DELETE', '/api/projects/proj-a/workspaces/DEV/directives/zzz')).statusCode, 404);
+    assert.strictEqual((await sendWs(router, 'POST', '/api/projects/proj-a/workspaces/DEV/directives', {})).statusCode, 400);
+    assert.strictEqual((await sendWs(router, 'POST', '/api/projects/proj-a/workspaces/DEV/directives', { text: ' ' })).statusCode, 400);
+    assert.deepEqual(artifacts.calls, []);
+});
+
+test('T-30: a throwing regeneration does not change the response, but logs a warning', async () => {
+    const { router, artifacts, errorLog } = buildDirectiveSut();
+    artifacts.shouldThrow = true;
+
+    const mock = await sendWs(router, 'POST', '/api/projects/proj-a/workspaces/DEV/directives', { text: 'Rule.' });
+
+    assert.strictEqual(mock.statusCode, 201);
+    assert.strictEqual(errorLog.appendedEntries.length, 1);
+    assert.strictEqual(errorLog.appendedEntries[0].Severity, 'warning');
 });

@@ -755,3 +755,155 @@ test('DELETE /api/projects/:id/repositories/:repoId: returns 204 when artefact r
     assert.strictEqual(warningEntry?.Source, 'workspace-index');
     assert.strictEqual(warningEntry?.Operation, 'unlink-repository');
 });
+
+// ---------------------------------------------------------------------------
+// Directives and repository role — T-29, T-31
+// ---------------------------------------------------------------------------
+
+/** Patches directive/role methods and the index refresh onto the shared mocks, recording every call. */
+function buildDirectiveSut(): ReturnType<typeof buildSut> & {
+    managerCalls: { method: string; args: unknown[] }[];
+    refreshCalls: string[];
+    refresh: { shouldThrow: boolean; failed: { workspaceId: string; error: string }[] };
+} {
+    const sut = buildSut();
+    const managerCalls: { method: string; args: unknown[] }[] = [];
+    const refreshCalls: string[] = [];
+    const refresh = { shouldThrow: false, failed: [] as { workspaceId: string; error: string }[] };
+    const pm = sut.pm as unknown as Record<string, unknown>;
+    const stored = (id: string, text: string) => ({ Id: id, Text: text, DateModified: '2026-01-01T00:00:00.000Z' });
+    const guard = (projectId: string): void => {
+        if (sut.pm.getById(projectId) === undefined) throw new NotFoundError(`project "${projectId}" does not exist`);
+    };
+    pm['listDirectives'] = (projectId: string, scope: unknown) => { managerCalls.push({ method: 'listDirectives', args: [projectId, scope] }); guard(projectId); return [stored('d1', 'One')]; };
+    pm['addDirective'] = (projectId: string, scope: unknown, input: { Text: string }) => {
+        managerCalls.push({ method: 'addDirective', args: [projectId, scope, input] });
+        guard(projectId);
+        if (input.Text.trim() === '') throw new Error('Directive must not be empty.');
+        return stored('d2', input.Text);
+    };
+    pm['updateDirective'] = (projectId: string, scope: unknown, id: string, input: { Text: string }) => {
+        managerCalls.push({ method: 'updateDirective', args: [projectId, scope, id, input] });
+        guard(projectId);
+        if (id !== 'd1') throw new NotFoundError(`Directive "${id}" does not exist`);
+        return stored(id, input.Text);
+    };
+    pm['removeDirective'] = (projectId: string, scope: unknown, id: string) => {
+        managerCalls.push({ method: 'removeDirective', args: [projectId, scope, id] });
+        guard(projectId);
+        if (id !== 'd1') throw new NotFoundError(`Directive "${id}" does not exist`);
+        return stored(id, 'One');
+    };
+    pm['setRepositoryRole'] = (projectId: string, repoId: string, text: string) => {
+        managerCalls.push({ method: 'setRepositoryRole', args: [projectId, repoId, text] });
+        guard(projectId);
+        if (repoId !== 'repo-a') throw new NotFoundError(`Repository "${repoId}" is not listed`);
+        if (text.length > 100) throw new Error('Role is too long.');
+        return text.trim();
+    };
+    (sut.artifacts as unknown as Record<string, unknown>)['refreshProjectIndexes'] = (projectId: string) => {
+        refreshCalls.push(projectId);
+        if (refresh.shouldThrow) throw new Error('Simulated refresh failure.');
+        return { refreshed: [], failed: refresh.failed };
+    };
+    return { ...sut, managerCalls, refreshCalls, refresh };
+}
+
+async function send(router: Router, method: string, url: string, body?: unknown): Promise<MockResponse> {
+    const mock = mockResponse();
+    router.handle(mockRequest(method, url, body), mock.res);
+    await flushAsync();
+    return mock;
+}
+
+test('T-29: project directive endpoints succeed, use project scope and refresh the indexes', async () => {
+    const { router, pm, managerCalls, refreshCalls } = buildDirectiveSut();
+    pm.seed([makeProject('p', 'P')]);
+
+    assert.strictEqual((await send(router, 'GET', '/api/projects/p/directives')).statusCode, 200);
+
+    const created = await send(router, 'POST', '/api/projects/p/directives', { text: 'Be nice.' });
+    assert.strictEqual(created.statusCode, 201);
+    assert.strictEqual((JSON.parse(created.body) as { Text: string }).Text, 'Be nice.');
+
+    assert.strictEqual((await send(router, 'PUT', '/api/projects/p/directives/d1', { text: 'Changed.' })).statusCode, 200);
+    assert.strictEqual((await send(router, 'DELETE', '/api/projects/p/directives/d1')).statusCode, 204);
+
+    for (const call of managerCalls) {
+        assert.deepEqual(call.args[1], { kind: 'project' });
+    }
+    assert.deepEqual(refreshCalls, ['p', 'p', 'p']);
+});
+
+test('T-29: project directive endpoints return 400 on validation errors and 404 on unknown project/directive', async () => {
+    const { router, pm, refreshCalls } = buildDirectiveSut();
+    pm.seed([makeProject('p', 'P')]);
+
+    assert.strictEqual((await send(router, 'POST', '/api/projects/p/directives', { text: '  ' })).statusCode, 400);
+    assert.strictEqual((await send(router, 'POST', '/api/projects/p/directives', {})).statusCode, 400);
+    assert.strictEqual((await send(router, 'POST', '/api/projects/nope/directives', { text: 'x' })).statusCode, 404);
+    assert.strictEqual((await send(router, 'GET', '/api/projects/nope/directives')).statusCode, 404);
+    assert.strictEqual((await send(router, 'PUT', '/api/projects/p/directives/zzz', { text: 'x' })).statusCode, 404);
+    assert.strictEqual((await send(router, 'DELETE', '/api/projects/p/directives/zzz')).statusCode, 404);
+    assert.deepEqual(refreshCalls, []);
+});
+
+test('T-29: a refresh failure is tolerated and logged as a warning', async () => {
+    const { router, pm, refresh, errorLog } = buildDirectiveSut();
+    pm.seed([makeProject('p', 'P')]);
+
+    refresh.shouldThrow = true;
+    assert.strictEqual((await send(router, 'POST', '/api/projects/p/directives', { text: 'x' })).statusCode, 201);
+    assert.strictEqual(errorLog.appendedEntries.length, 1);
+    assert.strictEqual(errorLog.appendedEntries[0].Severity, 'warning');
+
+    refresh.shouldThrow = false;
+    refresh.failed = [{ workspaceId: 'STABLE', error: 'disk full' }];
+    assert.strictEqual((await send(router, 'DELETE', '/api/projects/p/directives/d1')).statusCode, 204);
+    assert.strictEqual(errorLog.appendedEntries.length, 2);
+});
+
+test('T-31: the role endpoint sets and clears a role and refreshes the indexes', async () => {
+    const { router, pm, managerCalls, refreshCalls } = buildDirectiveSut();
+    pm.seed([makeProject('p', 'P', ['repo-a'])]);
+
+    const set = await send(router, 'PUT', '/api/projects/p/repositories/repo-a/role', { role: 'Core' });
+    assert.strictEqual(set.statusCode, 200);
+    assert.deepEqual(JSON.parse(set.body), { role: 'Core' });
+
+    const cleared = await send(router, 'PUT', '/api/projects/p/repositories/repo-a/role', { role: '' });
+    assert.strictEqual(cleared.statusCode, 200);
+    assert.deepEqual(JSON.parse(cleared.body), { role: '' });
+
+    assert.deepEqual(managerCalls.map((c) => c.args), [['p', 'repo-a', 'Core'], ['p', 'repo-a', '']]);
+    assert.deepEqual(refreshCalls, ['p', 'p']);
+});
+
+test('T-31: the role endpoint returns 400 / 404 on errors and tolerates a refresh failure', async () => {
+    const { router, pm, refresh, errorLog } = buildDirectiveSut();
+    pm.seed([makeProject('p', 'P', ['repo-a'])]);
+
+    assert.strictEqual((await send(router, 'PUT', '/api/projects/p/repositories/repo-a/role', {})).statusCode, 400);
+    assert.strictEqual((await send(router, 'PUT', '/api/projects/p/repositories/repo-a/role', { role: 'x'.repeat(200) })).statusCode, 400);
+    assert.strictEqual((await send(router, 'PUT', '/api/projects/nope/repositories/repo-a/role', { role: 'x' })).statusCode, 404);
+    assert.strictEqual((await send(router, 'PUT', '/api/projects/p/repositories/other/role', { role: 'x' })).statusCode, 404);
+
+    refresh.shouldThrow = true;
+    assert.strictEqual((await send(router, 'PUT', '/api/projects/p/repositories/repo-a/role', { role: 'x' })).statusCode, 200);
+    assert.strictEqual(errorLog.appendedEntries.length, 1);
+});
+
+test('GET /api/projects/:id exposes Directives and RepositoryRoles', () => {
+    const { router, pm } = buildSut();
+    const project = makeProject('p', 'P', ['repo-a']);
+    project.Directives = [{ Id: 'd1', Text: 'One', DateModified: '2026-01-01T00:00:00.000Z' }];
+    project.RepositoryRoles = { 'repo-a': 'Core' };
+    pm.seed([project]);
+
+    const mock = mockResponse();
+    router.handle(mockRequest('GET', '/api/projects/p'), mock.res);
+
+    const body = JSON.parse(mock.body) as ProjectData;
+    assert.deepEqual(body.RepositoryRoles, { 'repo-a': 'Core' });
+    assert.strictEqual(body.Directives?.[0].Text, 'One');
+});

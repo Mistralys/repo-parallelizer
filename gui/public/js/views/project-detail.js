@@ -8,6 +8,8 @@
  *     record is retained), plus "Add Repository" picker.
  *   - Custom Files tab (see `project-custom-files.js`): per-project files copied into
  *     every workspace, with an add/edit form and delete.
+ *   - Directives tab (see `project-directives.js`): project-wide agent directives
+ *     rendered into every workspace's generated AGENTS.md.
  *   - Workspaces section: list with links, per-workspace Delete (STABLE disabled),
  *     and "Add Workspace" form.
  *   - Rename Project action (changes project ID).
@@ -52,6 +54,8 @@ import { normaliseProject, normaliseRepo, normaliseWorkspace } from '../utils/no
 import { STABLE_WS_ID, APP_NAME_SHORT } from '../utils/constants.js';
 import { buildCredentialBadge } from '../utils/dom.js';
 import { buildCustomFilesSection } from './project-custom-files.js';
+import { buildProjectDirectivesSection } from './project-directives.js';
+import { buildRepositoryRoleCell } from './project-repository-roles.js';
 
 // ---------------------------------------------------------------------------
 // Router reference — injected from app.js via setRouter()
@@ -234,9 +238,10 @@ function buildMetaSection(project) {
  * @param {Array<{ id: string, name: string, url: string }>} allRepos
  *   Full global repository list.
  * @param {function(): Promise<void>} onRefresh - Re-renders the entire view.
+ * @param {Record<string, string>} [repositoryRoles] - Role text per repo ID.
  * @returns {HTMLElement}
  */
-function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh) {
+function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh, repositoryRoles = {}) {
     const section = document.createElement('section');
     section.className = 'project-repos-section';
 
@@ -255,7 +260,7 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
 
         const thead = document.createElement('thead');
         const htr   = document.createElement('tr');
-        ['Name', 'ID', 'Credential', 'Actions'].forEach((label) => {
+        ['Name', 'ID', 'Credential', 'Role / relations', 'Actions'].forEach((label) => {
             const th = document.createElement('th');
             th.textContent = label;
             htr.appendChild(th);
@@ -285,6 +290,9 @@ function buildRepositoriesSection(projectId, projectRepoIds, allRepos, onRefresh
             credCell.className = 'repo-credential-cell';
             credCell.appendChild(buildCredentialBadge(repo && repo.credentialId));
             tr.appendChild(credCell);
+
+            // Role / relations cell (inline click-to-edit)
+            tr.appendChild(buildRepositoryRoleCell(projectId, repoId, repositoryRoles[repoId]));
 
             // Actions cell
             const actCell = document.createElement('td');
@@ -959,6 +967,7 @@ export async function renderProjectDetail(container, params) {
         { id: 'workspaces', label: 'Workspaces' },
         { id: 'repositories', label: 'Repositories' },
         { id: 'custom-files', label: 'Custom Files' },
+        { id: 'directives', label: 'Directives' },
         { id: 'danger', label: 'Danger Zone' },
     ];
 
@@ -1014,6 +1023,7 @@ export async function renderProjectDetail(container, params) {
             normProject.repositories,
             normAllRepos,
             refresh,
+            project.RepositoryRoles || {},
         ),
     );
     container.appendChild(panels.repositories);
@@ -1023,6 +1033,10 @@ export async function renderProjectDetail(container, params) {
         buildCustomFilesSection(normProject.id, project.CustomFiles, refresh),
     );
     container.appendChild(panels['custom-files']);
+
+    // ---- Directives panel ----
+    panels.directives.appendChild(buildProjectDirectivesSection(normProject.id));
+    container.appendChild(panels.directives);
 
     // ---- Workspaces panel ----
     panels.workspaces.appendChild(

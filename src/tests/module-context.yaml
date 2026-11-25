@@ -1,11 +1,13 @@
 moduleMetaData:
   id: "tests"
   label: "Test Helpers"
-  description: "Shared test utilities (makeTestConfig, createTempDirTracker, setupFakeGit) and all unit test suites for the server layer."
+  description: "Shared test utilities (makeTestConfig, createTempDirTracker, setupFakeGit), workspace-index golden-baseline fixtures and capture script (fixtures/), and all unit test suites for the server layer."
   keywords:
     - makeTestConfig
     - createTempDirTracker
     - setupFakeGit
+    - capture-golden
+    - workspace-index-baseline
     - AppConfig
   relatedModules:
     - config

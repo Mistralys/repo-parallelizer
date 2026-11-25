@@ -6,6 +6,7 @@ import {
     escapesRootViaRealpath,
     isDirectoryShaped,
 } from '../utils/path-guard.js';
+import { neutraliseGeneratedMarkers, collapseToSingleLine } from '../utils/single-paragraph-text.js';
 
 /**
  * Base names of the three generated per-workspace index files, in the order
@@ -49,6 +50,13 @@ export interface WorkspaceIndexRepositoryRow {
 
     /** Remote Git URL. */
     url: string;
+
+    /**
+     * Owner-defined "Role / relations" text. Absent or empty when none is
+     * set; the Repositories table gains a `Role / relations` column only when
+     * at least one row has a non-empty role.
+     */
+    role?: string;
 }
 
 /**
@@ -81,6 +89,29 @@ export interface WorkspaceIndexRepositoryFileRow {
 
     /** Description. Empty string when none is set. */
     description: string;
+}
+
+/**
+ * A single sibling-workspace row rendered into the `AGENTS.md` "Workspaces"
+ * table. Derived from `project.Workspaces` and the fixed on-disk layout
+ * (workspaces are siblings under `projectsFolder/<projectId>/`) — never read
+ * from the filesystem, so a workspace that is not set up yet is still listed.
+ */
+export interface WorkspaceIndexSiblingRow {
+    /** Workspace ID. */
+    id: string;
+
+    /** Folder relative to this workspace's folder, e.g. `../STABLE`. */
+    relativePath: string;
+
+    /** Absolute folder path, `path.join(projectsFolder, projectId, id)`. */
+    absolutePath: string;
+
+    /** Absolute URL to the workspace's GUI page. */
+    guiUrl: string;
+
+    /** True for the row describing the workspace this file is generated for. */
+    isCurrent: boolean;
 }
 
 /**
@@ -129,6 +160,28 @@ export interface WorkspaceIndexContext {
      */
     repositoryFiles?: WorkspaceIndexRepositoryFileRow[];
 
+    /**
+     * All workspaces of the project (this one included), ordered `STABLE`
+     * first, then alphabetical. Rendered into the `AGENTS.md` "Workspaces"
+     * section only; the section is omitted when absent or when fewer than two
+     * rows are given.
+     */
+    siblingWorkspaces?: WorkspaceIndexSiblingRow[];
+
+    /**
+     * Owner-defined project-wide directive texts (stored order). Rendered into
+     * the `AGENTS.md` "Agent Directives" list after the fixed bullets; absent
+     * or empty renders nothing.
+     */
+    projectDirectives?: string[];
+
+    /**
+     * Owner-defined directive texts of this workspace only (stored order).
+     * Rendered after {@link projectDirectives} in the same flat list — the
+     * scope distinction is deliberately invisible to the reading agent.
+     */
+    workspaceDirectives?: string[];
+
     /** Absolute URL to this workspace's GUI page (built from `config.serverPort`). */
     guiUrl: string;
 
@@ -153,8 +206,9 @@ export interface WorkspaceIndexContext {
  * Neutralises a string for safe embedding as a single Markdown table cell.
  *
  * Escapes `|` (which would otherwise be interpreted as a column separator),
- * collapses CR/LF sequences to a single space (a raw newline inside a cell
- * breaks the row), and trims leading/trailing whitespace.
+ * neutralises generated-marker text (so a value cannot forge a begin/end
+ * marker), collapses CR/LF sequences to a single space (a raw newline inside a
+ * cell breaks the row), and trims leading/trailing whitespace.
  *
  * Used for every user-supplied string embedded in the generated index body —
  * not only literal table cells — because a value containing an unescaped `|`
@@ -162,10 +216,17 @@ export interface WorkspaceIndexContext {
  * parsing in surrounding lines (AC-06).
  */
 export function escapeMarkdownCell(value: string): string {
-    return value
-        .replace(/\|/g, '\\|')
-        .replace(/\r\n|\r|\n/g, ' ')
-        .trim();
+    return collapseToSingleLine(neutraliseGeneratedMarkers(value).replace(/\|/g, '\\|'));
+}
+
+/**
+ * Neutralises a string for embedding as a single Markdown list item: marker
+ * text is defused and line breaks collapse to a space. Unlike
+ * {@link escapeMarkdownCell} it leaves `|` alone, which is harmless outside a
+ * table.
+ */
+export function sanitiseListText(value: string): string {
+    return collapseToSingleLine(neutraliseGeneratedMarkers(value));
 }
 
 /**
@@ -201,14 +262,16 @@ function renderIndexBody(ctx: WorkspaceIndexContext): string {
     lines.push('');
     lines.push('## Repositories');
     lines.push('');
-    lines.push('| Folder | Name | Description | Remote URL |');
-    lines.push('|---|---|---|---|');
+    const hasRoles = ctx.repositories.some((repo) => escapeMarkdownCell(repo.role ?? '') !== '');
+    lines.push(hasRoles ? '| Folder | Name | Description | Remote URL | Role / relations |' : '| Folder | Name | Description | Remote URL |');
+    lines.push(hasRoles ? '|---|---|---|---|---|' : '|---|---|---|---|');
 
     for (const repo of ctx.repositories) {
         const name = escapeMarkdownCell(repo.name);
         const description = escapeMarkdownCell(repo.description);
         const url = escapeMarkdownCell(repo.url);
-        lines.push(`| ${repo.id} | ${name} | ${description} | ${url} |`);
+        const roleCell = hasRoles ? ` ${escapeMarkdownCell(repo.role ?? '')} |` : '';
+        lines.push(`| ${repo.id} | ${name} | ${description} | ${url} |${roleCell}`);
     }
 
     lines.push('');
@@ -220,18 +283,48 @@ function renderIndexBody(ctx: WorkspaceIndexContext): string {
 }
 
 /**
- * Directives block appended to `AGENTS.md` only. Deliberately excludes live
- * git state (branch, dirty status, ahead/behind) — the GUI owns that, and a
- * generated file reporting it would be wrong within minutes.
+ * Renders the directives block appended to `AGENTS.md` only. Deliberately
+ * excludes live git state (branch, dirty status, ahead/behind) — a generated
+ * file reporting it would be wrong within minutes; agents are pointed at
+ * read-only `git -C` commands instead.
+ *
+ * Pure function of `ctx.repositories`: per-repository reading paths are static
+ * text ("if present" wording) and are never checked on disk. The precedence
+ * statement is scoped to the generated overview so that owner-defined rules
+ * sharing this list are not read as subordinate to it.
  */
-const AGENT_DIRECTIVES_BLOCK = [
-    '## Agent Directives',
-    '',
-    '- Each subfolder listed above is an independent git repository with its own instruction files (e.g. `AGENTS.md`, `CLAUDE.md`) that must be read before working in it.',
-    '- Do not use relative imports across repository/folder boundaries.',
-    '- Live branch, working-tree status, and ahead/behind counts are not tracked in this file — use the Paralizer GUI link above for current git state.',
-    '- Content between the generated markers above is regenerated automatically; edits outside the markers are preserved.',
-].join('\n');
+export function renderAgentDirectives(ctx: WorkspaceIndexContext): string {
+    const repoFolder = ctx.repositories.length > 0 ? ctx.repositories[0].id.replace(/[`\s]/g, '') : '<repo-folder>';
+    const readingList = ctx.repositories
+        .map((repo) => {
+            const id = repo.id.replace(/[`\s]/g, '');
+            return `\`${id}/AGENTS.md\`, \`${id}/CLAUDE.md\``;
+        })
+        .join('; ');
+
+    const lines = [
+        '## Agent Directives',
+        '',
+        '- The workspace and repository overview above is orientation only. Before working in a repository, read its `AGENTS.md` and `CLAUDE.md` (if present); for facts about a repository, the nearest `AGENTS.md` to the file you are changing takes precedence over this overview. The directives in this list apply to every repository of this workspace.',
+    ];
+    if (readingList !== '') {
+        lines.push(`- Reading list, in table order (each file only if present): ${readingList}.`);
+    }
+    lines.push(
+        '- Each subfolder listed above is an independent git repository with its own instruction files (e.g. `AGENTS.md`, `CLAUDE.md`) that must be read before working in it.',
+        '- Do not use relative imports across repository/folder boundaries.',
+        `- Live branch, working-tree and ahead/behind state is not recorded in this file. Use read-only git, e.g. \`git -C ${repoFolder} status -sb\` and \`git -C ${repoFolder} branch --show-current\` (substitute another repository folder from the table as needed). The GUI link above is for humans.`,
+        '- `<repo-folder>/.workspace/` folders are managed by Paralizer and are not repository source — do not treat `.workspace/files/` or `.workspace/info.json` as code to edit.',
+        '- `README.md`, `AGENTS.md` and `CLAUDE.md` in this folder are generated: only the content between the `paralizer:generated` markers is overwritten on regeneration, so hand-written notes belong outside the markers; `CLAUDE.md` only points to `AGENTS.md`.',
+    );
+    for (const text of [...(ctx.projectDirectives ?? []), ...(ctx.workspaceDirectives ?? [])]) {
+        const clean = sanitiseListText(text);
+        if (clean !== '') {
+            lines.push(`- ${clean}`);
+        }
+    }
+    return lines.join('\n');
+}
 
 /**
  * Renders the generated body of `README.md`: project/workspace metadata, the
@@ -244,23 +337,36 @@ export function renderWorkspaceReadme(ctx: WorkspaceIndexContext): string {
 /**
  * Renders the generated body of `AGENTS.md`: the same content as
  * {@link renderWorkspaceReadme} plus the agent-directives block.
+ *
+ * Section order (empty sections are omitted):
+ * 1. index body (metadata + repository table + GUI link)
+ * 2. sibling workspaces (two or more workspaces only)
+ * 3. custom files
+ * 4. repository files
+ * 5. Paralizer CLI
+ * 6. agent directives
  */
 export function renderWorkspaceAgents(ctx: WorkspaceIndexContext): string {
-    const customSection = renderCustomFilesSection(ctx.customFiles ?? []);
-    const repositoryFilesSection = renderRepositoryFilesSection(ctx.repositoryFiles ?? []);
-    const sections = [renderIndexBody(ctx)];
-    if (customSection !== '') sections.push(customSection);
-    if (repositoryFilesSection !== '') sections.push(repositoryFilesSection);
-    sections.push(renderCliSection(ctx), AGENT_DIRECTIVES_BLOCK);
+    const sections = [
+        renderIndexBody(ctx),
+        renderSiblingWorkspacesSection(ctx.siblingWorkspaces ?? []),
+        renderCustomFilesSection(ctx.customFiles ?? []),
+        renderRepositoryFilesSection(ctx.repositoryFiles ?? []),
+        renderCliSection(ctx),
+        renderAgentDirectives(ctx),
+    ].filter((section) => section !== '');
     return sections.join('\n\n');
 }
 
 /**
  * Renders the "Paralizer CLI" section for `AGENTS.md`: where the installation
  * lives and how to reach the built-in help. Deliberately does not document
- * the commands — `paralizer help` is the single source of truth. Gains a
- * `paralizer repo-files` pointer line only when `ctx.repositoryFiles` has at
- * least one row, mirroring the existing `custom-files` pointer.
+ * the commands — `paralizer help` is the single source of truth — beyond one
+ * read-only `list` example per command family. Always includes
+ * `paralizer custom-files list {projectId}`; gains the `paralizer repo-files`
+ * pointer and a `repo-files list --repo {firstRepoId}` example only when
+ * `ctx.repositoryFiles` has at least one row (the latter also needs at least
+ * one repository).
  */
 function renderCliSection(ctx: WorkspaceIndexContext): string {
     const root = ctx.toolRoot.replace(/`/g, '');
@@ -273,10 +379,61 @@ function renderCliSection(ctx: WorkspaceIndexContext): string {
         '- Run `paralizer help` for the available commands (if `paralizer` is not on the PATH: `node "' + root + '/dist/index.js" help`).',
         '- To change a custom file for all workspaces of this project, use `paralizer custom-files` — never edit the copy in this workspace, it is overwritten on every sync.',
     ];
+    lines.push(`- List the custom files of this project: \`paralizer custom-files list ${projectId}\`.`);
     if ((ctx.repositoryFiles ?? []).length > 0) {
         lines.push(
             '- To change a repository file, use `paralizer repo-files` — never edit the copy in this workspace, it is overwritten on the next sync.',
         );
+        if (ctx.repositories.length > 0) {
+            const firstRepoId = ctx.repositories[0].id.replace(/`/g, '');
+            lines.push(
+                `- List the files of a repository: \`paralizer repo-files list --repo ${firstRepoId}\` (takes a repository ID, not a project ID; substitute another folder name from the table).`,
+            );
+        }
+    }
+    const workspaceId = ctx.workspaceId.replace(/`/g, '');
+    if (hasUserRules(ctx)) {
+        lines.push(
+            `- The user-defined rules in "Agent Directives" are stored in Paralizer: list them with \`paralizer directives list ${projectId}\` (project-wide) and \`paralizer directives list ${projectId} --workspace ${workspaceId}\` (this workspace only); edit the definition with these commands, never this file.`,
+        );
+    }
+    if (ctx.repositories.some((repo) => escapeMarkdownCell(repo.role ?? '') !== '')) {
+        lines.push(
+            `- The "Role / relations" column of the repository table is stored in Paralizer: list it with \`paralizer repo-roles list ${projectId}\`; edit it with that command, never this file.`,
+        );
+    }
+    return lines.join('\n');
+}
+
+/** Whether the context carries at least one non-empty owner-defined directive. */
+function hasUserRules(ctx: WorkspaceIndexContext): boolean {
+    return [...(ctx.projectDirectives ?? []), ...(ctx.workspaceDirectives ?? [])].some((t) => sanitiseListText(t) !== '');
+}
+
+/**
+ * Renders the "Workspaces" table for `AGENTS.md`, or an empty string when
+ * fewer than two rows are given (a lone workspace has no siblings to point
+ * at). The current workspace's row is marked `{id} (this workspace)`. Paths
+ * are wrapped in code spans with backticks stripped; every cell goes through
+ * {@link escapeMarkdownCell}.
+ */
+function renderSiblingWorkspacesSection(rows: WorkspaceIndexSiblingRow[]): string {
+    if (rows.length < 2) return '';
+
+    const lines: string[] = [
+        '## Workspaces',
+        '',
+        'All workspaces of this project are sibling folders. Each is a separate set of clones of the same repositories, so changes in one are not visible in another until pushed and pulled.',
+        '',
+        '| Workspace | Folder | Absolute path | GUI |',
+        '|---|---|---|---|',
+    ];
+    for (const row of rows) {
+        const id = escapeMarkdownCell(row.id);
+        const label = row.isCurrent ? `${id} (this workspace)` : id;
+        const relativePath = escapeMarkdownCell(row.relativePath).replace(/`/g, '');
+        const absolutePath = escapeMarkdownCell(row.absolutePath).replace(/`/g, '');
+        lines.push(`| ${label} | \`${relativePath}\` | \`${absolutePath}\` | ${escapeMarkdownCell(row.guiUrl)} |`);
     }
     return lines.join('\n');
 }
@@ -293,7 +450,7 @@ function renderCustomFilesSection(rows: WorkspaceIndexCustomFileRow[]): string {
     const lines: string[] = [
         '## Custom Files',
         '',
-        'Project-specific files managed by paralizer, located relative to this workspace folder. They are overwritten on every sync — edit them in the Paralizer GUI, not here.',
+        'Project-specific files managed by paralizer, located relative to this workspace folder. They are not repository source and live only in this workspace folder. They are overwritten on every sync — edit them in the Paralizer GUI, not here.',
         '',
         '| Path | Label | Description |',
         '|---|---|---|',
@@ -332,7 +489,7 @@ function renderRepositoryFilesSection(rows: WorkspaceIndexRepositoryFileRow[]): 
     const lines: string[] = [
         '## Repository Files',
         '',
-        'Per-repository files managed by Paralizer, delivered through git alongside each repository ' +
+        'Per-repository files managed by Paralizer under `<repo>/.workspace/files/` (tool-managed, not repository source), delivered through git alongside each repository ' +
         '(commit & push, then pull in this workspace) — a file listed here may not be present locally yet ' +
         'if the repository has not been pulled since it was added or changed. A file marked executable can ' +
         'be run directly, e.g. `sh <path>`, from the workspace root. Edit them only via `paralizer repo-files` ' +

@@ -11,6 +11,8 @@ import type { RepositoryManager } from '../repository/repository.manager.js';
 import type { ProjectData, ProjectIndex, ProjectIndexEntry, ProjectWorkspace } from './project.types.js';
 import { STABLE_WORKSPACE_ID } from '../workspace/workspace.types.js';
 import { randomUUID } from 'node:crypto';
+import { validateDirectiveInput, type AgentDirective, type AgentDirectiveInput, type DirectiveScope } from './directive.js';
+import { validateRepositoryRole } from './repository-role.js';
 import { validateCustomFileInput, type CustomFile, type CustomFileInput } from './custom-file.js';
 
 const INDEX_FILE = 'projects-index.json';
@@ -333,9 +335,69 @@ export class ProjectManager {
         }
 
         project.Repositories.splice(idx, 1);
+        if (project.RepositoryRoles && Object.prototype.hasOwnProperty.call(project.RepositoryRoles, repositoryId)) {
+            delete project.RepositoryRoles[repositoryId];
+            if (Object.keys(project.RepositoryRoles).length === 0) {
+                delete project.RepositoryRoles;
+            }
+        }
         project.DateModified = this.now();
         this.saveProject(project);
         return project;
+    }
+
+    // -------------------------------------------------------------------------
+    // Repository roles
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns the project's repository roles as a map of repository ID to
+     * role text (empty object when none).
+     *
+     * @throws {NotFoundError} If the project does not exist.
+     */
+    getRepositoryRoles(projectId: string): Record<string, string> {
+        const project = this.loadProject(projectId);
+        if (!project) {
+            throw new NotFoundError(`Cannot get repository roles: project with ID "${projectId}" does not exist.`);
+        }
+        return { ...(project.RepositoryRoles ?? {}) };
+    }
+
+    /**
+     * Sets, replaces or (with empty text) clears the role of a repository.
+     * Text is validated via `validateRepositoryRole()`. Updates `DateModified`.
+     *
+     * @returns The stored role text, or `''` when the role was cleared.
+     * @throws {NotFoundError} If the project does not exist.
+     * @throws {Error} If the repository is not listed in the project, or the
+     *   text is invalid.
+     */
+    setRepositoryRole(projectId: string, repositoryId: string, text: string): string {
+        const project = this.loadProject(projectId);
+        if (!project) {
+            throw new NotFoundError(`Cannot set repository role: project with ID "${projectId}" does not exist.`);
+        }
+        if (!project.Repositories.includes(repositoryId)) {
+            throw new NotFoundError(`Repository "${repositoryId}" is not listed in project "${projectId}".`);
+        }
+
+        const role = validateRepositoryRole(text);
+        const roles: Record<string, string> = { ...(project.RepositoryRoles ?? {}) };
+        if (role === '') {
+            delete roles[repositoryId];
+        } else {
+            roles[repositoryId] = role;
+        }
+
+        if (Object.keys(roles).length === 0) {
+            delete project.RepositoryRoles;
+        } else {
+            project.RepositoryRoles = roles;
+        }
+        project.DateModified = this.now();
+        this.saveProject(project);
+        return role;
     }
 
     // -------------------------------------------------------------------------
@@ -435,6 +497,135 @@ export class ProjectManager {
         project.CustomFiles = files.filter((f) => f.Id !== fileId);
         project.DateModified = this.now();
         this.saveProject(project);
+        return removed;
+    }
+
+    // -------------------------------------------------------------------------
+    // Agent directives
+    // -------------------------------------------------------------------------
+
+    /**
+     * Resolves the directive list and its owner for a scope. Returns the
+     * project plus accessors so callers share one scope-resolution path.
+     *
+     * @throws {NotFoundError} If the project or workspace does not exist.
+     * @throws {Error} If a workspace scope has a blank `workspaceId`, or the
+     *   scope kind is unknown.
+     */
+    private resolveDirectiveScope(projectId: string, scope: DirectiveScope, action: string): {
+        project: ProjectData;
+        get: () => AgentDirective[];
+        set: (list: AgentDirective[], now: string) => void;
+    } {
+        const project = this.loadProject(projectId);
+        if (!project) {
+            throw new NotFoundError(`Cannot ${action}: project with ID "${projectId}" does not exist.`);
+        }
+        const kind = (scope as { kind?: unknown } | undefined)?.kind;
+        if (kind === 'project') {
+            return {
+                project,
+                get: () => project.Directives ?? [],
+                set: (list) => { project.Directives = list; },
+            };
+        }
+        if (kind === 'workspace') {
+            const workspaceId = (scope as { workspaceId?: unknown }).workspaceId;
+            if (typeof workspaceId !== 'string' || workspaceId.trim() === '') {
+                throw new Error('A workspace ID is required for a workspace-scoped directive.');
+            }
+            // Own-property check: inherited keys ("__proto__", "constructor", ...) must not resolve.
+            const ws = Object.prototype.hasOwnProperty.call(project.Workspaces, workspaceId)
+                ? project.Workspaces[workspaceId]
+                : undefined;
+            if (!ws) {
+                throw new NotFoundError(`Cannot ${action}: workspace "${workspaceId}" does not exist in project "${projectId}".`);
+            }
+            return {
+                project,
+                get: () => ws.Directives ?? [],
+                set: (list, now) => { ws.Directives = list; ws.DateModified = now; },
+            };
+        }
+        throw new Error('A directive scope is required: "project" or "workspace".');
+    }
+
+    /**
+     * Returns the directives of a scope (empty array when none).
+     *
+     * @throws {NotFoundError} If the project or workspace does not exist.
+     * @throws {Error} If the scope is invalid (e.g. blank workspace ID).
+     */
+    listDirectives(projectId: string, scope: DirectiveScope): AgentDirective[] {
+        return this.resolveDirectiveScope(projectId, scope, 'list directives').get();
+    }
+
+    /**
+     * Adds a directive to a scope. Input is validated via `validateDirectiveInput()`.
+     *
+     * @throws {NotFoundError} If the project or workspace does not exist.
+     * @throws {Error} If the scope or the input is invalid.
+     */
+    addDirective(projectId: string, scope: DirectiveScope, input: AgentDirectiveInput): AgentDirective {
+        const ctx = this.resolveDirectiveScope(projectId, scope, 'add directive');
+        const list = ctx.get();
+        const valid = validateDirectiveInput(input, list);
+        const now = this.now();
+        const directive: AgentDirective = { Id: randomUUID(), ...valid, DateModified: now };
+
+        ctx.set([...list, directive], now);
+        ctx.project.DateModified = now;
+        this.saveProject(ctx.project);
+        return directive;
+    }
+
+    /**
+     * Replaces the text of a directive.
+     *
+     * @throws {NotFoundError} If the project, workspace or directive does not exist.
+     * @throws {Error} If the scope or the input is invalid.
+     */
+    updateDirective(
+        projectId: string,
+        scope: DirectiveScope,
+        directiveId: string,
+        input: AgentDirectiveInput,
+    ): AgentDirective {
+        const ctx = this.resolveDirectiveScope(projectId, scope, 'update directive');
+        const list = ctx.get();
+        const idx = list.findIndex((d) => d.Id === directiveId);
+        if (idx === -1) {
+            throw new NotFoundError(`Directive "${directiveId}" does not exist in project "${projectId}".`);
+        }
+
+        const valid = validateDirectiveInput(input, list.filter((d) => d.Id !== directiveId));
+        const now = this.now();
+        const updated: AgentDirective = { Id: directiveId, ...valid, DateModified: now };
+
+        ctx.set(list.map((d, i) => (i === idx ? updated : d)), now);
+        ctx.project.DateModified = now;
+        this.saveProject(ctx.project);
+        return updated;
+    }
+
+    /**
+     * Removes a directive and returns it.
+     *
+     * @throws {NotFoundError} If the project, workspace or directive does not exist.
+     * @throws {Error} If the scope is invalid.
+     */
+    removeDirective(projectId: string, scope: DirectiveScope, directiveId: string): AgentDirective {
+        const ctx = this.resolveDirectiveScope(projectId, scope, 'remove directive');
+        const list = ctx.get();
+        const removed = list.find((d) => d.Id === directiveId);
+        if (!removed) {
+            throw new NotFoundError(`Directive "${directiveId}" does not exist in project "${projectId}".`);
+        }
+
+        const now = this.now();
+        ctx.set(list.filter((d) => d.Id !== directiveId), now);
+        ctx.project.DateModified = now;
+        this.saveProject(ctx.project);
         return removed;
     }
 

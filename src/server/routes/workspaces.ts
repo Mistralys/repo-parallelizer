@@ -41,6 +41,14 @@ import { launchApplication, launchTerminal } from '../app-launcher.js';
  * | POST   | /api/projects/:id/workspaces/:wid/launch/vscode                  | 200     | 400/404/500 |
  * | POST   | /api/projects/:id/workspaces/:wid/launch/github-desktop/:rid     | 200     | 400/404/500 |
  * | POST   | /api/projects/:id/workspaces/:wid/launch/terminal                | 200     | 400/404/500 |
+ * | GET    | /api/projects/:id/workspaces/:wid/directives                     | 200     | 404         |
+ * | POST   | /api/projects/:id/workspaces/:wid/directives                     | 201     | 400/404     |
+ * | PUT    | /api/projects/:id/workspaces/:wid/directives/:directiveId        | 200     | 400/404     |
+ * | DELETE | /api/projects/:id/workspaces/:wid/directives/:directiveId        | 204     | 400/404     |
+ *
+ * The workspace directive mutations (body `{ text }`) are followed by a
+ * best-effort `regenerateWorkspace()` of that workspace only; a failure is
+ * logged as a warning and does not change the response.
  */
 export function registerWorkspaceRoutes(
     router: Router,
@@ -120,6 +128,136 @@ export function registerWorkspaceRoutes(
             Message: `Failed to update workspace artefacts after "${operation}": ${message}`,
         });
     }
+
+    /**
+     * Best-effort sibling refresh: rewrites the index files of every workspace
+     * of `projectId` so their sibling tables reflect a just-completed
+     * create / rename / delete. Runs in its own try/catch, so neither a thrown
+     * error nor a per-workspace `failed` entry can affect the caller's
+     * response; each is logged as a warning with operation `refresh-siblings`.
+     *
+     * @param projectId            - The project whose workspaces are refreshed.
+     * @param triggeringWorkspaceId - The workspace whose lifecycle change triggered the refresh.
+     */
+    function refreshSiblingsBestEffort(projectId: string, triggeringWorkspaceId: string): void {
+        try {
+            const result = workspaceArtifactsOrchestrator.refreshProjectIndexes(projectId);
+            for (const failure of result.failed) {
+                logArtifactWarning(
+                    'refresh-siblings',
+                    projectId,
+                    triggeringWorkspaceId,
+                    new Error(`workspace "${failure.workspaceId}": ${failure.error}`),
+                );
+            }
+        } catch (err) {
+            logArtifactWarning('refresh-siblings', projectId, triggeringWorkspaceId, err);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Directives — /api/projects/:id/workspaces/:wid/directives[/:directiveId]
+    // ------------------------------------------------------------------
+
+    /** Best-effort regeneration of one workspace after a directive change; failures are logged. */
+    function regenerateBestEffort(operation: string, projectId: string, workspaceId: string): void {
+        try {
+            workspaceArtifactsOrchestrator.regenerateWorkspace(projectId, workspaceId);
+        } catch (err) {
+            logArtifactWarning(operation, projectId, workspaceId, err);
+        }
+    }
+
+    /** Reads the `{ text: string }` body; sends a 400 and returns `undefined` when it is malformed. */
+    async function readDirectiveText(req: IncomingMessage, res: ServerResponse): Promise<string | undefined> {
+        let body: unknown;
+        try {
+            body = await parseJsonBody(req);
+        } catch (err) {
+            sendError(res, 400, err instanceof Error ? err.message : 'Invalid request body.');
+            return undefined;
+        }
+        if (!isPlainObject(body)) {
+            sendError(res, 400, 'Request body must be a JSON object.');
+            return undefined;
+        }
+        const text = (body as Record<string, unknown>)['text'];
+        if (typeof text !== 'string') {
+            sendError(res, 400, 'Missing required field: text (string).');
+            return undefined;
+        }
+        return text;
+    }
+
+    router.get('/api/projects/:id/workspaces/:wid/directives', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        try {
+            sendJson(res, 200, projectManager.listDirectives(params['id'], { kind: 'workspace', workspaceId: params['wid'] }));
+        } catch (err) {
+            sendError(res, err instanceof NotFoundError ? 404 : 400, err instanceof Error ? err.message : 'Not found.');
+        }
+    });
+
+    router.post('/api/projects/:id/workspaces/:wid/directives', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const projectId = params['id'];
+        const workspaceId = params['wid'];
+        const text = await readDirectiveText(req, res);
+        if (text === undefined) return;
+
+        try {
+            const created = projectManager.addDirective(projectId, { kind: 'workspace', workspaceId }, { Text: text });
+            regenerateBestEffort('add-workspace-directive', projectId, workspaceId);
+            sendJson(res, 201, created);
+        } catch (err) {
+            sendError(res, err instanceof NotFoundError ? 404 : 400, err instanceof Error ? err.message : 'Could not add directive.');
+        }
+    });
+
+    router.put('/api/projects/:id/workspaces/:wid/directives/:directiveId', async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): Promise<void> => {
+        const projectId = params['id'];
+        const workspaceId = params['wid'];
+        const text = await readDirectiveText(req, res);
+        if (text === undefined) return;
+
+        try {
+            const updated = projectManager.updateDirective(
+                projectId, { kind: 'workspace', workspaceId }, params['directiveId'], { Text: text },
+            );
+            regenerateBestEffort('update-workspace-directive', projectId, workspaceId);
+            sendJson(res, 200, updated);
+        } catch (err) {
+            sendError(res, err instanceof NotFoundError ? 404 : 400, err instanceof Error ? err.message : 'Could not update directive.');
+        }
+    });
+
+    router.delete('/api/projects/:id/workspaces/:wid/directives/:directiveId', (
+        _req: IncomingMessage,
+        res: ServerResponse,
+        params: Record<string, string>,
+    ): void => {
+        const projectId = params['id'];
+        const workspaceId = params['wid'];
+        try {
+            projectManager.removeDirective(projectId, { kind: 'workspace', workspaceId }, params['directiveId']);
+        } catch (err) {
+            sendError(res, err instanceof NotFoundError ? 404 : 400, err instanceof Error ? err.message : 'Directive not found.');
+            return;
+        }
+        regenerateBestEffort('delete-workspace-directive', projectId, workspaceId);
+        res.writeHead(204, {});
+        res.end('');
+    });
 
     // Helper: augment a WorkspaceInfo with an `Initialized` boolean and `FolderPath` string.
     function withInitialized<T extends { ProjectID: string; WorkspaceID: string }>(ws: T): T & { Initialized: boolean; FolderPath: string } {
@@ -218,6 +356,7 @@ export function registerWorkspaceRoutes(
 
         try {
             const created = workspaceManager.create(params['id'], workspaceId.trim(), desc);
+            refreshSiblingsBestEffort(params['id'], created.WorkspaceID);
             sendJson(res, 201, created);
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Could not create workspace.';
@@ -343,6 +482,8 @@ export function registerWorkspaceRoutes(
                 logArtifactWarning('rename-workspace', projectId, renamed.WorkspaceID, err);
             }
 
+            refreshSiblingsBestEffort(projectId, renamed.WorkspaceID);
+
             sendJson(res, 200, renamed);
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Could not rename workspace.';
@@ -376,6 +517,8 @@ export function registerWorkspaceRoutes(
         } catch (err) {
             logArtifactWarning('delete-workspace', projectId, workspaceId, err);
         }
+
+        refreshSiblingsBestEffort(projectId, workspaceId);
 
         res.writeHead(204, {});
         res.end('');

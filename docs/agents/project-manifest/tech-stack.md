@@ -7,7 +7,7 @@
 | Runtime | Node.js >= 18 |
 | Language | TypeScript 5.4+ (strict mode) |
 | Target | ES2022 |
-| Module system | Node16 (ESM with `.js` extensions in imports) |
+| Module system | Node16 (emits CommonJS; `.js` extensions in relative imports) |
 | Module resolution | Node16 |
 
 ## Dependencies

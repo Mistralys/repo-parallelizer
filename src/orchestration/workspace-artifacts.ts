@@ -2,14 +2,16 @@ import * as path from 'node:path';
 import type { AppConfig } from '../config/config.types.js';
 import type { ProjectManager } from '../models/project/project.manager.js';
 import type { RepositoryManager } from '../models/repository/repository.manager.js';
-import type { ProjectWorkspace } from '../models/project/project.types.js';
+import type { ProjectData, ProjectWorkspace } from '../models/project/project.types.js';
 import type { Repository } from '../models/repository/repository.types.js';
 import { generateWorkspaceFile, removeWorkspaceFile, getWorkspaceFilePath } from './vscode-workspace.js';
 import {
     writeWorkspaceIndexFiles,
     removeWorkspaceIndexFiles,
     type WorkspaceIndexContext,
+    type WorkspaceIndexSiblingRow,
 } from './workspace-index.js';
+import { STABLE_WORKSPACE_ID } from '../models/workspace/workspace.types.js';
 import { writeCustomFiles, removeCustomFileCopy } from './custom-files.js';
 import { customFileRelativePath, type CustomFile } from '../models/project/custom-file.js';
 import { repositoryFileRelativePath } from '../models/repository/repository-file.js';
@@ -38,6 +40,16 @@ export interface RegenerateWorkspaceOverrides {
      * Improvements as out of proportion to this plan's goal.
      */
     workspaceMeta?: ProjectWorkspace;
+}
+
+/**
+ * Outcome of {@link WorkspaceArtifactsOrchestrator.refreshProjectIndexes}.
+ */
+export interface ProjectIndexRefreshResult {
+    /** IDs of workspaces whose index files were processed without error. */
+    refreshed: string[];
+    /** Workspaces whose refresh threw, with the error message. */
+    failed: { workspaceId: string; error: string }[];
 }
 
 /**
@@ -157,6 +169,90 @@ export class WorkspaceArtifactsOrchestrator {
             );
     }
 
+    /**
+     * Builds the `AGENTS.md` "Workspaces" rows from `project.Workspaces` and
+     * the fixed on-disk layout (no filesystem access). `STABLE` first, then
+     * alphabetical. The current `workspaceId` is always included — even when
+     * absent from `project.Workspaces` (rename ordering, see
+     * {@link RegenerateWorkspaceOverrides}). In that rename case the old ID is
+     * still listed in `project.Workspaces`; it is recognised by its metadata
+     * being identical to the `workspaceMeta` override (which is the pre-rename
+     * entry) and excluded, since its folder no longer exists.
+     */
+    private buildSiblingWorkspaceRows(
+        project: ProjectData,
+        workspaceId: string,
+        workspaceMeta: ProjectWorkspace,
+    ): WorkspaceIndexSiblingRow[] {
+        const renameInFlight = !(workspaceId in project.Workspaces);
+        const overrideJson = JSON.stringify(workspaceMeta);
+        const ids = new Set<string>(
+            Object.keys(project.Workspaces).filter(
+                (id) => !renameInFlight || JSON.stringify(project.Workspaces[id]) !== overrideJson,
+            ),
+        );
+        ids.add(workspaceId);
+        return [...ids]
+            .sort((a, b) => {
+                if (a === STABLE_WORKSPACE_ID) return b === STABLE_WORKSPACE_ID ? 0 : -1;
+                if (b === STABLE_WORKSPACE_ID) return 1;
+                return a < b ? -1 : a > b ? 1 : 0;
+            })
+            .map((id) => ({
+                id,
+                relativePath: `../${id}`,
+                absolutePath: path.join(this.config.projectsFolder, project.Id, id),
+                guiUrl: this.guiUrl(project.Id, id),
+                isCurrent: id === workspaceId,
+            }));
+    }
+
+    /**
+     * Builds the {@link WorkspaceIndexContext} rendered into the three index
+     * files. Single place where the context is assembled, so every trigger
+     * (CLI or GUI) produces identical output.
+     */
+    private buildIndexContext(
+        project: ProjectData,
+        workspaceId: string,
+        workspaceMeta: ProjectWorkspace,
+        repositories: readonly Repository[],
+    ): WorkspaceIndexContext {
+        return {
+            projectsFolder: this.config.projectsFolder,
+            projectId: project.Id,
+            projectName: project.Name,
+            projectDescription: project.Description,
+            workspaceId,
+            workspaceDescription: workspaceMeta.Description,
+            workspaceNotes: workspaceMeta.Notes ?? '',
+            repositories: repositories.map((repo) => ({
+                id: repo.Id,
+                name: repo.Name,
+                description: repo.Description ?? '',
+                url: repo.Url,
+                role: Object.prototype.hasOwnProperty.call(project.RepositoryRoles ?? {}, repo.Id)
+                    ? project.RepositoryRoles?.[repo.Id]
+                    : undefined,
+            })),
+            projectDirectives: (project.Directives ?? []).map((directive) => directive.Text),
+            workspaceDirectives: (workspaceMeta.Directives ?? []).map((directive) => directive.Text),
+            customFiles: (project.CustomFiles ?? [])
+                .filter((file) => file.ListInAgents)
+                .map((file) => ({
+                    path: customFileRelativePath(file),
+                    label: file.Label,
+                    description: file.Description,
+                })),
+            repositoryFiles: this.buildRepositoryFileRows(repositories),
+            siblingWorkspaces: this.buildSiblingWorkspaceRows(project, workspaceId, workspaceMeta),
+            guiUrl: this.guiUrl(project.Id, workspaceId),
+            toolVersion: getToolVersion(),
+            toolRoot: getToolRoot(),
+            generatedAt: new Date().toISOString(),
+        };
+    }
+
     // -------------------------------------------------------------------------
     // Public API
     // -------------------------------------------------------------------------
@@ -212,33 +308,7 @@ export class WorkspaceArtifactsOrchestrator {
         // own folder has not been created yet.
         generateWorkspaceFile(workspaceId, repoPaths, this.wsFilePath(projectId, workspaceId));
 
-        const indexContext: WorkspaceIndexContext = {
-            projectsFolder: this.config.projectsFolder,
-            projectId,
-            projectName: project.Name,
-            projectDescription: project.Description,
-            workspaceId,
-            workspaceDescription: workspaceMeta.Description,
-            workspaceNotes: workspaceMeta.Notes ?? '',
-            repositories: repositories.map((repo) => ({
-                id: repo.Id,
-                name: repo.Name,
-                description: repo.Description ?? '',
-                url: repo.Url,
-            })),
-            customFiles: (project.CustomFiles ?? [])
-                .filter((file) => file.ListInAgents)
-                .map((file) => ({
-                    path: customFileRelativePath(file),
-                    label: file.Label,
-                    description: file.Description,
-                })),
-            repositoryFiles: this.buildRepositoryFileRows(repositories),
-            guiUrl: this.guiUrl(projectId, workspaceId),
-            toolVersion: getToolVersion(),
-            toolRoot: getToolRoot(),
-            generatedAt: new Date().toISOString(),
-        };
+        const indexContext = this.buildIndexContext(project, workspaceId, workspaceMeta, repositories);
 
         // No-op (no mkdir, no write) when the workspace folder does not yet
         // exist on disk — see the class-level doc comment.
@@ -298,6 +368,46 @@ export class WorkspaceArtifactsOrchestrator {
         for (const workspaceId of Object.keys(project.Workspaces)) {
             this.regenerateWorkspace(projectId, workspaceId);
         }
+    }
+
+    /**
+     * Index-only refresh of every workspace of `projectId`: rewrites
+     * `README.md` / `AGENTS.md` / `CLAUDE.md` and nothing else — no
+     * `.code-workspace`, no custom files, no repository-info sync.
+     *
+     * Each workspace is isolated in its own try/catch, so one failing
+     * workspace is reported in `failed` while the others are still
+     * refreshed. A workspace whose folder does not exist is a no-op
+     * (`writeWorkspaceIndexFiles()` skips it) and counts as refreshed.
+     *
+     * @throws {Error} Only if the project does not exist.
+     */
+    refreshProjectIndexes(projectId: string): ProjectIndexRefreshResult {
+        const project = this.projectManager.getById(projectId);
+        if (!project) {
+            throw new Error(
+                `Cannot refresh project indexes: project with ID "${projectId}" does not exist.`
+            );
+        }
+
+        const result: ProjectIndexRefreshResult = { refreshed: [], failed: [] };
+        for (const [workspaceId, workspaceMeta] of Object.entries(project.Workspaces)) {
+            try {
+                const repositories = project.Repositories
+                    .map((repoId) => this.repositoryManager.getById(repoId))
+                    .filter((repo): repo is NonNullable<typeof repo> => repo !== undefined);
+                writeWorkspaceIndexFiles(
+                    this.buildIndexContext(project, workspaceId, workspaceMeta, repositories),
+                );
+                result.refreshed.push(workspaceId);
+            } catch (error) {
+                result.failed.push({
+                    workspaceId,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
+        }
+        return result;
     }
 
     /**

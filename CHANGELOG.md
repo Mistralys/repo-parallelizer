@@ -1,5 +1,55 @@
 # Changelog
 
+## v1.7.0 - **WIP; UNRELEASED**
+
+**Text typed into table cells can no longer forge the generated-section markers in workspace files.**
+GUI regeneration also now includes the Repository Files section, so it matches the CLI. The generated
+workspace AGENTS.md gives agents clearer directions on checking git state and on which instruction
+files to read for each repository, and now lists the project's other workspaces so agents can find them.
+That list now stays current when workspaces are created, renamed, or deleted. It also lists the
+owner-defined directive rules and shows an optional role for each repository. Directives can be
+managed from the command line or the GUI, and repository roles from the command line or the GUI.
+
+- Security: Table cell text can no longer forge generated markers; line breaks are collapsed.
+- Workspaces: AGENTS.md Agent Directives now list project and workspace rules, project rules first.
+- Workspaces: Directive rule text is shown as a single line and cannot forge generated markers.
+- Workspaces: README and AGENTS Repositories table gained an optional Role / relations column.
+- REST: Added project and workspace directive endpoints and a repository role endpoint, each refreshing generated files.
+- CLI: AGENTS.md CLI section now hints at the directives and repo-roles list commands when in use.
+- CLI: Added `paralizer directives` to list, add, update, and delete project and workspace directives.
+- GUI: Added a Directives tab on the project page to add, edit, and delete project directives.
+- GUI: Workspace page gained a Workspace directives section to add, edit, and delete directives.
+- CLI: Added `paralizer repo-roles` to list, set, and clear per-project repository roles.
+- GUI: Project repository table gained a click-to-edit Role / relations column; saves on blur or Enter, empty clears.
+- CLI: Repository role changes refresh generated workspace files; a failed refresh exits with code 2.
+- CLI: `paralizer help` now lists the repo-roles command.
+- CLI: Added `paralizer regenerate [<project-id>] [--workspace <ID>]`, refreshing generated workspace files without changing stored data.
+- Workspaces: Fixed GUI regeneration omitting the Repository Files section; it now matches the CLI.
+- Workspaces: AGENTS.md now has a Workspaces table of sibling workspaces with folder, path, and GUI link.
+- Workspaces: The Workspaces table lists STABLE first, marks the current one, and is skipped for a single workspace.
+- Workspaces: Sibling workspaces' Workspaces table now refreshes after create, rename, or delete.
+- Workspaces: A failed sibling refresh is logged as a warning and never affects the operation.
+- Workspaces: AGENTS.md now guides agents to check git state with read-only git commands.
+- Workspaces: AGENTS.md now lists each repository's instruction files to read, in table order.
+- Workspaces: AGENTS.md directives are now scoped to the generated overview and apply to every repository.
+- Workspaces: AGENTS.md now always mentions the `.workspace/` folder and names README, AGENTS, and CLAUDE.
+- Workspaces: Custom Files and Repository Files sections in AGENTS.md gained a clarifying intro.
+- CLI: AGENTS.md CLI section now shows the custom-files and repo-files list commands.
+- Tests: Added coverage for the `repo-roles` command and its help listing.
+- Tests: Added coverage for the repository role cell and the `setRepositoryRole` API client.
+- Tests: Added coverage for the directives API client, list editor, and project and workspace Directives UI.
+- Tests: Added workspace-index fixture contexts and a golden-baseline capture script (`capture-golden`).
+- Tests: Added coverage for the Workspaces section, including ordering, renames, and unchanged README.
+- Tests: Added coverage for Repository Files rendering and for GUI/CLI regeneration parity.
+- Tests: Added coverage for marker neutralisation and for single-line text handling.
+- Tests: Added coverage for keeping hand-written text outside markers on regeneration.
+- Tests: Added coverage for the `regenerate` command and for `paralizer help` output.
+- Tests: Replaced the AGENTS golden baseline with a README golden test and coverage for the new text.
+- Tests: Added coverage for directive rules, the role column, CLI hints, and a post-change golden test.
+- Tests: Added coverage for the directive and repository role REST endpoints.
+- Tests: Added coverage for the `directives` command and for ID-prefix resolution without a path.
+- Tests: Added coverage for sibling workspace refresh on create, rename, and delete.
+
 ## v1.6.0 - Workspace Info & Custom Files
 
 **Projects can now define custom files that are written into every workspace.**
